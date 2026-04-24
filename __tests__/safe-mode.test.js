@@ -28,7 +28,7 @@ test('rechaza el uso del excel legado como dependencia de entrada', () => {
 });
 
 test('valida que el organizador responda para el mismo archivo suministrado', () => {
-  const input = path.join(ROOT_DIR, 'AUDITORIA VIVA.xlsx');
+  const input = path.join(ROOT_DIR, 'entrada-prueba.xlsx');
   assert.throws(
     () =>
       validateOrganizerConsistency(
@@ -61,14 +61,14 @@ test('activa modo seguro para datasets no especializados y con estructura limita
 });
 
 test('rechaza rutas de datos no autorizadas distintas al archivo actual', () => {
-  const context = createProcessingContext(path.join(ROOT_DIR, 'AUDITORIA VIVA.xlsx'), ROOT_DIR);
+  const context = createProcessingContext(path.join(ROOT_DIR, 'entrada-prueba.xlsx'), ROOT_DIR);
 
   assert.throws(
     () =>
       assertNoUnauthorizedDataDependencies(context, [
         context.inputFile,
         path.join(ROOT_DIR, 'organizer.py'),
-        path.join(ROOT_DIR, 'Muestra final 14 oct 2025 (Autoguardado).xlsx'),
+        path.join(ROOT_DIR, 'origen-no-autorizado.xlsx'),
       ]),
     /dependencia no autorizada detectada durante la generación/i
   );

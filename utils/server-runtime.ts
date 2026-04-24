@@ -1,14 +1,13 @@
 import { execFile } from 'child_process';
 import fs from 'fs/promises';
-import path from 'path';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 const RUNTIME_STATUS_TTL_MS = 30 * 1000;
 
-export const PROJECT_ROOT = /* turbopackIgnore: true */ process.cwd();
-export const ORGANIZER_SCRIPT_PATH = path.join(PROJECT_ROOT, 'organizer.py');
-export const GENERATOR_SCRIPT_PATH = path.join(PROJECT_ROOT, 'generate_excel_org_presentation.js');
+export const ORGANIZER_SCRIPT_NAME = 'organizer.py';
+export const GENERATOR_SCRIPT_NAME = 'generate_template_presentation.py';
+export const TEMPLATE_PRESENTATION_NAME = 'Plantilla_Presentacion_Socya (1) (1).pptx';
 
 export interface RuntimeDependencyStatus {
   ok: boolean;
@@ -21,6 +20,7 @@ export interface RuntimeDependencyStatus {
   scripts: {
     organizer: boolean;
     generator: boolean;
+    template: boolean;
   };
 }
 
@@ -33,7 +33,7 @@ function nowIso(): string {
 
 async function fileExists(filePath: string): Promise<boolean> {
   try {
-    await fs.access(filePath);
+    await fs.access(/* turbopackIgnore: true */ filePath);
     return true;
   } catch {
     return false;
@@ -43,7 +43,6 @@ async function fileExists(filePath: string): Promise<boolean> {
 async function detectPython(): Promise<RuntimeDependencyStatus['python']> {
   try {
     const result = await execFileAsync('python', ['--version'], {
-      cwd: PROJECT_ROOT,
       encoding: 'utf8',
       timeout: 10 * 1000,
       windowsHide: true,
@@ -70,10 +69,11 @@ export async function getRuntimeDependencyStatus(forceRefresh = false): Promise<
     return cachedRuntimeStatus;
   }
 
-  const [python, organizerExists, generatorExists] = await Promise.all([
+  const [python, organizerExists, generatorExists, templateExists] = await Promise.all([
     detectPython(),
-    fileExists(ORGANIZER_SCRIPT_PATH),
-    fileExists(GENERATOR_SCRIPT_PATH),
+    fileExists(ORGANIZER_SCRIPT_NAME),
+    fileExists(GENERATOR_SCRIPT_NAME),
+    fileExists(TEMPLATE_PRESENTATION_NAME),
   ]);
 
   const status: RuntimeDependencyStatus = {
@@ -83,6 +83,7 @@ export async function getRuntimeDependencyStatus(forceRefresh = false): Promise<
     scripts: {
       organizer: organizerExists,
       generator: generatorExists,
+      template: templateExists,
     },
   };
 
@@ -101,7 +102,11 @@ export function getRuntimeFailureMessage(status: RuntimeDependencyStatus): strin
   }
 
   if (!status.scripts.generator) {
-    return 'No se encontro el script generate_excel_org_presentation.js requerido por el backend.';
+    return 'No se encontro el script generate_template_presentation.py requerido por el backend.';
+  }
+
+  if (!status.scripts.template) {
+    return 'No se encontro la plantilla Plantilla_Presentacion_Socya (1) (1).pptx requerida por el backend.';
   }
 
   return 'El backend no tiene todas sus dependencias operativas disponibles.';

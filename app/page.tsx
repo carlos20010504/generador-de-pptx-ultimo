@@ -7,21 +7,18 @@ export const metadata = {
 };
 
 const FEATURES = [
-  { emoji: '🧠', label: 'Detección Universal', desc: 'Analiza cualquier Excel' },
-  { emoji: '🎨', label: '6 Temas Únicos', desc: 'Rotación automática' },
-  { emoji: '📊', label: 'Gráficos Inteligentes', desc: 'Donut, barras, líneas' },
-  { emoji: '🏅', label: 'Badges de Estado', desc: 'Colores semáforo WCAG' },
-  { emoji: '📐', label: 'Tablas Profesionales', desc: 'Ancho auto-calculado' },
-  { emoji: '🔄', label: 'Paginación Automática', desc: 'Sin desbordamiento' },
+  { emoji: '1', label: 'Organiza', desc: 'Prepara el Excel' },
+  { emoji: '2', label: 'Genera', desc: 'Crea el PowerPoint' },
+  { emoji: '✨', label: 'Flujo guiado', desc: 'Menos fricción' },
 ];
 
 export default function Home() {
   return (
     <main style={{
-      minHeight: '100vh',
+      minHeight: '100dvh',
       background: '#060D18',
       display: 'flex', flexDirection: 'column', alignItems: 'center',
-      padding: '2rem 1rem 1.5rem',
+      padding: '1rem 1rem 0.8rem',
       fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
       position: 'relative', overflow: 'hidden',
     }}>
@@ -69,7 +66,7 @@ export default function Home() {
       <div
         style={{
           display: 'flex', alignItems: 'center', gap: '0.75rem',
-          marginBottom: '1.75rem', zIndex: 10,
+          marginBottom: '0.85rem', zIndex: 10,
         }}
         className="animate-fade-in-up"
       >
@@ -101,14 +98,29 @@ export default function Home() {
       {/* ── Headline ── */}
       <header
         style={{
-          textAlign: 'center', marginBottom: '2rem',
-          zIndex: 10, maxWidth: '680px',
+          textAlign: 'center', marginBottom: '0.7rem',
+          zIndex: 10, maxWidth: '640px',
         }}
         className="animate-fade-in-up stagger-1"
       >
+        <div style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '0.45rem',
+          padding: '0.45rem 0.8rem',
+          borderRadius: '999px',
+          background: 'rgba(74,222,128,0.08)',
+          border: '1px solid rgba(74,222,128,0.16)',
+          color: '#86EFAC',
+          fontSize: '0.7rem',
+          fontWeight: 800,
+          marginBottom: '0.65rem',
+        }}>
+          Flujo recomendado: organizar Excel y luego generar PPTX
+        </div>
         <h1 style={{
-          fontSize: 'clamp(1.7rem, 4vw, 2.6rem)', fontWeight: 900,
-          color: 'white', margin: '0 0 0.7rem',
+          fontSize: 'clamp(1.5rem, 3vw, 2.2rem)', fontWeight: 900,
+          color: 'white', margin: '0 0 0.45rem',
           letterSpacing: '-0.035em', lineHeight: 1.12,
         }}>
           De{' '}
@@ -123,18 +135,18 @@ export default function Home() {
           {' '}inteligente
         </h1>
         <p style={{
-          color: 'rgba(255,255,255,0.42)', fontSize: '0.92rem',
-          lineHeight: 1.6, margin: 0,
+          color: 'rgba(255,255,255,0.40)', fontSize: '0.8rem',
+          lineHeight: 1.45, margin: 0,
         }}>
-          Sube <strong style={{ color: 'rgba(255,255,255,0.6)' }}>cualquier archivo Excel</strong> — el motor analiza
-          estructura, detecta tipos de datos y genera presentaciones con gráficos, tablas
-          y dashboards <strong style={{ color: 'rgba(255,255,255,0.6)' }}>automáticamente</strong>.
+          Un flujo simple para que sea claro qué hacer primero:
+          <strong style={{ color: 'rgba(255,255,255,0.68)' }}> organizar el Excel</strong> y luego
+          <strong style={{ color: 'rgba(255,255,255,0.68)' }}> generar el PowerPoint</strong>.
         </p>
       </header>
 
       {/* ── Uploader Component ── */}
       <div
-        style={{ width: '100%', maxWidth: '620px', zIndex: 10 }}
+        style={{ width: '100%', maxWidth: '760px', zIndex: 10 }}
         className="animate-fade-in-up stagger-2"
       >
         <ExcelUploader />
@@ -143,22 +155,23 @@ export default function Home() {
       {/* ── Feature Grid ── */}
       <div
         style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(3, auto)',
+          display: 'flex',
+          flexWrap: 'wrap',
+          justifyContent: 'center',
           gap: '0.5rem 0.6rem',
-          marginTop: '1.5rem', zIndex: 10,
-          maxWidth: '620px',
+          marginTop: '0.65rem', zIndex: 10,
+          maxWidth: '520px',
         }}
-        className="animate-fade-in-up stagger-4"
+        className="animate-fade-in-up stagger-3"
       >
         {FEATURES.map((f) => (
           <div
             key={f.label}
             style={{
               display: 'flex', alignItems: 'center', gap: '0.4rem',
-              padding: '0.4rem 0.7rem',
+              padding: '0.32rem 0.58rem',
               background: 'rgba(255,255,255,0.03)',
-              borderRadius: '10px',
+              borderRadius: '999px',
               border: '1px solid rgba(255,255,255,0.06)',
               transition: 'all 0.2s',
             }}
@@ -167,44 +180,14 @@ export default function Home() {
             <div>
               <p style={{
                 color: 'rgba(255,255,255,0.55)', fontWeight: 700,
-                fontSize: '0.7rem', margin: 0, lineHeight: 1.3,
+                fontSize: '0.67rem', margin: 0, lineHeight: 1.2,
               }}>
                 {f.label}
-              </p>
-              <p style={{
-                color: 'rgba(255,255,255,0.22)', fontSize: '0.62rem',
-                margin: 0, lineHeight: 1.2,
-              }}>
-                {f.desc}
               </p>
             </div>
           </div>
         ))}
       </div>
-
-      {/* ── Footer ── */}
-      <footer
-        style={{
-          marginTop: '1.75rem', zIndex: 10,
-          display: 'flex', alignItems: 'center', gap: '0.5rem',
-        }}
-        className="animate-fade-in stagger-5"
-      >
-        <div style={{
-          height: '1px', width: '50px',
-          background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.12))',
-        }} />
-        <p style={{
-          color: 'rgba(255,255,255,0.15)', fontSize: '0.7rem',
-          letterSpacing: '0.03em',
-        }}>
-          © {new Date().getFullYear()} Socya — Uso Interno
-        </p>
-        <div style={{
-          height: '1px', width: '50px',
-          background: 'linear-gradient(90deg, rgba(255,255,255,0.12), transparent)',
-        }} />
-      </footer>
     </main>
   );
 }

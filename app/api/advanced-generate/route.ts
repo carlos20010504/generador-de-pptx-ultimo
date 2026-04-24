@@ -5,7 +5,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { MAX_EXCEL_UPLOAD_BYTES, getMaxExcelUploadSizeMb, validateExcelUpload } from '@/utils/excel-file';
-import { ORGANIZER_SCRIPT_PATH, PROJECT_ROOT, getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
+import { ORGANIZER_SCRIPT_NAME, getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
 
 const execFileAsync = promisify(execFile);
 
@@ -19,16 +19,25 @@ type TableData = {
   progress?: number[];
 };
 type ChartData = {
+  tipo?: string;
+  titulo?: string;
   labels?: unknown[];
   valores?: number[];
+  colores?: string[];
 };
 type TopSolicitantesData = {
   labels?: unknown[];
   valores?: number[];
   conteos?: unknown[];
 };
+type KPIAutoData = {
+  label: string;
+  value: string;
+  importancia?: number;
+};
 type PandasData = {
   error?: unknown;
+  es_comisiones?: boolean;
   metadatos?: {
     archivo?: string;
     hojas_encontradas?: unknown[];
@@ -40,7 +49,19 @@ type PandasData = {
     unique_ciudades?: number;
     unique_centros?: number;
     promedio_comision?: number;
+    valor_max_comision?: number;
   };
+  resumen_generico?: {
+    hoja_principal?: string;
+    total_filas?: number;
+    total_columnas?: number;
+    columnas_numericas?: unknown[];
+    columnas?: unknown[];
+  };
+  kpis_automaticos?: KPIAutoData[];
+  graficas_automaticas?: ChartData[];
+  conclusiones?: string[];
+  presupuesto_slides?: Record<string, number>;
   grafica_valores?: ChartData;
   grafica_estados?: ChartData;
   grafica_ciudades?: ChartData;
@@ -51,22 +72,21 @@ type PandasData = {
   distribucion_mes?: TableData;
   otras_tablas?: Record<string, TableData>;
   genericas?: Record<string, TableData>;
-  resumen_generico?: {
-    hoja_principal?: string;
-    total_filas?: number;
-    total_columnas?: number;
-    columnas_numericas?: unknown[];
-    columnas?: unknown[];
-  };
 };
 
+// ── HARD LIMITS ─────────────────────────────────────────────────────────────
+const MAX_SLIDES = 25;
+const ROWS_PER_TABLE_SLIDE = 12;
 const MAX_MULTIPART_SIZE_BYTES = MAX_EXCEL_UPLOAD_BYTES + 1024 * 1024;
 const PYTHON_TIMEOUT_MS = 90 * 1000;
 
+// ── HELPERS ─────────────────────────────────────────────────────────────────
+
 function formatCOP(val?: number): string {
   const safeValue = Number(val ?? 0);
-  if (safeValue >= 1000000) return '$' + (safeValue / 1000000).toFixed(1) + 'M';
-  if (safeValue >= 1000) return '$' + (safeValue / 1000).toFixed(0) + 'K';
+  if (safeValue >= 1_000_000_000) return '$' + (safeValue / 1_000_000_000).toFixed(1) + 'B';
+  if (safeValue >= 1_000_000) return '$' + (safeValue / 1_000_000).toFixed(1) + 'M';
+  if (safeValue >= 1_000) return '$' + (safeValue / 1_000).toFixed(0) + 'K';
   return '$' + safeValue.toFixed(0);
 }
 
@@ -93,36 +113,55 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function isSpecializedCommissionsDataset(pandasData: PandasData): boolean {
-  const headers = pandasData?.muestra_tabla?.encabezados ?? [];
-  const normalized = headers.map((header) =>
-    String(header).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase()
-  );
-
-  return normalized.includes('solicitante') && normalized.some((header) => header.includes('valor total'));
+/** Validates that a chart dataset has real data (non-zero values). */
+function hasValidChartData(chart: ChartData | undefined): boolean {
+  if (!chart?.labels?.length || !chart?.valores?.length) return false;
+  return chart.valores.some((v) => typeof v === 'number' && v > 0);
 }
+
+/** Validates that a table has real, non-empty data. */
+function hasValidTableData(table: TableData | undefined): boolean {
+  if (!table?.encabezados?.length || !table?.filas?.length) return false;
+  // Check that at least one row has substantive data
+  return table.filas.some((row) =>
+    row.some((cell) => {
+      const s = String(cell ?? '').trim();
+      return s !== '' && s !== '—' && s !== '0' && s !== 'nan' && s !== 'None';
+    })
+  );
+}
+
+function isSpecializedCommissionsDataset(pandasData: PandasData): boolean {
+  return pandasData.es_comisiones === true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SLIDE BUILDER — GENERIC PATH (ANY Excel)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
   const slides: SlidePayload[] = [];
   const fileLabel = String(pandasData.metadatos?.archivo || 'Archivo Excel');
   const mainSheetName = String(pandasData.resumen_generico?.hoja_principal || pandasData.metadatos?.hojas_encontradas?.[0] || 'Hoja principal');
 
+  // 1. PORTADA
   slides.push({
     type: 'title',
-    title: 'Reporte Ejecutivo del Archivo',
-    subtitle: `Generado a partir de: ${fileLabel}`,
+    title: 'Reporte Ejecutivo',
+    subtitle: `Análisis inteligente: ${fileLabel}`,
   });
 
-  if (pandasData.metadatos?.hojas_encontradas?.length) {
+  // 2. RESUMEN KPIs — Automáticos
+  if (pandasData.kpis_automaticos?.length) {
     slides.push({
-      type: 'text_bullets',
-      title: 'Estructura Detectada',
-      subtitle: 'Hojas identificadas durante la organización del Excel',
-      content: pandasData.metadatos.hojas_encontradas.map((sheet) => `Hoja detectada: ${String(sheet)}`),
+      type: 'kpi_row',
+      title: 'Indicadores Clave Detectados',
+      content: pandasData.kpis_automaticos.map((kpi) => ({
+        label: kpi.label,
+        value: kpi.value,
+      })),
     });
-  }
-
-  if (pandasData.resumen_generico) {
+  } else if (pandasData.resumen_generico) {
     slides.push({
       type: 'kpi_row',
       title: 'Resumen del Archivo',
@@ -135,78 +174,392 @@ function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
     });
   }
 
-  if (pandasData.muestra_tabla) {
-    slides.push({
-      type: 'table',
-      title: `Vista principal: ${mainSheetName}`,
-      subtitle: `Datos organizados desde la hoja ${mainSheetName}`,
-      content: {
-        headers: (pandasData.muestra_tabla.encabezados ?? []).slice(0, 6),
-        rows: (pandasData.muestra_tabla.filas ?? []).slice(0, 12).map((row) => row.slice(0, 6)),
-      },
-    });
+  // 3. GRÁFICAS AUTOMÁTICAS
+  const autoCharts = pandasData.graficas_automaticas ?? [];
+  for (const chart of autoCharts.slice(0, 3)) {
+    if (hasValidChartData(chart)) {
+      slides.push({
+        type: 'chart',
+        title: chart.titulo || 'Análisis Visual',
+        content: {
+          name: chart.titulo || 'Dato',
+          labels: chart.labels,
+          values: chart.valores,
+          barDir: chart.tipo === 'pie' ? undefined : 'col',
+        },
+      });
+    }
   }
 
-  Object.entries(pandasData.otras_tablas ?? {})
-    .slice(0, 3)
-    .forEach(([name, table]) => {
+  // 4. TABLA PRINCIPAL
+  if (hasValidTableData(pandasData.muestra_tabla)) {
+    const allRows = pandasData.muestra_tabla!.filas!;
+    const headers = pandasData.muestra_tabla!.encabezados!;
+    const maxPages = Math.min(Math.ceil(allRows.length / ROWS_PER_TABLE_SLIDE), 2);
+
+    for (let page = 0; page < maxPages && slides.length < MAX_SLIDES - 3; page++) {
+      const startRow = page * ROWS_PER_TABLE_SLIDE;
+      const endRow = Math.min(startRow + ROWS_PER_TABLE_SLIDE, allRows.length);
+      const pageRows = allRows.slice(startRow, endRow);
+      const pageLabel = maxPages > 1 ? ` (${page + 1}/${maxPages})` : '';
+
+      slides.push({
+        type: 'table',
+        title: `Vista principal: ${mainSheetName}${pageLabel}`,
+        subtitle: `Registros ${startRow + 1} - ${endRow} de ${allRows.length}`,
+        content: {
+          headers: headers.slice(0, 7),
+          rows: pageRows.map((row) => row.slice(0, 7)),
+        },
+      });
+    }
+  }
+
+  // 5. OTRAS TABLAS (Hallazgos, Oportunidades de Mejora, etc.)
+  for (const [name, table] of Object.entries(pandasData.otras_tablas ?? {}).slice(0, 3)) {
+    if (slides.length >= MAX_SLIDES - 2) break;
+    if (hasValidTableData(table)) {
       slides.push({
         type: 'table',
         title: String(name),
-        subtitle: `Tabla organizada desde la hoja ${name}`,
+        subtitle: `Datos extraídos de la hoja "${name}"`,
         content: {
-          headers: (table.encabezados ?? []).slice(0, 5),
-          rows: (table.filas ?? []).slice(0, 10).map((row) => row.slice(0, 5)),
+          headers: (table.encabezados ?? []).slice(0, 6),
+          rows: (table.filas ?? []).slice(0, ROWS_PER_TABLE_SLIDE).map((row) => row.slice(0, 6)),
         },
       });
-    });
+    }
+  }
 
-  Object.entries(pandasData.genericas ?? {})
-    .slice(0, 3)
-    .forEach(([name, table]) => {
+  // 6. HOJAS GENÉRICAS
+  for (const [name, table] of Object.entries(pandasData.genericas ?? {}).slice(0, 3)) {
+    if (slides.length >= MAX_SLIDES - 2) break;
+    if (hasValidTableData(table)) {
       slides.push({
         type: 'table',
         title: String(name),
-        subtitle: `Detalle adicional de la hoja ${name}`,
+        subtitle: `Detalle adicional de la hoja "${name}"`,
         content: {
-          headers: (table.encabezados ?? []).slice(0, 5),
-          rows: (table.filas ?? []).slice(0, 10).map((row) => row.slice(0, 5)),
+          headers: (table.encabezados ?? []).slice(0, 6),
+          rows: (table.filas ?? []).slice(0, ROWS_PER_TABLE_SLIDE).map((row) => row.slice(0, 6)),
         },
       });
-    });
+    }
+  }
 
-  if (pandasData.coso) {
+  // 7. COSO
+  if (slides.length < MAX_SLIDES - 2 && hasValidTableData(pandasData.coso)) {
     slides.push({
       type: 'table',
       title: 'Evaluación COSO',
       subtitle: 'Control interno detectado en el archivo',
       content: {
-        headers: (pandasData.coso.encabezados ?? []).slice(0, 5),
-        rows: (pandasData.coso.filas ?? []).slice(0, 10).map((row) => row.slice(0, 5)),
+        headers: (pandasData.coso!.encabezados ?? []).slice(0, 5),
+        rows: (pandasData.coso!.filas ?? []).slice(0, 10).map((row) => row.slice(0, 5)),
       },
     });
   }
 
-  if (pandasData.distribucion_mes) {
+  // 8. CONCLUSIONES
+  if (slides.length < MAX_SLIDES - 1 && pandasData.conclusiones?.length) {
     slides.push({
-      type: 'table',
-      title: 'Distribución Complementaria',
-      subtitle: 'Resumen adicional identificado por el organizador',
-      content: {
-        headers: (pandasData.distribucion_mes.encabezados ?? []).slice(0, 4),
-        rows: (pandasData.distribucion_mes.filas ?? []).slice(0, 10).map((row) => row.slice(0, 4)),
-      },
+      type: 'text_bullets',
+      title: 'Conclusiones del Análisis',
+      subtitle: 'Hallazgos identificados automáticamente a partir de los datos',
+      content: pandasData.conclusiones.slice(0, 8),
     });
   }
 
+  // 9. CIERRE
   slides.push({
     type: 'closing',
     title: 'Fin del Reporte',
     subtitle: 'La presentación se estructuró con base en las hojas organizadas del Excel.',
   });
 
-  return slides;
+  // ENFORCE: never exceed MAX_SLIDES
+  return slides.slice(0, MAX_SLIDES);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SLIDE BUILDER — COMMISSIONS PATH (Specialized)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function buildCommissionSlides(pandasData: PandasData): SlidePayload[] {
+  const slides: SlidePayload[] = [];
+
+  // Helper: only push if we have room
+  function pushSlide(slide: SlidePayload): boolean {
+    if (slides.length >= MAX_SLIDES - 1) return false; // reserve 1 for closing
+    slides.push(slide);
+    return true;
+  }
+
+  // ── 1. PORTADA ───────────────────────────────────────────────────────────
+  pushSlide({
+    type: 'title',
+    title: 'Reporte de Auditoría de Comisiones',
+    subtitle: `Análisis integral: ${pandasData.metadatos?.archivo || 'Archivo Excel'}`,
+  });
+
+  // ── 2. ESTRUCTURA DEL ARCHIVO ────────────────────────────────────────────
+  const budget = pandasData.presupuesto_slides ?? {};
+  if (budget.estructura && pandasData.metadatos?.hojas_encontradas?.length) {
+    pushSlide({
+      type: 'text_bullets',
+      title: 'Estructura del Archivo Detectada',
+      subtitle: 'Hojas procesadas para la generación del reporte',
+      content: pandasData.metadatos.hojas_encontradas.map((h) => `Hoja: ${String(h)}`),
+    });
+  }
+
+  // ── 3. RESUMEN EJECUTIVO — KPIs globales ─────────────────────────────────
+  if (pandasData.resumen_ejecutivo) {
+    const r = pandasData.resumen_ejecutivo;
+    pushSlide({
+      type: 'kpi_row',
+      title: 'Resumen Ejecutivo',
+      content: [
+        { label: 'Total Comisiones', value: String(r.total_comisiones) },
+        { label: 'Valor Total', value: formatCOP(r.valor_total) },
+        { label: 'Solicitantes', value: String(r.unique_solicitantes) },
+        { label: 'Ciudades Destino', value: String(r.unique_ciudades) },
+        { label: 'Centros de Costos', value: String(r.unique_centros) },
+      ],
+    });
+  }
+
+  // ── 4. DESGLOSE FINANCIERO ────────────────────────────────────────────────
+  if (hasValidChartData(pandasData.grafica_valores)) {
+    const kpis = (pandasData.grafica_valores!.labels ?? []).map((lbl, idx: number) => {
+      const val = pandasData.grafica_valores?.valores?.[idx];
+      return { label: String(lbl), value: formatCOP(val) };
+    });
+    if (pandasData.resumen_ejecutivo) {
+      kpis.push({
+        label: 'Promedio/Comisión',
+        value: formatCOP(pandasData.resumen_ejecutivo.promedio_comision),
+      });
+    }
+    pushSlide({
+      type: 'kpi_row',
+      title: 'Desglose Financiero por Tipo de Gasto',
+      content: kpis.slice(0, 5),
+    });
+  }
+
+  // ── 5. GRÁFICA DISTRIBUCIÓN POR ESTADO ────────────────────────────────────
+  if (hasValidChartData(pandasData.grafica_estados)) {
+    pushSlide({
+      type: 'chart',
+      title: 'Distribución de Comisiones por Estado',
+      content: {
+        name: 'Estados',
+        labels: pandasData.grafica_estados!.labels,
+        values: pandasData.grafica_estados!.valores,
+        barDir: 'bar',
+      },
+    });
+  }
+
+  // ── 6. TOP CIUDADES ───────────────────────────────────────────────────────
+  if (hasValidChartData(pandasData.grafica_ciudades)) {
+    pushSlide({
+      type: 'chart',
+      title: 'Top Ciudades de Destino',
+      content: {
+        name: 'Comisiones',
+        labels: pandasData.grafica_ciudades!.labels,
+        values: pandasData.grafica_ciudades!.valores,
+        barDir: 'col',
+      },
+    });
+  }
+
+  // ── 7. TOP SOLICITANTES ───────────────────────────────────────────────────
+  if (pandasData.top_solicitantes) {
+    const ts = pandasData.top_solicitantes;
+    const topKpis = (ts.labels ?? []).slice(0, 5).map((name, idx: number) => ({
+      label: String(name),
+      value: formatCOP(ts.valores?.[idx] ?? 0),
+      subtitle: `${String(ts.conteos?.[idx] ?? 0)} comisiones`,
+    }));
+    if (topKpis.length > 0) {
+      pushSlide({
+        type: 'kpi_row',
+        title: 'Top 5 Solicitantes por Valor',
+        content: topKpis,
+      });
+    }
+  }
+
+  // ── 8. CENTROS DE COSTOS ──────────────────────────────────────────────────
+  if (hasValidChartData(pandasData.centros_costos)) {
+    pushSlide({
+      type: 'chart',
+      title: 'Distribución por Centro de Costos (COP)',
+      content: {
+        name: 'Valor COP',
+        labels: pandasData.centros_costos!.labels,
+        values: pandasData.centros_costos!.valores,
+        barDir: 'bar',
+      },
+    });
+  }
+
+  // ── 9. TABLA PRINCIPAL — PAGINADA ─────────────────────────────────────────
+  if (hasValidTableData(pandasData.muestra_tabla)) {
+    const allRows = pandasData.muestra_tabla!.filas!;
+    const headers = pandasData.muestra_tabla!.encabezados!;
+    const maxPages = Math.min(
+      Math.ceil(allRows.length / ROWS_PER_TABLE_SLIDE),
+      budget.tabla_principal || 2
+    );
+
+    for (let page = 0; page < maxPages; page++) {
+      if (slides.length >= MAX_SLIDES - 3) break; // reserve room for closing + conclusions + hallazgos
+      const startRow = page * ROWS_PER_TABLE_SLIDE;
+      const endRow = Math.min(startRow + ROWS_PER_TABLE_SLIDE, allRows.length);
+      const pageRows = allRows.slice(startRow, endRow);
+      const pageLabel = maxPages > 1 ? ` (${page + 1}/${maxPages})` : '';
+
+      pushSlide({
+        type: 'table',
+        title: `Muestra de Comisiones${pageLabel}`,
+        subtitle: `Registros ${startRow + 1} - ${endRow} de ${allRows.length}`,
+        content: {
+          headers: headers,
+          rows: pageRows,
+        },
+      });
+    }
+  }
+
+  // ── 10. COSO ──────────────────────────────────────────────────────────────
+  if (hasValidTableData(pandasData.coso)) {
+    pushSlide({
+      type: 'table',
+      title: 'Evaluación COSO - Control Interno',
+      content: {
+        headers: pandasData.coso!.encabezados ?? [],
+        rows: (pandasData.coso!.filas ?? []).slice(0, ROWS_PER_TABLE_SLIDE),
+      },
+    });
+  }
+
+  // ── 11. HALLAZGOS Y OPORTUNIDADES DE MEJORA ───────────────────────────────
+  if (pandasData.otras_tablas) {
+    for (const [key, obj] of Object.entries(pandasData.otras_tablas)) {
+      if (slides.length >= MAX_SLIDES - 2) break;
+      const tableName = key.trim();
+      const isHallazgo = tableName.toLowerCase().includes('hallazgo');
+      const isOpoMejora = tableName.toLowerCase().includes('opo') || tableName.toLowerCase().includes('mejora') || tableName.toLowerCase().includes('oportunidad');
+
+      if (isHallazgo && hasValidTableData(obj)) {
+        const displayHeaders = (obj.encabezados ?? []).slice(0, 5);
+        const displayRows = (obj.filas ?? []).slice(0, 10).map((row) => row.slice(0, 5));
+
+        pushSlide({
+          type: 'table',
+          title: 'Hallazgos de Auditoría',
+          content: { headers: displayHeaders, rows: displayRows },
+        });
+
+        // Resumen de hallazgos en bullets
+        if (slides.length < MAX_SLIDES - 2) {
+          const bulletItems = (obj.filas ?? [])
+            .map((row) => {
+              const hallazgo = String(row[0] || '').replace(/_x000d_\\n/g, ' ').substring(0, 120);
+              return hallazgo;
+            })
+            .filter((t: string) => t.length > 5 && t !== '—' && t !== 'ù');
+
+          if (bulletItems.length > 0) {
+            pushSlide({
+              type: 'text_bullets',
+              title: 'Resumen de Hallazgos Clave',
+              content: bulletItems.slice(0, 8),
+            });
+          }
+        }
+      }
+
+      if (isOpoMejora && hasValidTableData(obj)) {
+        const displayHeaders = (obj.encabezados ?? []).slice(0, 4);
+        const displayRows = (obj.filas ?? []).slice(0, ROWS_PER_TABLE_SLIDE).map((row) => row.slice(0, 4));
+
+        pushSlide({
+          type: 'table',
+          title: 'Oportunidades de Mejora',
+          content: { headers: displayHeaders, rows: displayRows },
+        });
+
+        // Progress KPIs
+        if (obj.progress && slides.length < MAX_SLIDES - 2) {
+          const totalItems = obj.progress.length;
+          const completed = obj.progress.filter((p: number) => p >= 1.0).length;
+          const inProgress = obj.progress.filter((p: number) => p > 0 && p < 1.0).length;
+          const pending = obj.progress.filter((p: number) => p === 0).length;
+          const avgProgress = obj.progress.reduce((a: number, b: number) => a + b, 0) / totalItems;
+
+          pushSlide({
+            type: 'kpi_row',
+            title: 'Estado de Oportunidades de Mejora',
+            content: [
+              { label: 'Total Ítems', value: String(totalItems) },
+              { label: 'Completados', value: String(completed) },
+              { label: 'En Ejecución', value: String(inProgress) },
+              { label: 'Pendientes', value: String(pending) },
+              { label: 'Avance Promedio', value: Math.round(avgProgress * 100) + '%' },
+            ],
+          });
+        }
+      }
+    }
+  }
+
+  // ── 12. HOJAS GENÉRICAS ───────────────────────────────────────────────────
+  if (pandasData.genericas) {
+    for (const [name, obj] of Object.entries(pandasData.genericas)) {
+      if (slides.length >= MAX_SLIDES - 2) break;
+      if (hasValidTableData(obj)) {
+        pushSlide({
+          type: 'table',
+          title: `Detalles: ${name}`,
+          subtitle: `Datos extraídos de la hoja "${name}"`,
+          content: {
+            headers: (obj.encabezados ?? []).slice(0, 6),
+            rows: (obj.filas ?? []).slice(0, ROWS_PER_TABLE_SLIDE).map((row) => row.slice(0, 6)),
+          },
+        });
+      }
+    }
+  }
+
+  // ── 13. CONCLUSIONES ──────────────────────────────────────────────────────
+  if (pandasData.conclusiones?.length && slides.length < MAX_SLIDES - 1) {
+    pushSlide({
+      type: 'text_bullets',
+      title: 'Conclusiones del Análisis',
+      subtitle: 'Hallazgos identificados automáticamente a partir de los datos reales',
+      content: pandasData.conclusiones.slice(0, 8),
+    });
+  }
+
+  // ── 14. CIERRE ────────────────────────────────────────────────────────────
+  slides.push({
+    type: 'closing',
+    title: 'Fin del Reporte',
+    subtitle: '¡Gracias por su atención!',
+  });
+
+  // HARD ENFORCE: never exceed MAX_SLIDES
+  return slides.slice(0, MAX_SLIDES);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// API HANDLER
+// ═══════════════════════════════════════════════════════════════════════════════
 
 export async function POST(req: NextRequest) {
   let tempDir = '';
@@ -241,14 +594,13 @@ export async function POST(req: NextRequest) {
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'socya-advanced-'));
+    tempDir = await fs.mkdtemp(path.join(/* turbopackIgnore: true */ os.tmpdir(), 'socya-advanced-'));
     filePath = path.join(tempDir, sanitizeUploadName(file.name));
 
-    await fs.writeFile(filePath, buffer);
+    await fs.writeFile(/* turbopackIgnore: true */ filePath, buffer);
 
     try {
-      const { stdout, stderr } = await execFileAsync('python', ['-X', 'utf8', ORGANIZER_SCRIPT_PATH, filePath], {
-        cwd: PROJECT_ROOT,
+      const { stdout, stderr } = await execFileAsync('python', ['-X', 'utf8', ORGANIZER_SCRIPT_NAME, filePath], {
         encoding: 'utf8',
         timeout: PYTHON_TIMEOUT_MS,
         maxBuffer: 20 * 1024 * 1024,
@@ -265,299 +617,13 @@ export async function POST(req: NextRequest) {
       if (pandasData?.error) {
         throw new Error(String(pandasData.error));
       }
-      if (!isSpecializedCommissionsDataset(pandasData)) {
-        return NextResponse.json(
-          { slides: buildGenericSlides(pandasData) },
-          {
-            headers: {
-              'Cache-Control': 'no-store',
-            },
-          }
-        );
-      }
 
-      const slides: SlidePayload[] = [];
-      const detailLink = 'https://storage.googleapis.com/socya-mock/data.xlsx';
+      // Determine which builder to use based on Python analysis
+      const slides = isSpecializedCommissionsDataset(pandasData)
+        ? buildCommissionSlides(pandasData)
+        : buildGenericSlides(pandasData);
 
-      // ============================================================
-      // 1. PORTADA
-      // ============================================================
-      slides.push({
-        type: 'title',
-        title: 'Reporte de Auditoría de Comisiones',
-        subtitle: `Análisis integral: ${pandasData.metadatos?.archivo || 'Archivo Excel'}`,
-      });
-
-      // ============================================================
-      // 1.5. INVENTARIO DE DATOS ENCONTRADOS
-      // ============================================================
-      if (pandasData.metadatos?.hojas_encontradas) {
-        slides.push({
-          type: 'text_bullets',
-          title: 'Estructura del Archivo Detectada',
-          subtitle: 'Hojas procesadas para la generación del reporte',
-          content: pandasData.metadatos.hojas_encontradas.map((h) => `Hoja detectada: ${String(h)}`)
-        });
-      }
-
-      // ============================================================
-      // 2. RESUMEN EJECUTIVO — KPIs globales
-      // ============================================================
-      if (pandasData.resumen_ejecutivo) {
-        const r = pandasData.resumen_ejecutivo;
-        slides.push({
-          type: 'kpi_row',
-          title: 'Resumen Ejecutivo',
-          content: [
-            { label: 'Total Comisiones', value: String(r.total_comisiones) },
-            { label: 'Valor Total', value: formatCOP(r.valor_total) },
-            { label: 'Solicitantes', value: String(r.unique_solicitantes) },
-            { label: 'Ciudades Destino', value: String(r.unique_ciudades) },
-            { label: 'Centros de Costos', value: String(r.unique_centros) },
-          ]
-        });
-      }
-
-      // ============================================================
-      // 3. RESUMEN FINANCIERO — Desglose por tipo de gasto  
-      // ============================================================
-      if (pandasData.grafica_valores) {
-        const kpis = (pandasData.grafica_valores.labels ?? []).map((lbl, idx: number) => {
-          const val = pandasData.grafica_valores?.valores?.[idx];
-          return { label: String(lbl), value: formatCOP(val) };
-        });
-        
-        // Add promedio if available
-        if (pandasData.resumen_ejecutivo) {
-          kpis.push({ 
-            label: 'Promedio/Comisión', 
-            value: formatCOP(pandasData.resumen_ejecutivo.promedio_comision) 
-          });
-        }
-        
-        slides.push({
-          type: 'kpi_row',
-          title: 'Desglose Financiero por Tipo de Gasto',
-          content: kpis.slice(0, 5)
-        });
-      }
-
-      // ============================================================
-      // 4. GRÁFICA DE DISTRIBUCIÓN POR ESTADO
-      // ============================================================
-      if (pandasData.grafica_estados) {
-        slides.push({
-          type: 'chart',
-          title: 'Distribución de Comisiones por Estado',
-          content: {
-            name: 'Estados',
-            labels: pandasData.grafica_estados.labels,
-            values: pandasData.grafica_estados.valores,
-            barDir: 'bar'
-          }
-        });
-      }
-
-      // ============================================================
-      // 5. GRÁFICA TOP CIUDADES DE DESTINO
-      // ============================================================
-      if (pandasData.grafica_ciudades) {
-        slides.push({
-          type: 'chart',
-          title: 'Top Ciudades de Destino',
-          content: {
-            name: 'Comisiones',
-            labels: pandasData.grafica_ciudades.labels,
-            values: pandasData.grafica_ciudades.valores,
-            barDir: 'col'
-          }
-        });
-      }
-
-      // ============================================================
-      // 6. TOP SOLICITANTES POR VALOR  
-      // ============================================================
-      if (pandasData.top_solicitantes) {
-        const ts = pandasData.top_solicitantes;
-        // Show as KPI cards for top 5
-        const topKpis = (ts.labels ?? []).slice(0, 5).map((name, idx: number) => ({
-          label: String(name),
-          value: formatCOP(ts.valores?.[idx] ?? 0),
-          subtitle: `${String(ts.conteos?.[idx] ?? 0)} comisiones`
-        }));
-        slides.push({
-          type: 'kpi_row',
-          title: 'Top 5 Solicitantes por Valor',
-          content: topKpis
-        });
-      }
-
-      // ============================================================
-      // 7. DISTRIBUCIÓN POR CENTRO DE COSTOS
-      // ============================================================
-      if (pandasData.centros_costos) {
-        slides.push({
-          type: 'chart',
-          title: 'Distribución por Centro de Costos (COP)',
-          content: {
-            name: 'Valor COP',
-            labels: pandasData.centros_costos.labels,
-            values: pandasData.centros_costos.valores,
-            barDir: 'bar'
-          }
-        });
-      }
-
-      // ============================================================
-      // 8-10. TABLAS DE DATOS PAGINADAS (Muestra Principal)
-      // ============================================================
-      if (pandasData.muestra_tabla) {
-        const allRows = pandasData.muestra_tabla.filas ?? [];
-        const headers = pandasData.muestra_tabla.encabezados ?? [];
-        const ROWS_PER_SLIDE = 12;
-        const maxPages = Math.min(Math.ceil(allRows.length / ROWS_PER_SLIDE), 3); // Max 3 pages
-        
-        for (let page = 0; page < maxPages; page++) {
-          const startRow = page * ROWS_PER_SLIDE;
-          const endRow = Math.min(startRow + ROWS_PER_SLIDE, allRows.length);
-          const pageRows = allRows.slice(startRow, endRow);
-          
-          const pageLabel = maxPages > 1 ? ` (${page + 1}/${maxPages})` : '';
-          slides.push({
-            type: 'table',
-            title: `Muestra de Comisiones${pageLabel}`,
-            subtitle: `Registros ${startRow + 1} - ${endRow} de ${allRows.length}`,
-            content: {
-              headers: headers,
-              rows: pageRows
-            },
-            detail_link: detailLink
-          });
-        }
-      }
-
-      // ============================================================
-      // 11. EVALUACIÓN COSO  
-      // ============================================================
-      if (pandasData.coso) {
-        slides.push({
-          type: 'table',
-          title: 'Evaluación COSO - Control Interno',
-          content: {
-            headers: pandasData.coso.encabezados ?? [],
-            rows: pandasData.coso.filas ?? []
-          }
-        });
-      }
-
-      // ============================================================
-      // 12. HALLAZGOS (tabla completa)
-      // ============================================================
-      if (pandasData.otras_tablas) {
-        // Process ALL tables, not just the first one
-        for (const [key, obj] of Object.entries(pandasData.otras_tablas)) {
-          const tableName = key.trim();
-          
-          // Determine if this is "Hallazgos" or "Oportunidades de Mejora"
-          const isHallazgo = tableName.toLowerCase().includes('hallazgo');
-          const isOpoMejora = tableName.toLowerCase().includes('opo') || tableName.toLowerCase().includes('mejora') || tableName.toLowerCase().includes('oportunidad');
-          
-          if (isHallazgo) {
-            // Hallazgos as a detailed table (show Hallazgo + Riesgo + Estado)
-            const displayHeaders = (obj.encabezados ?? []).slice(0, 5);
-            const displayRows = (obj.filas ?? []).slice(0, 10).map((row) => row.slice(0, 5));
-            
-            slides.push({
-              type: 'table',
-              title: 'Hallazgos de Auditoría',
-              content: {
-                headers: displayHeaders,
-                rows: displayRows
-              },
-              detail_link: detailLink
-            });
-            
-            // Also create bullet-point summary of key hallazgos
-            const bulletItems = (obj.filas ?? [])
-              .map((row) => {
-                const hallazgo = String(row[0] || '').replace(/_x000d_\\n/g, ' ').substring(0, 120);
-                return hallazgo;
-              })
-              .filter((t: string) => t.length > 5 && t !== '—' && t !== 'ù');
-
-            if (bulletItems.length > 0) {
-              slides.push({
-                type: 'text_bullets',
-                title: 'Resumen de Hallazgos Clave',
-                content: bulletItems.slice(0, 8)
-              });
-            }
-          }
-          
-          if (isOpoMejora) {
-            // Oportunidades de Mejora - show with progress info
-            const displayHeaders = (obj.encabezados ?? []).slice(0, 4);
-            const displayRows = (obj.filas ?? []).slice(0, 12).map((row) => row.slice(0, 4));
-            
-            slides.push({
-              type: 'table',
-              title: 'Oportunidades de Mejora',
-              content: {
-                headers: displayHeaders,
-                rows: displayRows
-              },
-              detail_link: detailLink
-            });
-            
-            // Create progress KPIs from Opo Mejora data
-            if (obj.progress) {
-              const totalItems = obj.progress.length;
-              const completed = obj.progress.filter((p: number) => p >= 1.0).length;
-              const inProgress = obj.progress.filter((p: number) => p > 0 && p < 1.0).length;
-              const pending = obj.progress.filter((p: number) => p === 0).length;
-              const avgProgress = obj.progress.reduce((a: number, b: number) => a + b, 0) / totalItems;
-              
-              slides.push({
-                type: 'kpi_row',
-                title: 'Estado de Oportunidades de Mejora',
-                content: [
-                  { label: 'Total Ítems', value: String(totalItems) },
-                  { label: 'Completados', value: String(completed) },
-                  { label: 'En Ejecución', value: String(inProgress) },
-                  { label: 'Pendientes', value: String(pending) },
-                  { label: 'Avance Promedio', value: Math.round(avgProgress * 100) + '%' },
-                ]
-              });
-            }
-          }
-        }
-      }
-
-      // ============================================================
-      // 13. HOJAS GENÉRICAS ADICIONALES
-      // ============================================================
-      if (pandasData.genericas) {
-        for (const [name, obj] of Object.entries(pandasData.genericas)) {
-          slides.push({
-            type: 'table',
-            title: `Detalles: ${name}`,
-            subtitle: `Datos extraídos de la hoja ${name}`,
-            content: {
-              headers: obj.encabezados ?? [],
-              rows: (obj.filas ?? []).slice(0, 12) // Limit to 12 rows per generic slide
-            }
-          });
-        }
-      }
-
-      // ============================================================
-      // CIERRE
-      // ============================================================
-      slides.push({
-        type: 'closing',
-        title: 'Fin del Reporte',
-        subtitle: '¡Gracias por su atención!'
-      });
+      console.log(`[advanced-generate] Generated ${slides.length}/${MAX_SLIDES} slides for: ${file.name}`);
 
       return NextResponse.json(
         { slides },
@@ -582,7 +648,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: getErrorMessage(error, 'Error interno del servidor.') }, { status: 500 });
   } finally {
     if (filePath) {
-      await fs.unlink(filePath).catch(() => {});
+      await fs.unlink(/* turbopackIgnore: true */ filePath).catch(() => {});
     }
     if (tempDir) {
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});

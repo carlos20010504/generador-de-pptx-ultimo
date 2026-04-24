@@ -5,13 +5,13 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { MAX_EXCEL_UPLOAD_BYTES, getMaxExcelUploadSizeMb, validateExcelUpload } from '@/utils/excel-file';
-import { GENERATOR_SCRIPT_PATH, PROJECT_ROOT, getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
+import { GENERATOR_SCRIPT_NAME, getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
 
 const execFileAsync = promisify(execFile);
 
 export const runtime = 'nodejs';
 
-type VisualMode = 'charts' | 'tables' | 'mixed';
+type VisualMode = 'charts' | 'tables' | 'mixed' | 'boardroom';
 type ExecFileError = Error & { code?: string; killed?: boolean; stderr?: string };
 
 const MAX_MULTIPART_SIZE_BYTES = MAX_EXCEL_UPLOAD_BYTES + 1024 * 1024;
@@ -19,7 +19,7 @@ const GENERATION_TIMEOUT_MS = 2 * 60 * 1000;
 
 function normalizeVisualMode(value: FormDataEntryValue | null): VisualMode {
   const raw = String(value ?? '').trim().toLowerCase();
-  if (raw === 'charts' || raw === 'tables') return raw;
+  if (raw === 'charts' || raw === 'tables' || raw === 'boardroom') return raw;
   return 'mixed';
 }
 
@@ -93,21 +93,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'socya-pptx-'));
+    tempDir = await fs.mkdtemp(path.join(/* turbopackIgnore: true */ os.tmpdir(), 'socya-pptx-'));
     inputPath = path.join(tempDir, sanitizeUploadName(file.name));
     outputPath = buildOutputPath(inputPath);
 
     const bytes = await file.arrayBuffer();
-    await fs.writeFile(inputPath, Buffer.from(bytes));
+    await fs.writeFile(/* turbopackIgnore: true */ inputPath, Buffer.from(bytes));
 
-    const { stderr } = await execFileAsync('node', [GENERATOR_SCRIPT_PATH, inputPath], {
-      cwd: PROJECT_ROOT,
+    const { stderr } = await execFileAsync('python', ['-X', 'utf8', GENERATOR_SCRIPT_NAME, inputPath, outputPath], {
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
       timeout: GENERATION_TIMEOUT_MS,
       windowsHide: true,
       env: {
         ...process.env,
+        PYTHONUTF8: '1',
         SOCYA_PRESENTATION_MODE: visualMode,
       },
     });
@@ -116,8 +116,8 @@ export async function POST(req: NextRequest) {
       console.warn('[generate-pptx] stderr:', stderr);
     }
 
-    await fs.access(outputPath);
-    const pptxBuffer = await fs.readFile(outputPath);
+    await fs.access(/* turbopackIgnore: true */ outputPath);
+    const pptxBuffer = await fs.readFile(/* turbopackIgnore: true */ outputPath);
     const downloadName = path.basename(outputPath);
 
     return new NextResponse(pptxBuffer, {
@@ -144,8 +144,8 @@ export async function POST(req: NextRequest) {
     );
   } finally {
     await Promise.all([
-      outputPath ? fs.unlink(outputPath).catch(() => {}) : Promise.resolve(),
-      inputPath ? fs.unlink(inputPath).catch(() => {}) : Promise.resolve(),
+      outputPath ? fs.unlink(/* turbopackIgnore: true */ outputPath).catch(() => {}) : Promise.resolve(),
+      inputPath ? fs.unlink(/* turbopackIgnore: true */ inputPath).catch(() => {}) : Promise.resolve(),
     ]);
 
     if (tempDir) {

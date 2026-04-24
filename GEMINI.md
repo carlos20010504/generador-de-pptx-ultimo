@@ -1,16 +1,16 @@
 # 🚀 Generador PPTX Socya - GEMINI.md
 
-Este proyecto es un sistema inteligente de generación de presentaciones de PowerPoint (`.pptx`) a partir de archivos Excel, diseñado para automatizar reportes de auditoría y comisiones con un enfoque en calidad visual, accesibilidad (WCAG) y procesamiento eficiente de datos.
+Este proyecto es un sistema inteligente de generación de presentaciones de PowerPoint (`.pptx`) a partir de archivos Excel, diseñado para automatizar reportes de auditoría y comisiones con un enfoque en calidad visual, fidelidad al dato y procesamiento eficiente.
 
 ## 📌 Visión General del Proyecto
 
-La arquitectura combina la potencia de **Python (Pandas)** para el análisis de datos masivos y **TypeScript (Next.js/PptxGenJS)** para la orquestación y el renderizado final de las diapositivas.
+La arquitectura combina **Python** para el análisis del Excel y la generación final del `.pptx`, junto con **TypeScript (Next.js)** para la experiencia web y la orquestación del flujo.
 
 ### 🛠 Tecnologías Principales
 - **Frontend:** Next.js 16 (App Router), React 19, TailwindCSS 4.
 - **Procesamiento de Datos:** Python 3 + Pandas (vía `organizer.py`).
-- **Generación PPTX:** `pptxgenjs` (vía `AdvancedPptxGenerator`).
-- **Parsing de Excel:** `xlsx` (SheetJS).
+- **Generación PPTX:** Python + `python-pptx` + `matplotlib` (vía `generate_template_presentation.py`).
+- **Validación de archivos:** `xlsx` en el frontend y backend.
 
 ## 🏗 Arquitectura del Sistema
 
@@ -20,8 +20,8 @@ La arquitectura combina la potencia de **Python (Pandas)** para el análisis de 
     *   Generar distribuciones (por estado, ciudad, centro de costos).
     *   Extraer tablas críticas (Hallazgos, COSO, Oportunidades de Mejora).
     *   Aplicar "Compresión Inteligente" (agrupa datos masivos en "Top 5 + Otros").
-3.  **Capa de Orquestación:** `app/api/advanced-generate/route.ts` recibe el JSON de Python y define la estructura de las diapositivas.
-4.  **Capa de Renderizado:** `AdvancedPptxGenerator` (en `utils/`) aplica temas corporativos, valida contrastes WCAG y genera el archivo final.
+3.  **Capa de Orquestación UI/API:** `app/api/advanced-generate/route.ts` prepara el Excel organizado y `app/api/generate-pptx/route.ts` dispara la generación final.
+4.  **Capa de Renderizado:** `generate_template_presentation.py` aplica la plantilla corporativa, genera gráficos/tablas y guarda el archivo final.
 
 ## 🚀 Comandos Clave
 
@@ -37,15 +37,15 @@ La arquitectura combina la potencia de **Python (Pandas)** para el análisis de 
 
 ## 🧠 Convenciones de Desarrollo
 
-- **Tipado Estricto:** Se prefiere el uso exhaustivo de TypeScript para interfaces de datos y reportes de optimización (`OptimizationReport`).
-- **WCAG 2.1:** Toda inyección de color debe validarse mediante `getContrastRatio` en el motor de generación para asegurar legibilidad.
-- **Sanitización:** Los strings inyectados en PPTX deben pasar por limpieza Regex (`replace(/[^\w\s-]/gi, '')`) para evitar corrupción del XML de PowerPoint.
-- **Paginación Inteligente:** Las tablas extensas deben paginarse automáticamente (máximo 12 filas por slide) o derivarse a un **Apéndice Interactivo** si exceden el límite de diapositivas (25 slides).
+- **Tipado Estricto:** La capa web usa TypeScript para validar entradas, tamaños y estados de UI.
+- **Fidelidad al Dato:** El flujo productivo siempre depende del Excel subido en la solicitud actual; no se permite fallback a archivos legados.
+- **Sanitización:** Los nombres de archivo y el texto serializado deben limpiarse para evitar errores en la generación y en la descarga.
+- **Paginación Inteligente:** Las tablas extensas se fragmentan y priorizan para conservar legibilidad en la plantilla final.
 
 ## 📂 Archivos Críticos
 
-- `app/api/advanced-generate/route.ts`: Punto de entrada de la lógica de negocio.
-- `utils/advanced-pptx-generator.ts`: El "motor" de renderizado PPTX.
+- `app/api/advanced-generate/route.ts`: Punto de entrada para organización guiada del Excel.
+- `app/api/generate-pptx/route.ts`: Punto de entrada para la generación final del PowerPoint.
 - `organizer.py`: El "cerebro" analítico en Python.
-- `utils/socya-renderer.ts`: Definiciones estéticas específicas para la marca Socya.
-- `README_ADVANCED_PPTX.md`: Documentación técnica detallada sobre el motor de scoring y troubleshooting.
+- `generate_template_presentation.py`: Motor principal de renderizado y composición del `.pptx`.
+- `components/ExcelUploader.tsx`: Flujo guiado de carga, organización y generación.

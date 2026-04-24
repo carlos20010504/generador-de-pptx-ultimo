@@ -90,6 +90,45 @@ body {
   50% { transform: translateY(-4px); }
 }
 
+@keyframes attention-glow {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+    box-shadow:
+      0 12px 30px rgba(37, 99, 235, 0.42),
+      0 0 0 1px rgba(147, 197, 253, 0.12) inset;
+  }
+  50% {
+    transform: translateY(-1px) scale(1.01);
+    box-shadow:
+      0 18px 38px rgba(59, 130, 246, 0.56),
+      0 0 0 1px rgba(191, 219, 254, 0.22) inset,
+      0 0 24px rgba(96, 165, 250, 0.22);
+  }
+}
+
+@keyframes step-arrival {
+  0% {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes step-focus {
+  0% {
+    box-shadow: 0 0 0 0 rgba(96, 165, 250, 0);
+  }
+  35% {
+    box-shadow: 0 0 0 6px rgba(96, 165, 250, 0.14);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(96, 165, 250, 0);
+  }
+}
+
 .animate-fade-in-up {
   animation: fadeInUp 0.5s ease-out both;
 }
@@ -104,6 +143,18 @@ body {
 
 .animate-slide-in-right {
   animation: slide-in-right 0.5s ease-out both;
+}
+
+.animate-attention-glow {
+  animation: attention-glow 2.4s ease-in-out infinite;
+}
+
+.animate-step-arrival {
+  animation: step-arrival 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-step-focus {
+  animation: step-focus 1.4s ease-out 1;
 }
 
 /* Stagger delays for children */

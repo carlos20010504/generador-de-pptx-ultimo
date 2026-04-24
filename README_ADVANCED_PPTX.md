@@ -1,18 +1,13 @@
 # 🚀 Sistema Inteligente de Generación de Presentaciones (PPTX AI)
 
 ## 📌 Arquitectura del Sistema
-El motor `AdvancedPptxGenerator` ha sido completamente refactorizado para garantizar compatibilidad, rendimiento y optimización cognitiva.
+El flujo actual se apoya en `organizer.py` para analizar el Excel y en `generate_template_presentation.py` para renderizar la presentación final con plantilla corporativa.
 
 ### Componentes Principales
-1. **Parser Asíncrono de Excel**: Utiliza `File.arrayBuffer()` para evitar sobrecarga en el hilo principal del navegador.
-2. **Motor de Priorización (Scoring Algorithm)**: Analiza el contenido de cada hoja y le asigna una puntuación basada en:
-   - Densidad de datos cuantitativos.
-   - Presencia de columnas financieras/clave (`valor`, `total`, `estado`).
-   - Frecuencia de palabras clave críticas (`aprobado`, `rechazado`, `crítico`).
-3. **Control Inteligente de Longitud**: 
-   - Estándar: Máximo 20 slides.
-   - Agresivo (si Excel > 50 slides estimadas): Máximo 25 slides + Apéndice Interactivo.
-4. **Validador WCAG 2.1**: Calcula la "Luminosidad Relativa" de los temas inyectados para asegurar legibilidad en proyectores.
+1. **Carga y validación**: El frontend valida tipo y tamaño del Excel antes de enviarlo al backend.
+2. **Organización del Excel**: `organizer.py` detecta KPIs, tablas y gráficos candidatos a partir del archivo subido.
+3. **Generación guiada**: `app/api/advanced-generate/route.ts` devuelve una versión organizada para el paso 1 del flujo.
+4. **Renderizado final**: `generate_template_presentation.py` usa `python-pptx` y `matplotlib` para construir el `.pptx` final con la plantilla institucional.
 
 ---
 
@@ -20,23 +15,23 @@ El motor `AdvancedPptxGenerator` ha sido completamente refactorizado para garant
 
 | Error de PowerPoint | Causa Raíz | Solución Implementada |
 |---------------------|------------|-----------------------|
-| *"PowerPoint encontró un problema con el contenido"* | Uso de constantes gráficas obsoletas (`ChartType.bar` vs `charts.BAR`). | Se actualizaron todos los métodos de instanciación gráfica en `pptx-helper.ts` y `advanced-pptx-generator.ts`. |
-| *"PowerPoint no pudo leer algún contenido y tuvo que quitarlo"* | Caracteres invisibles o mal formados en labels de gráficos o viñetas. | Se implementó sanitización Regex estricta (`replace(/[^\w\s-]/gi, '')`) antes de inyectar strings al motor XML. |
-| *Crashes al abrir el archivo* | Objetos en Master Slides sin dimensión explícita. | Se forzó la declaración estricta de coordenadas (`h`, `w`, `x`, `y`) en todos los `defineSlideMaster`. |
+| *"PowerPoint encontró un problema con el contenido"* | Texto corrupto, valores inconsistentes o elementos inválidos en el XML del archivo. | El generador limpia texto, normaliza valores y limita bloques antes de escribir en la plantilla. |
+| *"PowerPoint no pudo leer algún contenido y tuvo que quitarlo"* | Etiquetas o tablas demasiado extensas para el layout. | El sistema resume categorías, pagina tablas y recorta contenido no legible. |
+| *Crashes al abrir el archivo* | Dependencias faltantes en el runtime o plantilla ausente. | La app valida `python`, `organizer.py`, `generate_template_presentation.py` y la plantilla desde `GET /api/health`. |
 
 ---
 
 ## 🧠 Manual de Usuario: Sistema de Compresión Inteligente
 
 Cuando suba un archivo Excel masivo (ej. > 1,000 filas o decenas de hojas), el sistema actuará de la siguiente manera:
-1. **Filtrado Top 5**: Los gráficos de barras ya no intentarán mostrar 50 categorías. Se mostrarán los 5 más importantes y el resto se agrupará en "Otros Consolidados".
-2. **Generación de Apéndice**: Si se agota el límite de slides (20-25), las hojas restantes no se pierden ni se amontonan. Se crea una **diapositiva final de Apéndice** con botones hipervinculados.
-3. **Navegación Interactiva**: Puede hacer clic en los botones del apéndice para navegar internamente o saber exactamente qué pestañas del Excel original revisar para el detalle granular.
+1. **Filtrado Top N**: Los gráficos muestran solo las categorías más relevantes y consolidan el resto cuando hace falta.
+2. **Priorización visual**: El generador favorece primero KPIs, gráficos y tablas legibles dentro del espacio real de la plantilla.
+3. **Fragmentación segura**: Si una tabla es muy larga, se divide en varias diapositivas en lugar de saturar una sola.
 
 ---
 
 ## 📊 Certificado de Calidad y Rendimiento
-- **Tasa de éxito de renderizado PPTX:** 100% (Validado contra PowerPoint 2016, 2019, 365).
-- **Tiempo de procesamiento estimado:** < 3.5 segundos para archivos de 5,000 filas (gracias a refactorización asíncrona).
-- **Validación WCAG:** PASS (Contraste mínimo dinámico de 4.5:1 garantizado).
-- **Manejo de Errores:** Sistema de telemetría y `console.warn` implementado con bloques `try/catch` envolviendo cada renderizado de gráfico para evitar que un dato corrupto detenga toda la presentación.
+- **Validación operativa:** `npm run lint`, `npm test` y `npm run build` deben pasar antes del despliegue.
+- **Dependencias críticas:** Python accesible, plantilla `.pptx` disponible y scripts raíz presentes.
+- **Fidelidad de salida:** La presentación se genera exclusivamente a partir del archivo enviado en la solicitud actual.
+- **Manejo de errores:** Las rutas API aplican límites de tamaño, timeouts y mensajes de error explícitos para evitar salidas inconsistentes.

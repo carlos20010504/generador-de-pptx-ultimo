@@ -1,7 +1,7 @@
 // @ts-nocheck
 import * as XLSX from 'xlsx';
 
-export type OrganizerMode = 'charts' | 'tables' | 'mixed' | 'auto';
+export type OrganizerMode = 'charts' | 'tables' | 'mixed' | 'boardroom' | 'auto';
 
 // ─── Column Type Detection ────────────────────────────────────────────────────
 
@@ -95,6 +95,11 @@ function decideType(headers: string[], bodyRows: any[][], mode: OrganizerMode): 
   if (mode === 'charts') {
     if (numericCount >= 1 && colCount <= 5) return 'CHART';
     return colCount <= 1 ? 'TEXT' : 'TABLE';
+  }
+  if (mode === 'boardroom') {
+    if (numericCount >= 1 && catCount >= 1 && colCount <= 6) return 'MIXTO';
+    if (numericCount >= 1) return 'CHART';
+    return 'TABLE';
   }
 
   // Auto / mixed logic
