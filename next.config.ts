@@ -11,6 +11,9 @@ const nextConfig: NextConfig = {
     '/api/advanced-generate': [
       './organizer.py',
     ],
+    '/api/excel-intelligence': [
+      './organizer.py',
+    ],
   },
 };
 

@@ -6,21 +6,24 @@ import path from 'path';
 import os from 'os';
 import { MAX_EXCEL_UPLOAD_BYTES, getMaxExcelUploadSizeMb, validateExcelUpload } from '@/utils/excel-file';
 import { GENERATOR_SCRIPT_NAME, getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
+import panelUtils from '../../../utils/excel-ai-panel.cjs';
 
 const execFileAsync = promisify(execFile);
+const { buildProcessingProfile } = panelUtils as {
+  buildProcessingProfile: (payload: Record<string, unknown>) => { timeoutMs: number };
+};
 
 export const runtime = 'nodejs';
+export const maxDuration = 600;
 
 type VisualMode = 'charts' | 'tables' | 'mixed' | 'boardroom';
 type ExecFileError = Error & { code?: string; killed?: boolean; stderr?: string };
 
 const MAX_MULTIPART_SIZE_BYTES = MAX_EXCEL_UPLOAD_BYTES + 1024 * 1024;
-const GENERATION_TIMEOUT_MS = 2 * 60 * 1000;
-
 function normalizeVisualMode(value: FormDataEntryValue | null): VisualMode {
   const raw = String(value ?? '').trim().toLowerCase();
-  if (raw === 'charts' || raw === 'tables' || raw === 'boardroom') return raw;
-  return 'mixed';
+  if (raw === 'charts' || raw === 'tables' || raw === 'mixed' || raw === 'boardroom') return raw;
+  return 'boardroom';
 }
 
 function sanitizeUploadName(fileName: string): string {
@@ -61,6 +64,15 @@ function getExecErrorMessage(error: unknown): string {
   return stderrMessage || execError.message || 'Error generando la presentación premium.';
 }
 
+function getRelevantPythonWarnings(stderr: string): string[] {
+  return stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^INFO:\s+Error cargando OpenRouter:/i.test(line))
+    .filter((line) => !/^INFO:\s+Error en fallback de OpenRouter/i.test(line));
+}
+
 export async function POST(req: NextRequest) {
   let tempDir = '';
   let inputPath = '';
@@ -68,8 +80,8 @@ export async function POST(req: NextRequest) {
 
   try {
     const depStatus = await getRuntimeDependencyStatus(false);
-    if (!depStatus.ok) {
-      return NextResponse.json({ error: getRuntimeFailureMessage(depStatus) }, { status: 503 });
+    if (!depStatus.capabilities.generation) {
+      return NextResponse.json({ error: getRuntimeFailureMessage(depStatus, 'generation') }, { status: 503 });
     }
 
     const contentLength = Number(req.headers.get('content-length') ?? 0);
@@ -83,6 +95,7 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const file = formData.get('file');
     const visualMode = normalizeVisualMode(formData.get('visualMode'));
+    const userPrompt = String(formData.get('userPrompt') ?? '').trim();
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: 'No se subió ningún archivo Excel válido.' }, { status: 400 });
@@ -93,6 +106,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
+    const processingProfile = buildProcessingProfile({
+      fileSizeBytes: file.size,
+      userPrompt,
+    });
+
     tempDir = await fs.mkdtemp(path.join(/* turbopackIgnore: true */ os.tmpdir(), 'socya-pptx-'));
     inputPath = path.join(tempDir, sanitizeUploadName(file.name));
     outputPath = buildOutputPath(inputPath);
@@ -100,10 +118,15 @@ export async function POST(req: NextRequest) {
     const bytes = await file.arrayBuffer();
     await fs.writeFile(/* turbopackIgnore: true */ inputPath, Buffer.from(bytes));
 
-    const { stderr } = await execFileAsync('python', ['-X', 'utf8', GENERATOR_SCRIPT_NAME, inputPath, outputPath], {
+    const args = ['-X', 'utf8', GENERATOR_SCRIPT_NAME, inputPath, outputPath];
+    if (userPrompt) {
+      args.push(userPrompt);
+    }
+
+    const { stderr } = await execFileAsync('python', args, {
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
-      timeout: GENERATION_TIMEOUT_MS,
+      timeout: processingProfile.timeoutMs,
       windowsHide: true,
       env: {
         ...process.env,
@@ -112,8 +135,9 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    if (stderr?.trim()) {
-      console.warn('[generate-pptx] stderr:', stderr);
+    const relevantWarnings = stderr?.trim() ? getRelevantPythonWarnings(stderr) : [];
+    if (relevantWarnings.length > 0) {
+      console.warn('[generate-pptx] stderr:', relevantWarnings.join('\n'));
     }
 
     await fs.access(/* turbopackIgnore: true */ outputPath);
@@ -132,7 +156,7 @@ export async function POST(req: NextRequest) {
     console.error('[generate-pptx] Error:', error);
     if (isTimedOut(error)) {
       return NextResponse.json(
-        { error: 'La generacion del PowerPoint excedio el tiempo permitido. Intenta con un Excel mas pequeno o simplificado.' },
+        { error: 'La generacion del PowerPoint excedio el tiempo permitido. Intenta de nuevo o usa un Excel mas pequeno si el archivo es especialmente pesado.' },
         { status: 504 }
       );
     }

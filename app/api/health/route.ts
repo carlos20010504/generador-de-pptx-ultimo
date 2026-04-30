@@ -5,15 +5,16 @@ export const runtime = 'nodejs';
 
 export async function GET() {
   const status = await getRuntimeDependencyStatus(true);
+  const generationReady = status.capabilities.generation;
 
   return NextResponse.json(
     {
-      ok: status.ok,
-      message: status.ok ? 'Backend operativo.' : getRuntimeFailureMessage(status),
+      ok: generationReady,
+      message: generationReady ? 'Backend operativo.' : getRuntimeFailureMessage(status, 'generation'),
       dependencies: status,
     },
     {
-      status: status.ok ? 200 : 503,
+      status: generationReady ? 200 : 503,
       headers: {
         'Cache-Control': 'no-store',
       },

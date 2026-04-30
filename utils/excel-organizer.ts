@@ -26,7 +26,7 @@ function detectColType(header: string, values: any[]): string {
   const sample = values.filter(v => v !== null && v !== undefined && String(v).trim() !== '').slice(0, 30);
   if (!sample.length) return 'empty';
 
-  if (/ID$|^ID|COD|CODIGO|FOLIO|CONS/.test(nk)) return 'id';
+  if (/ID$|^ID|COD|CODIGO|FOLIO|CONS|CENTRO/.test(nk)) return 'id';
   if (/FECHA|DATE|PERIODO|YEAR|MONTH|MES/.test(nk)) return 'date';
   if (/PORC|PCT|PERCENT|TASA/.test(nk)) return 'percent';
   if (/VALOR|TOTAL|COSTO|PRECIO|MONTO|GASTO|SALAR|COMIS|PAGO/.test(nk)) return 'currency';

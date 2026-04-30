@@ -4,7 +4,10 @@ import sys
 import json
 import os
 import re
+import hashlib
+import time
 import unicodedata
+from datetime import datetime
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -25,10 +28,23 @@ MAX_AUTO_CHARTS = 3
 MAX_TABLE_COLS = 7
 MAX_CONCLUSIONES = 10
 MAX_INSIGHTS_AVANZADOS = 8
+MAX_TEXTUAL_BLOCKS = 6
+MAX_TEXT_LINES_PER_BLOCK = 5
+MAX_TEXTUAL_AI_BLOCKS = 3
+TEXTUAL_AI_CACHE_FILE = os.path.join(os.path.dirname(__file__), '.cache', 'organizer_text_ai_cache.json')
+EXECUTIVE_AI_CACHE_FILE = os.path.join(os.path.dirname(__file__), '.cache', 'organizer_executive_ai_cache.json')
+UNIFIED_AI_CACHE_FILE = os.path.join(os.path.dirname(__file__), '.cache', 'organizer_unified_ai_cache.json')
+AI_RUNTIME_STATE_FILE = os.path.join(os.path.dirname(__file__), '.cache', 'ai_runtime_state.json')
+# Free-tier priority: OpenRouter (Hermes)
+OPENROUTER_MODEL_PRIORITY = (
+    'nousresearch/hermes-3-llama-3.1-405b:free',
+)
+AI_QUOTA_COOLDOWN_SECONDS = 5 * 60
 
 PLACEHOLDER_VALS = {'???', '—', 'n/a', 'na', 'nan', 'none', '', '0', '-',
                     'null', 'sin datos', 'sin información', 'sin dato',
                     'no aplica', 'no disponible', 'nd', 's/d'}
+STRICT_VISUAL_CURATION_MODE = True
 
 SHEET_FAMILY_LABELS = {
     'auditoria': 'auditoria',
@@ -60,6 +76,59 @@ PRIMARY_SHEET_FAMILY_SCORES = {
     'general': 0,
 }
 
+TEXTUAL_FAMILIES = {
+    'auditoria',
+    'checklist',
+    'hallazgos',
+    'oportunidades',
+    'matriz_riesgos',
+    'evidencias',
+    'procedimiento',
+    'cuestionario',
+    'coso',
+}
+
+TEXT_ARTIFACT_REPLACEMENTS = {
+    '├í': 'á',
+    '├⌐': 'é',
+    '├®': 'í',
+    '├│': 'ó',
+    '├║': 'ú',
+    '├▒': 'ñ',
+    '├ü': 'Ü',
+    '├ä': 'Ä',
+    '├ô': 'Ó',
+    '├Ü': 'Ñ',
+    'Ã¡': 'á',
+    'Ã©': 'é',
+    'Ã­': 'í',
+    'Ã³': 'ó',
+    'Ãº': 'ú',
+    'Ã±': 'ñ',
+    'Ã': 'A',
+    'â€™': "'",
+    'â€œ': '"',
+    'â€\x9d': '"',
+    'â€“': '-',
+    'â€”': '-',
+    'â€¢': '-',
+    '’': "'",
+    '‘': "'",
+    '“': '"',
+    '”': '"',
+    '¾': 'ó',
+    'ß': 'á',
+    'Ý': 'í',
+    'Ú': 'É',
+    'Ë': 'Ó',
+    '═': 'Í',
+    '┐': '¿',
+    '┬┐': '¿',
+    'À': '-',
+}
+
+MOJIBAKE_HINT_CHARS = 'ÃÂ├┤┐╔╗═¾ÝËÐ�'
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # UTILIDADES DE LIMPIEZA
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -68,7 +137,10 @@ def normalizar_columnas_unicas(columns):
     usadas = {}
     resultado = []
     for idx, col in enumerate(columns):
-        nombre = str(col).strip() if pd.notna(col) and str(col).strip() and not str(col).startswith('Unnamed') else f"Col_{idx}"
+        if pd.notna(col) and str(col).strip() and not str(col).startswith('Unnamed'):
+            nombre = repair_text_artifacts(str(col).strip())
+        else:
+            nombre = f"Col_{idx}"
         if nombre in usadas:
             usadas[nombre] += 1
             nombre = f"{nombre}_{usadas[nombre]}"
@@ -101,12 +173,21 @@ def extract_real_sheet(df):
             df_new.columns = normalizar_columnas_unicas(df_new.columns)
             df_new = df_new.dropna(axis=1, how='all').dropna(axis=0, how='all')
             return df_new
+        
+        # Fallback: Si no encontró nada claro en las primeras 20, pero hay una fila 1 que parece cabecera
+        if len(raw_data) > 1:
+             valid_row1 = [x for x in raw_data[1] if pd.notna(x) and str(x).strip() and not str(x).startswith('Unnamed')]
+             if len(valid_row1) >= 2:
+                 df_new = pd.DataFrame(raw_data[2:], columns=raw_data[1])
+                 df_new.columns = normalizar_columnas_unicas(df_new.columns)
+                 return df_new
     except: pass
     return df
 
 
 def limpiar_df(df):
     df = df.copy()
+    df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
     df.columns = normalizar_columnas_unicas(df.columns)
     for idx, col in enumerate(df.columns):
         serie = df.iloc[:, idx]
@@ -118,9 +199,7 @@ def limpiar_df(df):
             except:
                 pass
         if serie.dtype == object or serie.dtype == 'string':
-            df.iloc[:, idx] = serie.fillna('—')
-        else:
-            df.iloc[:, idx] = serie.fillna(0)
+            df.iloc[:, idx] = serie.fillna('')
     return df
 
 
@@ -136,12 +215,18 @@ def remover_filas_basura(df):
             for palabra in palabras_basura:
                 mask &= ~serie.astype(str).str.lower().str.contains(palabra, na=False)
     df = df[mask]
-    c_importantes = ['Id Comisión', 'Solicitante', 'Valor Total Solicitado']
-    cols_check = [c for c in c_importantes if c in df.columns]
+    
+    # Identificación flexible de columnas importantes
+    cols_norm = {normalize_semantic_text(c): c for c in df.columns}
+    c_id = cols_norm.get('id comision') or cols_norm.get('id') or cols_norm.get('codigo') or cols_norm.get('consecutivo')
+    c_sol = cols_norm.get('solicitante')
+    c_val = cols_norm.get('valor total solicitado') or cols_norm.get('valor total')
+    
+    cols_check = [c for c in [c_id, c_sol, c_val] if c]
     if cols_check:
         df = df[df[cols_check].notna().any(axis=1)]
-        if 'Id Comisión' in df.columns:
-            df = df[df['Id Comisión'].notna()]
+        if c_id:
+            df = df[df[c_id].notna()]
     return df
 
 
@@ -272,6 +357,8 @@ def _normalize_numeric_text(text):
 def parse_numeric_value(value, kind_hint=None):
     if value is None or isinstance(value, bool):
         return None
+    if kind_hint and is_temporal_header(kind_hint):
+        return None
     if isinstance(value, (int, float, np.integer, np.floating)):
         if pd.isna(value):
             return None
@@ -293,7 +380,7 @@ def normalize_numeric_series(series, kind_hint=None):
 
 
 def normalize_semantic_text(value):
-    text = str(value or '').replace('\xa0', ' ').strip().lower()
+    text = repair_text_artifacts(value).replace('\xa0', ' ').strip().lower()
     if not text:
         return ''
     text = unicodedata.normalize('NFKD', text)
@@ -317,6 +404,118 @@ def unique_non_empty_texts(values, limit=None):
         if limit is not None and len(result) >= limit:
             break
     return result
+
+
+def contains_internal_slide_metadata(value):
+    text = str(value or '').strip()
+    if not text:
+        return False
+    normalized = normalize_semantic_text(text)
+    if not normalized:
+        return False
+    if re.search(r'\b(title|subtitle|type)\s*:', text, flags=re.IGNORECASE):
+        return True
+    return normalized in {
+        'text',
+        'subtitle organizado automaticamente text',
+        'organizado automaticamente text',
+        'type text',
+    }
+
+
+def sanitize_executive_text(value, max_len=220):
+    text = repair_text_artifacts(value).replace('_x000d_', ' ').replace('\r', ' ').replace('\n', ' ')
+    text = re.sub(r'\s+', ' ', text).strip(" .:-")
+    if not text:
+        return ''
+    text = text.replace('RECOMEDACIONES', 'RECOMENDACIONES')
+    text = text.replace('recomedaciones', 'recomendaciones')
+    text = re.sub(
+        r'^(Hallazgo|Mejora|Riesgo|Procedimiento|Control|Prueba|Evidencia|Pregunta|Componente)\s*:\s*',
+        '',
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r'^(TITLE|SUBTITLE|TYPE)\s*:\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+[—-]\s+TEXT$', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^(TEXT|LAYOUT)\s*$', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+', ' ', text).strip(" .:-")
+    if not text:
+        return ''
+    if contains_internal_slide_metadata(text):
+        return ''
+    normalized = normalize_semantic_text(text)
+    if normalized in {'title', 'subtitle', 'type', 'text', 'layout'}:
+        return ''
+    if len(normalized) < 4:
+        return ''
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    return text[:max_len]
+
+
+def mojibake_score(text):
+    return sum(text.count(char) for char in MOJIBAKE_HINT_CHARS)
+
+
+def attempt_redecode(text, source_encoding, target_encoding):
+    try:
+        return text.encode(source_encoding, errors='ignore').decode(target_encoding, errors='ignore')
+    except Exception:
+        return text
+
+
+def repair_mojibake_text(text):
+    current = str(text or '')
+    if not current:
+        return current
+    best = current
+    best_score = mojibake_score(current)
+    candidates = [
+        attempt_redecode(current, 'latin1', 'utf-8'),
+        attempt_redecode(current, 'cp1252', 'utf-8'),
+        attempt_redecode(current, 'latin1', 'cp1252'),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        score = mojibake_score(candidate)
+        if score < best_score and sum(char.isalnum() for char in candidate) >= max(2, sum(char.isalnum() for char in current) // 2):
+            best = candidate
+            best_score = score
+    return best
+
+
+def repair_text_artifacts(value):
+    cleaned = repair_mojibake_text(str(value or ''))
+    for source, target in TEXT_ARTIFACT_REPLACEMENTS.items():
+        cleaned = cleaned.replace(source, target)
+    cleaned = unicodedata.normalize('NFKC', cleaned)
+    cleaned = re.sub(r'[\u200b-\u200f\u202a-\u202e]', '', cleaned)
+    cleaned = cleaned.replace('\xa0', ' ').replace('_x000d_', ' ')
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    cleaned = unicodedata.normalize('NFKD', cleaned).encode('ascii', 'ignore').decode('ascii')
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+
+def build_default_ai_curation_status():
+    has_api_key = bool(get_openrouter_api_key())
+    temporarily_blocked = is_ai_temporarily_blocked() if has_api_key else False
+    reason = 'ready_for_ai' if has_api_key and not temporarily_blocked else (
+        'ai_temporarily_blocked' if temporarily_blocked else 'ai_api_unavailable'
+    )
+    return {
+        'strict_visual_mode': STRICT_VISUAL_CURATION_MODE,
+        'api_key_available': has_api_key,
+        'temporarily_blocked': temporarily_blocked,
+        'unified_call_succeeded': False,
+        'briefing_received': False,
+        'visual_plan_received': False,
+        'visual_curation_ready': False,
+        'selected_chart_ids': [],
+        'selected_table_ids': [],
+        'reason': reason,
+    }
 
 
 def build_sheet_semantic_signature(name, df=None):
@@ -468,18 +667,62 @@ def build_table_from_dataframe(df, sheet_name, sheet_family='general', max_cols=
     if not selected_cols:
         return None
 
-    df_res = df[selected_cols].head(max_rows).copy()
-    for col in df_res.columns:
-        if pd.api.types.is_string_dtype(df_res[col]) or df_res[col].dtype == object:
-            df_res[col] = df_res[col].astype(str).str[:text_limit]
+    def valor_real_tabla(val):
+        if pd.isna(val):
+            return False
+        if isinstance(val, (int, float, np.integer, np.floating)) and not pd.isna(val):
+            return True
+        return not es_valor_fantasma(val)
 
-    mask = df_res.apply(
-        lambda row: sum(1 for value in row if not es_valor_fantasma(value)) >= min_meaningful_cells,
-        axis=1
-    )
-    df_res = df_res[mask]
-    if df_res.empty:
+    def normalizar_valor_tabla(val):
+        if pd.isna(val):
+            return ''
+        if isinstance(val, (pd.Timestamp, datetime)):
+            return val.strftime('%d/%m/%Y')
+        if isinstance(val, (int, float, np.integer, np.floating)) and not pd.isna(val):
+            if float(val).is_integer():
+                return str(int(val))
+            return str(float(val))
+        return str(val).strip()[:text_limit]
+
+    scored_cols = []
+    for position, col in enumerate(selected_cols):
+        serie = df[col]
+        real_ratio = float(serie.apply(valor_real_tabla).mean()) if len(serie) else 0.0
+        score = real_ratio * 100
+        if es_dimension_ejecutiva(col):
+            score += 14
+        if infer_numeric_kind(col) in ('currency', 'percent'):
+            score += 10
+        if es_columna_identificador(col):
+            score -= 18
+        if es_columna_persona(col):
+            score -= 6
+        score -= position * 0.25
+        scored_cols.append((score, col, real_ratio))
+
+    scored_cols.sort(key=lambda item: item[0], reverse=True)
+    dense_cols = [col for _score, col, real_ratio in scored_cols if real_ratio >= 0.55]
+    ordered_cols = dense_cols + [col for _score, col, _ratio in scored_cols if col not in dense_cols]
+
+    best_subset = None
+    max_width = min(max_cols, len(ordered_cols))
+    for width in range(max_width, 1, -1):
+        subset_cols = ordered_cols[:width]
+        df_candidate = df[subset_cols].copy()
+        for col in subset_cols:
+            if pd.api.types.is_string_dtype(df_candidate[col]) or df_candidate[col].dtype == object:
+                df_candidate[col] = df_candidate[col].apply(normalizar_valor_tabla)
+        row_mask = df_candidate.apply(lambda row: all(valor_real_tabla(value) for value in row), axis=1)
+        dense_df = df_candidate[row_mask].head(max_rows).copy()
+        if len(dense_df) >= max(2, min_meaningful_cells):
+            best_subset = (subset_cols, dense_df)
+            break
+
+    if best_subset is None:
         return None
+
+    selected_cols, df_res = best_subset
 
     tabla_info = {
         'encabezados': [str(col) for col in selected_cols],
@@ -490,6 +733,709 @@ def build_table_from_dataframe(df, sheet_name, sheet_family='general', max_cols=
     if validar_tabla(tabla_info['encabezados'], tabla_info['filas']):
         return tabla_info
     return None
+
+
+def build_textual_block_label(sheet_family):
+    mapping = {
+        'auditoria': 'Control y verificacion',
+        'checklist': 'Cobertura de pruebas',
+        'hallazgos': 'Hallazgos relevantes',
+        'oportunidades': 'Oportunidades de mejora',
+        'matriz_riesgos': 'Riesgos y mitigacion',
+        'evidencias': 'Soportes y evidencias',
+        'procedimiento': 'Procedimiento evaluado',
+        'cuestionario': 'Cuestionario de control',
+        'coso': 'Lectura COSO',
+    }
+    return mapping.get(sheet_family, 'Lectura narrativa')
+
+
+def looks_like_meaningful_text(value):
+    text = str(value or '').strip()
+    if not text or es_valor_fantasma(text):
+        return False
+    if parse_numeric_value(text) is not None and '%' not in text and '$' not in text and len(text) < 8:
+        return False
+    words = [part for part in text.split() if part]
+    return len(words) >= 4 or len(text) >= 28
+
+
+def pick_textual_columns(df, sheet_family='general', max_cols=4):
+    preferred_keywords = {
+        'auditoria': ['pregunta', 'criterio', 'revision', 'verificacion', 'observacion', 'control'],
+        'checklist': ['prueba', 'cumple', 'observacion', 'control', 'resultado'],
+        'hallazgos': ['hallazgo', 'descripcion', 'detalle', 'riesgo', 'impacto', 'observacion', 'recomendacion'],
+        'oportunidades': ['oportunidad', 'descripcion', 'detalle', 'accion', 'mejora', 'observacion', 'recomendacion'],
+        'matriz_riesgos': ['riesgo', 'causa', 'consecuencia', 'control', 'recomendacion', 'accion'],
+        'evidencias': ['evidencia', 'soporte', 'documento', 'descripcion', 'observacion'],
+        'procedimiento': ['pregunta', 'respuesta', 'procedimiento', 'control', 'observacion', 'descripcion'],
+        'cuestionario': ['pregunta', 'respuesta', 'observacion', 'estado'],
+        'coso': ['componente', 'item', 'estado', 'accion', 'observacion'],
+    }
+    keywords = [normalize_semantic_text(item) for item in preferred_keywords.get(sheet_family, [])]
+    scored = []
+    for col in df.columns:
+        col_name = str(col).strip()
+        normalized_col = normalize_semantic_text(col_name)
+        series = df[col].head(60)
+        non_empty = [
+            str(value).strip()
+            for value in series
+            if pd.notna(value) and not es_valor_fantasma(value)
+        ]
+        if not non_empty:
+            continue
+        text_like = sum(1 for value in non_empty if looks_like_meaningful_text(value))
+        score = text_like * 3
+        if keywords and any(keyword in normalized_col for keyword in keywords):
+            score += 12
+        if not es_columna_generica(col_name):
+            score += 2
+        if score > 0:
+            scored.append((score, col))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected = [col for _score, col in scored[:max_cols]]
+    if selected:
+        return selected
+    return select_semantic_columns(df, sheet_family=sheet_family, max_cols=max_cols)
+
+
+def format_textual_row(row_data, sheet_family='general'):
+    ordered_items = [(str(col).strip(), str(value).strip()) for col, value in row_data if str(value).strip()]
+    if not ordered_items:
+        return None
+
+    fragments = []
+    skip_labels = {
+        'title',
+        'subtitle',
+        'type',
+        'text',
+        'layout',
+        'col 0',
+        'col 1',
+    }
+    for label, value in ordered_items:
+        clean_value = sanitize_executive_text(value, max_len=220)
+        normalized_label = normalize_semantic_text(label)
+        if (
+            not clean_value
+            or es_valor_fantasma(clean_value)
+            or normalized_label in skip_labels
+            or contains_internal_slide_metadata(label)
+        ):
+            continue
+        if not fragments:
+            fragments.append(clean_value)
+            continue
+        short_label = label[:40]
+        if normalized_label in {'descripcion', 'detalle', 'respuesta', 'observacion', 'hallazgo', 'recomendacion', 'accion recomendada', 'causa', 'consecuencia'}:
+            fragments.append(clean_value)
+        else:
+            fragments.append(f"{short_label}: {clean_value}")
+        if len(fragments) >= 3:
+            break
+
+    if not fragments:
+        return None
+    line = ". ".join(fragments)
+    line = re.sub(r'\s+', ' ', line).strip(" .")
+    line = sanitize_executive_text(line, max_len=280)
+    return line if line else None
+
+
+def extract_textual_points_from_dataframe(df, sheet_name, sheet_family='general', max_points=MAX_TEXT_LINES_PER_BLOCK):
+    if df is None or df.empty or sheet_family not in TEXTUAL_FAMILIES:
+        return []
+
+    selected_cols = pick_textual_columns(df, sheet_family=sheet_family, max_cols=4)
+    if not selected_cols:
+        return []
+
+    points = []
+    for _idx, row in df.head(40).iterrows():
+        row_data = []
+        for col in selected_cols:
+            value = row.get(col, '')
+            text = str(value).strip()
+            if not text or es_valor_fantasma(text):
+                continue
+            if parse_numeric_value(text) is not None and '%' not in text and '$' not in text and len(text) < 8:
+                continue
+            row_data.append((col, text))
+        line = format_textual_row(row_data, sheet_family=sheet_family)
+        if line:
+            points.append(line)
+
+    return unique_non_empty_texts(points, limit=max_points)
+
+
+def build_textual_block_from_dataframe(df, sheet_name, sheet_family='general'):
+    lines = extract_textual_points_from_dataframe(df, sheet_name, sheet_family=sheet_family, max_points=MAX_TEXT_LINES_PER_BLOCK)
+    if not lines:
+        return None
+    return {
+        'title': sheet_name,
+        'subtitle': build_textual_block_label(sheet_family),
+        'hoja_origen': sheet_name,
+        'sheet_family': sheet_family,
+        'lines': lines,
+        'source_mode': 'python',
+    }
+
+
+def get_openrouter_api_key():
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if api_key:
+        return api_key.strip().replace('"', '').replace("'", "")
+
+    try:
+        for env_file in ['.env', '.env.local', '../.env']:
+            if os.path.exists(env_file):
+                with open(env_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if "OPENROUTER_API_KEY" in content:
+                        for line in content.splitlines():
+                            if line.startswith("OPENROUTER_API_KEY="):
+                                value = line.split('=', 1)[1].strip().replace('"', '').replace("'", "")
+                                if value: return value
+    except Exception:
+        pass
+    return None
+
+
+def load_textual_ai_cache():
+    try:
+        if os.path.exists(TEXTUAL_AI_CACHE_FILE):
+            with open(TEXTUAL_AI_CACHE_FILE, 'r', encoding='utf-8') as handle:
+                data = json.load(handle)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+
+def load_executive_ai_cache():
+    try:
+        if os.path.exists(EXECUTIVE_AI_CACHE_FILE):
+            with open(EXECUTIVE_AI_CACHE_FILE, 'r', encoding='utf-8') as handle:
+                data = json.load(handle)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_textual_ai_cache(cache_data):
+    try:
+        os.makedirs(os.path.dirname(TEXTUAL_AI_CACHE_FILE), exist_ok=True)
+        with open(TEXTUAL_AI_CACHE_FILE, 'w', encoding='utf-8') as handle:
+            json.dump(cache_data, handle, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def save_executive_ai_cache(cache_data):
+    try:
+        os.makedirs(os.path.dirname(EXECUTIVE_AI_CACHE_FILE), exist_ok=True)
+        with open(EXECUTIVE_AI_CACHE_FILE, 'w', encoding='utf-8') as handle:
+            json.dump(cache_data, handle, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def load_ai_runtime_state():
+    try:
+        if os.path.exists(AI_RUNTIME_STATE_FILE):
+            with open(AI_RUNTIME_STATE_FILE, 'r', encoding='utf-8') as handle:
+                data = json.load(handle)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_ai_runtime_state(state):
+    try:
+        os.makedirs(os.path.dirname(AI_RUNTIME_STATE_FILE), exist_ok=True)
+        with open(AI_RUNTIME_STATE_FILE, 'w', encoding='utf-8') as handle:
+            json.dump(state, handle, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def parse_retry_delay_seconds(message):
+    text = str(message or '')
+    patterns = [
+        r'retry in\s+([0-9]+(?:\.[0-9]+)?)s',
+        r'seconds:\s*([0-9]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            try:
+                return max(0, int(float(match.group(1))))
+            except Exception:
+                continue
+    return 0
+
+
+def is_openrouter_rate_limit_message(message):
+    text = str(message or '')
+    if not text:
+        return False
+    normalized = text.lower()
+    if 'provider returned error' in normalized and not any(
+        token in normalized for token in ['rate limit', 'high demand', 'limit_rpm', '429', 'limited to']
+    ):
+        return False
+    return (
+        'rate limit exceeded' in normalized
+        or 'limited to' in normalized
+        or 'high demand for' in normalized
+        or 'limit_rpm' in normalized
+        or '429' in normalized
+        or 'provider returned error' in normalized
+    )
+
+
+def get_ai_cooldown_remaining():
+    state = load_ai_runtime_state()
+    blocked_until = float(state.get('blocked_until') or 0)
+    remaining = int(blocked_until - time.time())
+    return max(0, remaining)
+
+
+def is_ai_temporarily_blocked():
+    return get_ai_cooldown_remaining() > 0
+
+
+def mark_ai_quota_blocked(message=None):
+    retry_seconds = parse_retry_delay_seconds(message)
+    cooldown = max(AI_QUOTA_COOLDOWN_SECONDS, retry_seconds)
+    state = {
+        'blocked_until': time.time() + cooldown,
+        'reason': 'quota',
+        'retry_after_seconds': retry_seconds,
+        'updated_at': int(time.time()),
+    }
+    save_ai_runtime_state(state)
+
+
+def clear_ai_quota_block():
+    state = load_ai_runtime_state()
+    if state:
+        save_ai_runtime_state({})
+
+
+def build_textual_block_cache_key(block):
+    payload = {
+        'title': block.get('title'),
+        'subtitle': block.get('subtitle'),
+        'sheet_family': block.get('sheet_family'),
+        'lines': block.get('lines') or [],
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def build_executive_briefing_cache_key(payload):
+    versioned_payload = {
+        'prompt_version': 'executive-briefing-v2',
+        'payload': payload,
+    }
+    raw = json.dumps(versioned_payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def merge_ai_textual_block(block, ai_payload):
+    merged = dict(block)
+    if isinstance(ai_payload, dict):
+        title = sanitize_executive_text(ai_payload.get('title'), max_len=90)
+        subtitle = sanitize_executive_text(ai_payload.get('subtitle'), max_len=90)
+        lines = unique_non_empty_texts(
+            [sanitize_executive_text(line, max_len=180) for line in (ai_payload.get('lines') or [])],
+            limit=MAX_TEXT_LINES_PER_BLOCK,
+        )
+        if title:
+            merged['title'] = title[:90]
+        if subtitle:
+            merged['subtitle'] = subtitle[:90]
+        if lines:
+            merged['lines'] = lines
+            merged['source_mode'] = 'ai'
+    return merged
+
+
+def normalize_executive_briefing_ai_payload(ai_payload):
+    if not isinstance(ai_payload, dict):
+        return None
+
+    normalized = {
+        'de_que_trata': sanitize_executive_text(ai_payload.get('de_que_trata'), max_len=140),
+        'datos_tecnicos': unique_non_empty_texts(
+            [sanitize_executive_text(item, max_len=140) for item in (ai_payload.get('datos_tecnicos') or [])],
+            limit=2,
+        ),
+        'planeamiento': unique_non_empty_texts(
+            [sanitize_executive_text(item, max_len=140) for item in (ai_payload.get('planeamiento') or [])],
+            limit=2,
+        ),
+        'puntos_a_tratar': unique_non_empty_texts(
+            [sanitize_executive_text(item, max_len=140) for item in (ai_payload.get('puntos_a_tratar') or [])],
+            limit=2,
+        ),
+        'breve_resumen': unique_non_empty_texts(
+            [sanitize_executive_text(item, max_len=140) for item in (ai_payload.get('breve_resumen') or [])],
+            limit=2,
+        ),
+        'objetivos': unique_non_empty_texts(
+            [sanitize_executive_text(item, max_len=140) for item in (ai_payload.get('objetivos') or [])],
+            limit=2,
+        ),
+        'elementos_prioritarios': unique_non_empty_texts(
+            [sanitize_executive_text(item, max_len=140) for item in (ai_payload.get('elementos_prioritarios') or [])],
+            limit=2,
+        ),
+    }
+    if not any(normalized.values()):
+        return None
+    return normalized
+
+
+def normalize_visual_plan_ai_payload(ai_payload):
+    if not isinstance(ai_payload, dict):
+        return None
+
+    charts = []
+    for item in ai_payload.get('charts') or []:
+        if not isinstance(item, dict):
+            continue
+        visual_id = sanitize_executive_text(item.get('id'), max_len=80)
+        message = sanitize_executive_text(item.get('mensaje_clave'), max_len=160)
+        rationale = sanitize_executive_text(item.get('por_que_importa'), max_len=160)
+        if visual_id:
+            charts.append({
+                'id': visual_id,
+                'mensaje_clave': message,
+                'por_que_importa': rationale,
+            })
+
+    tables = []
+    for item in ai_payload.get('tables') or []:
+        if not isinstance(item, dict):
+            continue
+        visual_id = sanitize_executive_text(item.get('id'), max_len=80)
+        mode = sanitize_executive_text(item.get('modo'), max_len=20).lower()
+        message = sanitize_executive_text(item.get('mensaje_clave'), max_len=160)
+        rationale = sanitize_executive_text(item.get('por_que_importa'), max_len=160)
+        if visual_id and mode in {'summary', 'detail', 'omit'}:
+            tables.append({
+                'id': visual_id,
+                'modo': mode,
+                'mensaje_clave': message,
+                'por_que_importa': rationale,
+            })
+
+    storyline = unique_non_empty_texts(
+        [sanitize_executive_text(item, max_len=160) for item in (ai_payload.get('storyline') or [])],
+        limit=3,
+    )
+
+    if not charts and not tables and not storyline:
+        return None
+    return {
+        'charts': charts[:4],
+        'tables': tables[:4],
+        'storyline': storyline,
+    }
+
+
+def attach_visual_ids(resultado):
+    for idx, chart in enumerate(resultado.get('graficas_automaticas') or []):
+        if isinstance(chart, dict):
+            chart['_visual_ai_id'] = f'chart:auto:{idx}'
+
+    main_table = resultado.get('muestra_tabla')
+    if isinstance(main_table, dict):
+        main_table['_visual_ai_id'] = 'table:main'
+
+    for key, table in (resultado.get('otras_tablas') or {}).items():
+        if isinstance(table, dict):
+            table['_visual_ai_id'] = f"table:other:{normalize_semantic_text(key) or 'item'}"
+
+    for key, table in (resultado.get('genericas') or {}).items():
+        if isinstance(table, dict):
+            table['_visual_ai_id'] = f"table:generic:{normalize_semantic_text(key) or 'item'}"
+
+
+def build_visual_candidates_for_ai(analisis_data):
+    chart_candidates = []
+    for idx, chart in enumerate((analisis_data.get('graficas_automaticas') or [])[:4]):
+        if not isinstance(chart, dict):
+            continue
+        labels = [sanitize_executive_text(label, max_len=30) for label in (chart.get('labels') or [])[:4]]
+        values = (chart.get('valores') or [])[:4]
+        if len(labels) < 3 or len(values) < 3:
+            continue
+        chart_candidates.append({
+            'id': chart.get('_visual_ai_id') or f'chart:auto:{idx}',
+            'titulo': sanitize_executive_text(chart.get('titulo'), max_len=80),
+            'tipo': sanitize_executive_text(chart.get('tipo'), max_len=20),
+            'labels_top': labels,
+            'valores_top': values,
+            'insight_base': sanitize_executive_text(chart.get('insight_auto'), max_len=140),
+        })
+
+    table_candidates = []
+    candidate_tables = []
+    if isinstance(analisis_data.get('muestra_tabla'), dict):
+        candidate_tables.append(('table:main', analisis_data.get('muestra_tabla'), 'summary'))
+    for key, table in list((analisis_data.get('otras_tablas') or {}).items())[:3]:
+        candidate_tables.append((table.get('_visual_ai_id') or f"table:other:{normalize_semantic_text(key) or 'item'}", table, 'summary'))
+    for key, table in list((analisis_data.get('genericas') or {}).items())[:3]:
+        candidate_tables.append((table.get('_visual_ai_id') or f"table:generic:{normalize_semantic_text(key) or 'item'}", table, 'detail'))
+
+    for visual_id, table, suggested_mode in candidate_tables[:6]:
+        if not isinstance(table, dict):
+            continue
+        headers = [sanitize_executive_text(item, max_len=32) for item in (table.get('encabezados') or [])[:6]]
+        rows = table.get('filas') or []
+        if len(headers) < 2 or len(rows) < 2:
+            continue
+        sample_rows = []
+        for row in rows[:2]:
+            if isinstance(row, (list, tuple)):
+                sample_rows.append([sanitize_executive_text(value, max_len=40) for value in row[:5]])
+        table_candidates.append({
+            'id': visual_id,
+            'titulo': sanitize_executive_text(table.get('hoja_origen') or table.get('title') or visual_id, max_len=80),
+            'encabezados': headers,
+            'muestra_filas': sample_rows,
+            'total_filas': len(rows),
+            'total_columnas': len(headers),
+            'modo_sugerido': suggested_mode,
+        })
+
+    return {
+        'charts': chart_candidates,
+        'tables': table_candidates,
+    }
+
+
+def enrich_textual_blocks_with_ai(blocks):
+    if not blocks:
+        return []
+
+    if is_ai_temporarily_blocked():
+        return blocks
+
+    api_key = get_openrouter_api_key()
+    if not api_key:
+        return blocks
+
+    cache = load_textual_ai_cache()
+    enriched = []
+    pending = []
+    for block in blocks:
+        cache_key = build_textual_block_cache_key(block)
+        cached = cache.get(cache_key)
+        if isinstance(cached, dict):
+            merged = merge_ai_textual_block(block, cached)
+            merged['cache_hit'] = True
+            enriched.append(merged)
+        else:
+            block_copy = dict(block)
+            block_copy['_cache_key'] = cache_key
+            pending.append(block_copy)
+            enriched.append(block_copy)
+            
+    pending_for_ai = [block for block in pending if block.get('sheet_family') in TEXTUAL_FAMILIES][:MAX_TEXTUAL_AI_BLOCKS]
+    if not pending_for_ai:
+        for block in enriched:
+            if isinstance(block, dict):
+                block.pop('_cache_key', None)
+        return enriched
+
+    prompt_payload = []
+    for index, block in enumerate(pending_for_ai):
+        prompt_payload.append({
+            'id': index,
+            'title': block.get('title'),
+            'subtitle': block.get('subtitle'),
+            'sheet_family': block.get('sheet_family'),
+            'lines': block.get('lines') or [],
+        })
+
+    prompt = f"""
+    Eres consultor senior de auditoria y control interno.
+    Reescribe estos bloques narrativos para PowerPoint ejecutivo manteniendo SOLO hechos presentes.
+    No inventes cifras, estados, responsables ni conclusiones no evidenciadas.
+    Conserva el sentido de hallazgos, procedimiento, riesgos y oportunidades.
+    Devuelve como maximo {MAX_TEXT_LINES_PER_BLOCK} lineas por bloque, en tono profesional y humano.
+
+    BLOQUES:
+    {json.dumps(prompt_payload, ensure_ascii=False)}
+
+    Responde exclusivamente con este JSON:
+    {{
+      "blocks": [
+        {{
+          "id": 0,
+          "title": "Titulo breve",
+          "subtitle": "Subtitulo ejecutivo",
+          "lines": ["Linea 1", "Linea 2"]
+        }}
+      ]
+    }}
+    """
+
+    response_text = call_ai_api(prompt)
+    if response_text:
+        try:
+            # Robust extraction of JSON from markdown or text
+            json_match = re.search(r'(\{.*\})', response_text.replace('\n', ' '), re.DOTALL)
+            if json_match:
+                response_text = json_match.group(1)
+            else:
+                response_text = response_text.replace("```json", "").replace("```", "").strip()
+            
+            parsed = json.loads(response_text)
+            if isinstance(parsed, dict) and 'blocks' in parsed:
+                for item in parsed.get('blocks', []):
+                    if not isinstance(item, dict): continue
+                    item_id = item.get('id')
+                    if not isinstance(item_id, int) or not (0 <= item_id < len(pending_for_ai)):
+                        continue
+                    cache_key = pending_for_ai[item_id].get('_cache_key')
+                    if cache_key:
+                        cache[cache_key] = {
+                            'title': item.get('title'),
+                            'subtitle': item.get('subtitle'),
+                            'lines': item.get('lines') or [],
+                        }
+                save_textual_ai_cache(cache)
+        except Exception as exc:
+            print(f"INFO: Error parseando IA textual: {exc}", file=sys.stderr)
+
+    final_blocks = []
+    for block in enriched:
+        if not isinstance(block, dict):
+            final_blocks.append(block)
+            continue
+            
+        cache_key = block.get('_cache_key')
+        if cache_key and cache_key in cache:
+            merged = merge_ai_textual_block(block, cache.get(cache_key))
+            merged['cache_hit'] = block.get('cache_hit', False)
+            merged.pop('_cache_key', None)
+            final_blocks.append(merged)
+        else:
+            block.pop('_cache_key', None)
+            final_blocks.append(block)
+    return final_blocks
+
+
+def call_ai_api(prompt, response_mime_type="application/json"):
+    api_key = get_openrouter_api_key()
+    if not api_key: return None
+    if is_ai_temporarily_blocked():
+        return None
+    
+    try:
+        # Prompt user format implementation
+        # Enforcing JSON formatting manually within the system prompt if mime_type is json
+        system_msg = "You must output strictly valid JSON." if response_mime_type == "application/json" else "You are a helpful assistant."
+        
+        from openrouter import OpenRouter
+        with OpenRouter(
+          api_key=api_key,
+        ) as client:
+          response = client.chat.send(
+            model=OPENROUTER_MODEL_PRIORITY[0],
+            messages=[
+              {
+                "role": "system",
+                "content": system_msg
+              },
+              {
+                "role": "user",
+                "content": prompt
+              }
+            ]
+          )
+          
+          if hasattr(response, 'choices') and len(response.choices) > 0:
+              message = response.choices[0].message
+              clear_ai_quota_block()
+              if hasattr(message, 'content'):
+                  return message.content
+              elif isinstance(message, dict):
+                  return message.get('content')
+          return None
+    except ImportError:
+        print("INFO: OpenRouter no está instalado. Instalalo usando 'pip install openrouter'", file=sys.stderr)
+        # Fallback to requests if openrouter sdk is not available
+        import requests
+        try:
+            resp = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                },
+                json={
+                    "model": OPENROUTER_MODEL_PRIORITY[0],
+                    "messages": [
+                        {"role": "system", "content": "You must output strictly valid JSON." if response_mime_type == "application/json" else "You are a helpful assistant."},
+                        {"role": "user", "content": prompt}
+                    ]
+                }
+            )
+            if resp.status_code == 429:
+                mark_ai_quota_blocked(resp.text)
+                return None
+            data = resp.json()
+            if 'choices' in data and len(data['choices']) > 0:
+                clear_ai_quota_block()
+                return data['choices'][0]['message']['content']
+            if isinstance(data, dict):
+                error_payload = data.get('error')
+                error_message = (
+                    error_payload.get('message')
+                    if isinstance(error_payload, dict)
+                    else str(error_payload or '')
+                )
+                if is_openrouter_rate_limit_message(error_message):
+                    mark_ai_quota_blocked(error_message)
+                    return None
+        except Exception as fallback_exc:
+            if is_openrouter_rate_limit_message(fallback_exc):
+                mark_ai_quota_blocked(fallback_exc)
+                return None
+            print(f"INFO: Error en fallback de OpenRouter (requests): {fallback_exc}", file=sys.stderr)
+        return None
+    except Exception as exc:
+        if is_openrouter_rate_limit_message(exc):
+            mark_ai_quota_blocked(exc)
+            return None
+        print(f"INFO: Error cargando OpenRouter: {exc}", file=sys.stderr)
+        return None
+
+
+def build_data_block_inventory(resultado):
+    inventory = []
+    if resultado.get('muestra_tabla'):
+        inventory.append({'type': 'table', 'name': 'Tabla principal', 'source': resultado['muestra_tabla'].get('hoja_origen')})
+    for chart in resultado.get('graficas_automaticas', []) or []:
+        inventory.append({'type': 'chart', 'name': chart.get('titulo'), 'source': chart.get('hoja_origen')})
+    for name, table in (resultado.get('otras_tablas') or {}).items():
+        inventory.append({'type': 'table', 'name': name, 'source': table.get('hoja_origen')})
+    for name, table in (resultado.get('genericas') or {}).items():
+        inventory.append({'type': 'table', 'name': name, 'source': table.get('hoja_origen')})
+    return inventory
 
 
 def is_probable_numeric_identifier(values):
@@ -535,21 +1481,21 @@ def compactar_categorias(labels, valores, max_items=MAX_BAR_CATEGORIES, otros_la
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def score_sheet_for_primary(name, df):
-    name_l = str(name).lower()
+    name_l = normalize_semantic_text(name)
     rows, cols = df.shape
     score = rows * cols
     if cols < 2 or rows < 2:
         return -1
     family = classify_sheet_family(name, df)
     score += PRIMARY_SHEET_FAMILY_SCORES.get(family, 0)
-    if any(k in name_l for k in ['muestra total', 'base de comisiones', 'consolidado total']):
+    if any(k in name_l for k in ['muestra total', 'consolidado total', 'resumen ejecutivo', 'tabla principal']):
         score += 500
     if any(k in name_l for k in ['ventas', 'inventario', 'stock', 'productos', 'resumen', 'dashboard', 'datos']):
         score += 180
     if any(k in name_l for k in ['hallazgo', 'oportunidad', 'mejora', 'coso', 'td', 'distribucion']):
         score -= 200
-    headers = [str(c).strip().lower() for c in df.columns if pd.notna(c)]
-    if any(h in headers for h in ['solicitante', 'valor total solicitado', 'ventas_totales', 'precio_venta', 'stock']):
+    headers = [normalize_semantic_text(c) for c in df.columns if pd.notna(c)]
+    if any(h in headers for h in ['solicitante', 'valor total solicitado', 'valor total', 'ventas totales']):
         score += 120
     return score
 
@@ -586,7 +1532,7 @@ def analizar_columna_numerica(df, col):
 
 def es_columna_identificador(col):
     nombre = str(col).lower()
-    return any(token in nombre for token in ['id', 'codigo', 'consecutivo', 'numero', 'nro', 'folio', 'radicado'])
+    return any(token in nombre for token in ['id', 'codigo', 'consecutivo', 'numero', 'nro', 'folio', 'radicado', 'centro', 'comprobante'])
 
 
 def es_columna_persona(col):
@@ -606,6 +1552,30 @@ def infer_numeric_kind(label=None):
     if any(token in normalized for token in ['valor', 'monto', 'total', 'costo', 'precio', 'ingreso', 'venta', 'gasto', 'importe', 'cop', 'peso', 'pesos', 'moneda', 'tarifa']):
         return 'currency'
     return 'number'
+
+
+def is_temporal_header(col):
+    normalized = normalize_semantic_text(col)
+    if not normalized:
+        return False
+    return any(
+        token in normalized
+        for token in ('fecha', 'date', 'periodo', 'period', 'mes', 'month', 'semana', 'week', 'dia', 'day', 'anio', 'ano', 'year')
+    )
+
+
+def should_prioritize_primary_story(primary_sheet_name, primary_df):
+    if primary_df is None or getattr(primary_df, 'empty', True):
+        return False
+    rows, cols = primary_df.shape
+    if rows < 150 or cols < 5:
+        return False
+    primary_family = classify_sheet_family(primary_sheet_name, primary_df)
+    if primary_family != 'general':
+        return False
+    signature = build_sheet_semantic_signature(primary_sheet_name, primary_df)
+    meaningful_tokens = ('comision', 'valor', 'costo', 'gasto', 'centro', 'ciudad', 'fecha', 'viaje', 'solicit')
+    return any(token in signature for token in meaningful_tokens)
 
 
 def normalize_currency_code(value):
@@ -720,6 +1690,20 @@ def build_numeric_analysis_profile(df, col):
             'rate_column': None,
         }
 
+    if is_temporal_header(col):
+        return {
+            'kind': 'temporal',
+            'series_raw': empty_series,
+            'series_valid': empty_series.dropna(),
+            'mixed_currency': False,
+            'conversion_applied': False,
+            'resolved_ratio': 0.0,
+            'unresolved_rows': 0,
+            'currencies_detected': ['COP'],
+            'currency_column': None,
+            'rate_column': None,
+        }
+
     metric_kind = infer_numeric_kind(col)
     if metric_kind == 'currency':
         financial = build_financial_series(df, col)
@@ -755,6 +1739,8 @@ def build_numeric_analysis_profile(df, col):
 
 def should_trust_numeric_profile(profile, min_resolved_ratio=0.7):
     if not profile:
+        return False
+    if profile.get('kind') in {'temporal', 'identifier'}:
         return False
     if profile.get('kind') != 'currency':
         return True
@@ -853,30 +1839,45 @@ def detectar_columnas_importantes(df):
             continue
         
         col_lower = str(col).lower()
+        is_temporal = is_temporal_header(col)
+        is_identifier_header = es_columna_identificador(col)
+        is_exec_dimension = es_dimension_ejecutiva(col)
         
         # Detectar tipo
         serie_num = normalize_numeric_series(serie, col)
         ratio_num = serie_num.notna().sum() / max(1, len(serie))
-        
-        if ratio_num >= 0.6:
+        unique_vals = serie.astype(str).nunique()
+        total_vals = len(serie)
+        ratio_unique = unique_vals / max(1, total_vals)
+
+        if is_temporal:
+            info['tipo'] = 'temporal'
+            info['importancia'] += 8
+        elif ratio_num >= 0.6 and not is_identifier_header:
             info['tipo'] = 'numerico'
             info['importancia'] += 20
             stats = analizar_columna_numerica(df, col)
             if stats:
                 info['stats'] = stats
-                if is_probable_numeric_identifier(serie_num.dropna().tolist()) and not es_dimension_ejecutiva(col):
+                if is_probable_numeric_identifier(serie_num.dropna().tolist()) and not is_exec_dimension:
                     info['tipo'] = 'identificador'
                     info['importancia'] -= 18
+                elif ratio_unique > 0.92 and infer_numeric_kind(col) == 'number' and not is_exec_dimension:
+                    info['tipo'] = 'identificador'
+                    info['importancia'] -= 14
                 if stats['total'] > 1000000:
                     info['importancia'] += 30
                 elif stats['total'] > 10000:
                     info['importancia'] += 15
         else:
-            unique_vals = serie.astype(str).nunique()
-            total_vals = len(serie)
-            ratio_unique = unique_vals / max(1, total_vals)
-            
-            if ratio_unique <= 0.3 and unique_vals <= 20:
+            if is_exec_dimension and unique_vals >= 2 and unique_vals <= min(250, max(15, int(total_vals * 0.45))):
+                info['tipo'] = 'categorica'
+                info['importancia'] += 18
+                info['valores_unicos'] = unique_vals
+            elif is_identifier_header and not is_exec_dimension:
+                info['tipo'] = 'identificador'
+                info['importancia'] += 5
+            elif ratio_unique <= 0.3 and unique_vals <= 20:
                 info['tipo'] = 'categorica'
                 info['importancia'] += 15
                 info['valores_unicos'] = unique_vals
@@ -1500,7 +2501,7 @@ def generar_graficas_automaticas(df, cols_info, tendencia=None):
 # GENERACIÓN DE CONCLUSIONES INTELIGENTES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def generar_conclusiones(df, cols_info, kpis, es_comisiones, 
+def generar_conclusiones(df, cols_info, kpis, _unused_specialization=False,
                          paretos=None, outliers_list=None, correlaciones=None, tendencia=None):
     """Genera conclusiones lógicas REALES y profundas basadas en datos analizados."""
     conclusiones = []
@@ -1684,107 +2685,10 @@ def format_number(val, kind='number', compact=True):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LECTORES ESPECIALIZADOS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def leer_coso(excel_path):
-    try:
-        xl = pd.ExcelFile(excel_path)
-        sheet_name = None
-        for sn in xl.sheet_names:
-            if 'coso' in sn.lower():
-                sheet_name = sn
-                break
-        if not sheet_name: return None
-        df = pd.read_excel(excel_path, sheet_name=sheet_name, header=None, skiprows=3)
-        header_row_idx = 0
-        for i in range(min(10, len(df))):
-            fila_valores = df.iloc[i].tolist()
-            fila_str = " ".join([str(v).lower() for v in fila_valores])
-            if any(k in fila_str for k in ['componente', 'item', 'evalua', 'punto de control', 'control']):
-                header_row_idx = i
-                break
-        header_values = [
-            str(value).strip() if pd.notna(value) and str(value).strip() else f'Col_{index}'
-            for index, value in enumerate(df.iloc[header_row_idx].tolist())
-        ]
-        df = df.iloc[header_row_idx + 1:].copy().dropna(how='all')
-        while df.shape[1] > 0 and df.iloc[:, 0].isna().all():
-            df = df.iloc[:, 1:]
-            header_values = header_values[1:]
-        if df.shape[1] >= 3:
-            df.columns = normalizar_columnas_unicas(header_values[:df.shape[1]])
-            componente_col = df.columns[0]
-            item_col = df.columns[1]
-            estado_col = df.columns[2]
-            accion_col = df.columns[3] if df.shape[1] >= 4 else None
-
-            df[componente_col] = df[componente_col].ffill()
-            df = df[df[item_col].notna()]
-            df[item_col] = df[item_col].astype(str).str.strip()
-            df = df[df[item_col].str.len() > 3]
-            df = df[~df[item_col].str.lower().str.contains('item|evalua|punto de control', na=False)]
-            df = df[~df[componente_col].astype(str).str.lower().str.contains('componente|evalua', na=False)]
-            df[estado_col] = df[estado_col].apply(
-                lambda value: 'Pendiente de evaluacion' if es_valor_fantasma(value) else str(value).strip()
-            )
-
-            export_cols = [componente_col, item_col, estado_col]
-            export_headers = ['Componente', 'Ítems Evaluados', 'Estado']
-            if accion_col:
-                accion_values = df[accion_col].astype(str).str.strip()
-                if accion_values.str.len().gt(0).any():
-                    export_cols.append(accion_col)
-                    export_headers.append('Acción Recomendada')
-                    df[accion_col] = accion_values.str[:120]
-
-            df[item_col] = df[item_col].str[:120]
-            df[componente_col] = df[componente_col].astype(str).str[:80]
-            df[estado_col] = df[estado_col].astype(str).str[:60]
-            tabla = {
-                'encabezados': export_headers,
-                'filas': df[export_cols].values.tolist(),
-                'hoja_origen': sheet_name,
-                'sheet_family': 'coso',
-            }
-            if validar_tabla(tabla['encabezados'], tabla['filas']):
-                return tabla
-        return None
-    except Exception as e: 
-        print(f"Error leer_coso: {e}", file=sys.stderr)
-        return None
-
-
-def leer_distribucion_mes(excel_path):
-    try:
-        xl = pd.ExcelFile(excel_path)
-        sheet_name = None
-        for sn in xl.sheet_names:
-            if 'td' == sn.lower().strip() or 'distribucion' in sn.lower():
-                sheet_name = sn
-                break
-        if not sheet_name: return None
-        df = pd.read_excel(excel_path, sheet_name=sheet_name, header=None)
-        df = df.dropna(how='all').iloc[1:]
-        if df.shape[1] > 0:
-            df.columns = ['Centro de Costos'] + [f'C{i}' for i in range(df.shape[1]-1)]
-            df_slide = df[['Centro de Costos']].dropna().head(12)
-            tabla = {
-                'encabezados': ['Centro de Costos'],
-                'filas': df_slide.values.tolist(),
-                'hoja_origen': sheet_name,
-            }
-            if validar_tabla(tabla['encabezados'], tabla['filas']):
-                return tabla
-        return None
-    except: return None
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # PRESUPUESTO DE SLIDES INTELIGENTE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def calcular_presupuesto_slides(resultado, es_comisiones):
+def calcular_presupuesto_slides(resultado, _unused_specialization=False):
     """
     Calcula cuántas slides asignar a cada sección para no exceder MAX_SLIDES.
     Prioriza gráficas con datos ricos y limita tablas paginadas.
@@ -1796,8 +2700,6 @@ def calcular_presupuesto_slides(resultado, es_comisiones):
         'desglose_financiero': 0,
         'graficas': 0,
         'tabla_principal': 0,
-        'hallazgos': 0,
-        'coso': 0,
         'genericas': 0,
         'conclusiones': 0,
         'cierre': 1
@@ -1810,28 +2712,18 @@ def calcular_presupuesto_slides(resultado, es_comisiones):
         presupuesto['resumen_kpis'] = 1
         slots_disponibles -= 1
     
-    # Prioridad 2: Gráficas (máximo 4 — priorizamos datos ricos)
+    total_hojas = len(resultado.get('metadatos', {}).get('hojas_encontradas', []) or [])
+    has_textual_blocks = bool(resultado.get('bloques_textuales'))
+
+    # Prioridad 2: Gráficas (reservar al menos 1 si hay graficas reales)
     num_graficas = len(resultado.get('graficas_automaticas', []))
-    if es_comisiones:
-        num_graficas += (1 if resultado.get('grafica_estados') else 0)
-        num_graficas += (1 if resultado.get('grafica_ciudades') else 0)
-        num_graficas += (1 if resultado.get('grafica_valores') else 0)
-        num_graficas += (1 if resultado.get('centros_costos') else 0)
     graficas_slots = min(num_graficas, MAX_AUTO_CHARTS, slots_disponibles)
+    if num_graficas > 0 and slots_disponibles > 0:
+        graficas_slots = max(1, graficas_slots)
     presupuesto['graficas'] = graficas_slots
     slots_disponibles -= graficas_slots
     
-    # Prioridad 3: Desglose financiero (solo si comisiones)
-    if es_comisiones and resultado.get('grafica_valores') and slots_disponibles > 0:
-        presupuesto['desglose_financiero'] = 1
-        slots_disponibles -= 1
-    
-    # Prioridad 4: Top solicitantes (si comisiones)
-    if es_comisiones and resultado.get('top_solicitantes') and slots_disponibles > 0:
-        presupuesto['top_solicitantes'] = 1
-        slots_disponibles -= 1
-    
-    # Prioridad 5: Tabla principal (máximo 2 páginas, ESTRICTO)
+    # Prioridad 3: Tabla principal (máximo 2 páginas, ESTRICTO)
     num_filas = len(resultado.get('muestra_tabla', {}).get('filas', []))
     if num_filas > 0 and slots_disponibles > 0:
         tabla_pages = min(2, max(1, num_filas // ROWS_PER_TABLE_SLIDE + (1 if num_filas % ROWS_PER_TABLE_SLIDE else 0)))
@@ -1839,32 +2731,21 @@ def calcular_presupuesto_slides(resultado, es_comisiones):
         presupuesto['tabla_principal'] = tabla_pages
         slots_disponibles -= tabla_pages
     
-    # Prioridad 6: Hallazgos y oportunidades (máximo 3)
-    num_otras = len(resultado.get('otras_tablas', {}))
-    if num_otras > 0 and slots_disponibles > 0:
-        hallazgos_slots = min(num_otras, 3, slots_disponibles)
-        presupuesto['hallazgos'] = hallazgos_slots
-        slots_disponibles -= hallazgos_slots
-    
-    # Prioridad 7: COSO
-    if resultado.get('coso') and slots_disponibles > 0:
-        presupuesto['coso'] = 1
-        slots_disponibles -= 1
-    
-    # Prioridad 8: Conclusiones (siempre reservamos espacio)
+    # Prioridad 6: Conclusiones (siempre reservamos espacio)
     if (resultado.get('conclusiones') or resultado.get('analisis_avanzado')) and slots_disponibles > 0:
         presupuesto['conclusiones'] = 1
         slots_disponibles -= 1
     
-    # Prioridad 9: Estructura del archivo
+    # Prioridad 7: Estructura del archivo
     if resultado.get('metadatos', {}).get('hojas_encontradas') and slots_disponibles > 0:
         presupuesto['estructura'] = 1
         slots_disponibles -= 1
     
-    # Prioridad 10: Hojas genéricas adicionales (máximo 3)
-    num_genericas = len(resultado.get('genericas', {}))
+    # Prioridad 8: Tablas adicionales genéricas
+    num_genericas = len(resultado.get('otras_tablas', {})) + len(resultado.get('genericas', {}))
     if num_genericas > 0 and slots_disponibles > 0:
-        gen_slots = min(num_genericas, 3, slots_disponibles)
+        cap_genericas = 4 if has_textual_blocks or total_hojas >= 10 else 3
+        gen_slots = min(num_genericas, cap_genericas, slots_disponibles)
         presupuesto['genericas'] = gen_slots
         slots_disponibles -= gen_slots
     
@@ -1878,13 +2759,500 @@ def calcular_presupuesto_slides(resultado, es_comisiones):
 # PIPELINE PRINCIPAL
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def preparar_datos_para_slides(excel_path):
+import requests
+
+def sintetizar_resumen_ia(analisis_data):
+    """
+    Sintetiza un resumen ejecutivo usando SOLO conclusiones, tablas y graficas ya calculadas por Python.
+    """
+    conclusiones = analisis_data.get('conclusiones', [])
+    insights = analisis_data.get('analisis_avanzado', {}).get('insights', [])
+    
+    textos_base = conclusiones[:5] + insights[:3]
+    if not textos_base:
+        return None
+
+    graficas = analisis_data.get('graficas_automaticas', [])
+    info_graficas = []
+    for i, g in enumerate(graficas):
+        info_graficas.append({
+            "id": i,
+            "titulo": g.get('titulo', ''),
+            "labels_top_3": g.get('labels', [])[:3],
+            "valores_top_3": g.get('valores', [])[:3]
+        })
+
+    info_tabla = ""
+    if 'muestra_tabla' in analisis_data:
+        headers = analisis_data['muestra_tabla'].get('encabezados', [])
+        rows = analisis_data['muestra_tabla'].get('filas', [])[:3]
+        info_tabla = f"Tabla Principal: Encabezados: {headers}, Top 3 Filas: {rows}"
+
+    prompt = f"""
+    Eres un Consultor Senior. Sintetiza estos hallazgos estadísticos reales en un breve Resumen Ejecutivo para la presentación corporativa.
+    Adicionalmente, redacta 1 línea de "insight" de negocio brillante para cada gráfica proporcionada, y 1 para la tabla principal.
+    
+    HALLAZGOS BASE:
+    {json.dumps(textos_base, ensure_ascii=False)}
+
+    DATOS DE GRÁFICAS:
+    {json.dumps(info_graficas, ensure_ascii=False)}
+
+    DATOS DE TABLAS:
+    {info_tabla}
+
+    Responde ESTRICTAMENTE con este JSON sin formato markdown extra:
+    {{
+      "vision_general": "Párrafo resumiendo la situación (máx 40 palabras)",
+      "alerta_principal": "El riesgo, anomalía o concentración más crítica detectada (máx 25 palabras)",
+      "recomendacion": "Acción estratégica a tomar (máx 20 palabras)",
+      "insight_tabla": "Insight de negocio analizando los datos de la tabla (máx 20 palabras)",
+      "insights_graficas": [
+          {{"id": 0, "insight": "Fuerte concentración en X, indicando oportunidad de mejora."}}
+      ]
+    }}
+    """
+
+    response_text = call_ai_api(prompt)
+    if response_text:
+        try:
+            # Robust extraction of JSON
+            json_match = re.search(r'(\{.*\})', response_text.replace('\n', ' '), re.DOTALL)
+            if json_match:
+                response_text = json_match.group(1)
+            else:
+                response_text = response_text.replace("```json", "").replace("```", "").strip()
+            
+            parsed = json.loads(response_text)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as e:
+            print(f"INFO: Error parseando resumen IA: {e}", file=sys.stderr)
+    return None
+
+
+def sintetizar_briefing_ejecutivo_ia(analisis_data):
+    """
+    Genera un briefing ejecutivo corto para las diapositivas 2 y 3.
+    """
+    metadatos = analisis_data.get('metadatos', {}) or {}
+    resumen = analisis_data.get('resumen_ejecutivo', {}) or {}
+    generico = analisis_data.get('resumen_generico', {}) or {}
+    conclusiones = unique_non_empty_texts(analisis_data.get('conclusiones') or [], limit=4)
+    insights = []
+    for item in (analisis_data.get('analisis_avanzado', {}) or {}).get('insights', []) or []:
+        if isinstance(item, dict):
+            text = sanitize_executive_text(item.get('texto'), max_len=140)
+        else:
+            text = sanitize_executive_text(item, max_len=140)
+        if text:
+            insights.append(text)
+    insights = unique_non_empty_texts(insights, limit=3)
+
+    graficas = []
+    for item in (analisis_data.get('graficas_automaticas') or [])[:3]:
+        graficas.append({
+            'titulo': sanitize_executive_text(item.get('titulo'), max_len=80),
+            'insight': sanitize_executive_text(item.get('insight_auto'), max_len=120),
+            'labels': [sanitize_executive_text(label, max_len=40) for label in (item.get('labels') or [])[:3]],
+            'valores': (item.get('valores') or [])[:3],
+        })
+
+    tabla = None
+    muestra = analisis_data.get('muestra_tabla') or {}
+    if muestra:
+        tabla = {
+            'encabezados': [sanitize_executive_text(item, max_len=40) for item in (muestra.get('encabezados') or [])[:5]],
+            'filas': [
+                [sanitize_executive_text(value, max_len=60) for value in row[:5]]
+                for row in (muestra.get('filas') or [])[:2]
+                if isinstance(row, (list, tuple))
+            ],
+        }
+
+    prompt_payload = {
+        'archivo': metadatos.get('archivo'),
+        'hoja_principal': generico.get('hoja_principal') or metadatos.get('hoja_principal'),
+        'tipo_libro': metadatos.get('tipo_libro'),
+        'familias_detectadas': metadatos.get('familias_detectadas') or [],
+        'resumen_ejecutivo': resumen,
+        'resumen_generico': generico,
+        'conclusiones': conclusiones,
+        'insights': insights,
+        'graficas': graficas,
+        'tabla_principal': tabla,
+    }
+    cache_key = build_executive_briefing_cache_key(prompt_payload)
+    cache = load_executive_ai_cache()
+    cached = normalize_executive_briefing_ai_payload(cache.get(cache_key))
+    if cached:
+        return cached
+
+    prompt = f"""
+    Eres consultor senior de gerencia y control interno.
+    Debes redactar contenido ejecutivo de alto impacto para las diapositivas iniciales de un PowerPoint.
+    Usa SOLO los hechos presentes en el JSON. No inventes cifras, procesos, objetivos, areas ni riesgos.
+    El tono debe ser de comite de gerencia: sobrio, claro, accionable y orientado a decisiones.
+    Responde en espanol.
+    Cada bullet debe ser concreto, con lectura de negocio y sin jerga tecnica.
+    Evita mencionar IDs, nombres de columnas, nombres de hojas, conteos tecnicos de tablas/graficas o detalles de sistema.
+    Prioriza mensajes sobre concentracion, impacto financiero, riesgo, oportunidad y acciones de seguimiento.
+    No uses puntos suspensivos (...).
+
+    DATOS:
+    {json.dumps(prompt_payload, ensure_ascii=False)}
+
+    Responde EXCLUSIVAMENTE con este JSON:
+    {{
+      "de_que_trata": "frase de maximo 22 palabras con enfoque gerencial",
+      "datos_tecnicos": ["bullet 1", "bullet 2"],
+      "planeamiento": ["bullet 1", "bullet 2"],
+      "puntos_a_tratar": ["bullet 1", "bullet 2"],
+      "breve_resumen": ["bullet 1", "bullet 2"],
+      "objetivos": ["bullet 1", "bullet 2"],
+      "elementos_prioritarios": ["bullet 1", "bullet 2"]
+    }}
+    """
+
+    response_text = call_ai_api(prompt)
+    if response_text:
+        try:
+            # Robust extraction of JSON
+            json_match = re.search(r'(\{.*\})', response_text.replace('\n', ' '), re.DOTALL)
+            if json_match:
+                response_text = json_match.group(1)
+            else:
+                response_text = response_text.replace("```json", "").replace("```", "").strip()
+                
+            parsed = json.loads(response_text)
+            normalized = normalize_executive_briefing_ai_payload(parsed)
+            if normalized:
+                cache[cache_key] = normalized
+                save_executive_ai_cache(cache)
+            return normalized
+        except Exception as exc:
+            print(f"INFO: Error parseando briefing IA: {exc}", file=sys.stderr)
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLAMADA UNIFICADA: todo en 1 request → máximo ahorro de cuota
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_unified_ai_cache():
+    try:
+        if os.path.exists(UNIFIED_AI_CACHE_FILE):
+            with open(UNIFIED_AI_CACHE_FILE, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_unified_ai_cache(cache_data):
+    try:
+        os.makedirs(os.path.dirname(UNIFIED_AI_CACHE_FILE), exist_ok=True)
+        with open(UNIFIED_AI_CACHE_FILE, 'w', encoding='utf-8') as fh:
+            json.dump(cache_data, fh, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def build_unified_cache_key(analisis_data):
+    """Hash del contenido analítico esencial — misma clave si el mismo Excel."""
+    fingerprint = {
+        'archivo': (analisis_data.get('metadatos') or {}).get('archivo'),
+        'conclusiones': (analisis_data.get('conclusiones') or [])[:5],
+        'insights': [(i.get('texto') if isinstance(i, dict) else i)
+                     for i in ((analisis_data.get('analisis_avanzado') or {}).get('insights') or [])[:3]],
+        'graficas_titulos': [g.get('titulo') for g in (analisis_data.get('graficas_automaticas') or [])[:4]],
+        'bloques_titulos': [b.get('title') for b in (analisis_data.get('bloques_textuales') or [])[:3]],
+        'prompt_version': 'unified-v3',
+    }
+    raw = json.dumps(fingerprint, ensure_ascii=False, sort_keys=True)
+    import hashlib
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def sintetizar_todo_con_ia(analisis_data):
+    """
+    UNA sola llamada a la IA que produce:
+    - resumen_ejecutivo_ia   (visión, alerta, recomendación, insights gráficas)
+    - briefing_ejecutivo_ia  (diapositivas 2-3)
+    - bloques_textuales enriquecidos (max 3)
+    """
+    cache = load_unified_ai_cache()
+    cache_key = build_unified_cache_key(analisis_data)
+    cached = cache.get(cache_key)
+    if isinstance(cached, dict) and cached.get('resumen_ejecutivo_ia'):
+        print("INFO: IA unificada — resultado desde cache.", file=sys.stderr)
+        return cached
+
+    # ── Construir payload compacto ──────────────────────────────────────────
+    conclusiones = (analisis_data.get('conclusiones') or [])[:5]
+    insights_raw = (analisis_data.get('analisis_avanzado') or {}).get('insights') or []
+    insights = [(i.get('texto') if isinstance(i, dict) else i) for i in insights_raw][:3]
+    textos_base = unique_non_empty_texts(
+        [sanitize_executive_text(t, max_len=160) for t in conclusiones + insights], limit=6
+    )
+
+    graficas_info = []
+    for idx, g in enumerate((analisis_data.get('graficas_automaticas') or [])[:4]):
+        graficas_info.append({
+            'id': idx,
+            'titulo': sanitize_executive_text(g.get('titulo'), max_len=60),
+            'top_labels': [sanitize_executive_text(l, max_len=30) for l in (g.get('labels') or [])[:3]],
+            'top_valores': (g.get('valores') or [])[:3],
+        })
+
+    bloques_raw = []
+    for b in (analisis_data.get('bloques_textuales') or [])[:MAX_TEXTUAL_AI_BLOCKS]:
+        bloques_raw.append({
+            'title': sanitize_executive_text(b.get('title'), max_len=60),
+            'sheet_family': b.get('sheet_family'),
+            'lines': [sanitize_executive_text(l, max_len=160) for l in (b.get('lines') or [])[:4]],
+        })
+
+    metadatos = analisis_data.get('metadatos') or {}
+    generico = analisis_data.get('resumen_generico') or {}
+    muestra = analisis_data.get('muestra_tabla') or {}
+    tabla_info = None
+    if muestra:
+        tabla_info = {
+            'encabezados': [sanitize_executive_text(h, max_len=35) for h in (muestra.get('encabezados') or [])[:5]],
+            'filas': [[sanitize_executive_text(v, max_len=50) for v in row[:5]]
+                      for row in (muestra.get('filas') or [])[:2] if isinstance(row, (list, tuple))],
+        }
+
+    visual_candidates = build_visual_candidates_for_ai(analisis_data)
+
+    payload = {
+        'archivo': metadatos.get('archivo'),
+        'tipo_libro': metadatos.get('tipo_libro'),
+        'hoja_principal': generico.get('hoja_principal') or metadatos.get('hoja_principal'),
+        'familias': metadatos.get('familias_detectadas') or [],
+        'textos_base': textos_base,
+        'bloques_textuales': bloques_raw,
+        'tabla_principal': tabla_info,
+        'estadisticas_categoricas': (analisis_data.get('analisis_avanzado') or {}).get('pareto', []),
+        'estadisticas_temporales': (analisis_data.get('analisis_avanzado') or {}).get('tendencia', {}),
+        'visual_candidates': visual_candidates,
+    }
+
+    prompt = f"""
+    Eres un Consultor Estratégico Senior. Tu misión es generar un análisis unificado y brillante de este libro de Excel.
+    
+    INSTRUCCIONES ESPECIALES DEL USUARIO:
+    {analisis_data.get('user_instructions', 'No se proporcionaron instrucciones específicas.')}
+
+    ESTRUCTURA DE RESPUESTA (JSON):
+    1. "resumen_ejecutivo_ia": Visión, alerta crítica, recomendación estratégica e insights para visuales existentes.
+    2. "briefing_ejecutivo_ia": Bullet points para las diapositivas iniciales.
+    3. "bloques_textuales_enriquecidos": Versión ejecutiva de los bloques de texto detectados.
+    4. "visual_plan_ia": Selección de visuales existentes.
+
+    REGLAS CRITICAS:
+    - NO inventes gráficas, tablas, KPIs ni cifras nuevas.
+    - SOLO puedes recomendar IDs presentes en "visual_candidates".
+    - Si una gráfica o tabla no aporta una lectura ejecutiva clara, omítela.
+    - Evita frases técnicas como duplicados, placeholders, columnas, hojas, cobertura, integridad, motor o sistema.
+    - Prioriza impacto, riesgo, concentración, desviación, oportunidad y decisión.
+    - Si el material es débil, devuelve menos visuales, no rellenes.
+
+    DATOS DEL ARCHIVO:
+    {json.dumps(payload, ensure_ascii=False)}
+
+    Responde ESTRICTAMENTE con un solo objeto JSON que contenga estas llaves:
+    {{
+      "resumen_ejecutivo_ia": {{
+        "vision_general": "texto",
+        "alerta_principal": "texto",
+        "recomendacion": "texto",
+        "insight_tabla": "texto",
+        "insights_graficas": [{{"id": 0, "insight": "texto"}}]
+      }},
+      "briefing_ejecutivo_ia": {{
+        "de_que_trata": "texto",
+        "datos_tecnicos": ["texto", "texto"],
+        "planeamiento": ["texto", "texto"],
+        "puntos_a_tratar": ["texto", "texto"],
+        "breve_resumen": ["texto", "texto"],
+        "objetivos": ["texto", "texto"],
+        "elementos_prioritarios": ["texto", "texto"]
+      }},
+      "bloques_textuales_enriquecidos": [
+        {{"title": "texto", "subtitle": "texto", "lines": ["texto"]}}
+      ],
+      "visual_plan_ia": {{
+        "charts": [
+          {{"id": "chart:auto:0", "mensaje_clave": "texto", "por_que_importa": "texto"}}
+        ],
+        "tables": [
+          {{"id": "table:main", "modo": "summary|detail|omit", "mensaje_clave": "texto", "por_que_importa": "texto"}}
+        ],
+        "storyline": ["texto", "texto", "texto"]
+      }}
+    }}
+    No uses markdown. Sé profesional, sobrio y accionable.
+    """
+
+    response_text = call_ai_api(prompt)
+    if response_text:
+        try:
+            # Robust extraction of JSON
+            json_match = re.search(r'(\{.*\})', response_text.replace('\n', ' '), re.DOTALL)
+            if json_match:
+                response_text = json_match.group(1)
+            else:
+                response_text = response_text.replace("```json", "").replace("```", "").strip()
+            
+            parsed = json.loads(response_text)
+            
+            # Validar estructura mínima
+            if not isinstance(parsed, dict): return None
+            
+            result = {}
+            if isinstance(parsed.get('resumen_ejecutivo_ia'), dict):
+                result['resumen_ejecutivo_ia'] = parsed['resumen_ejecutivo_ia']
+            if isinstance(parsed.get('briefing_ejecutivo_ia'), dict):
+                result['briefing_ejecutivo_ia'] = normalize_executive_briefing_ai_payload(parsed['briefing_ejecutivo_ia'])
+            if isinstance(parsed.get('bloques_textuales_enriquecidos'), list):
+                result['bloques_textuales_enriquecidos'] = parsed['bloques_textuales_enriquecidos']
+            visual_plan = normalize_visual_plan_ai_payload(parsed.get('visual_plan_ia'))
+            if visual_plan:
+                result['visual_plan_ia'] = visual_plan
+            
+            if result:
+                cache[cache_key] = result
+                save_unified_ai_cache(cache)
+                return result
+        except Exception as exc:
+            print(f"INFO: Error parseando IA unificada: {exc}", file=sys.stderr)
+            
+    return None
+
+
+def generar_sugerencias_ia(analisis_data):
+    """
+    Genera sugerencias inteligentes y específicas para el usuario, basándose
+    en los datos reales del Excel ya analizados.
+    """
+    cache = load_unified_ai_cache()
+    cache_key = build_unified_cache_key(analisis_data) + "_sugerencias_v2"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    # ── Payload rico con datos reales del Excel ──
+    metadatos = analisis_data.get('metadatos') or {}
+    generico  = analisis_data.get('resumen_generico') or {}
+    muestra   = analisis_data.get('muestra_tabla') or {}
+    avanzado  = analisis_data.get('analisis_avanzado') or {}
+
+    # Columnas de la hoja principal
+    columnas = muestra.get('encabezados') or []
+
+    # Muestra de filas (máx 3 filas, máx 6 columnas)
+    filas_raw = muestra.get('filas') or []
+    sample_rows = []
+    for row in filas_raw[:3]:
+        if isinstance(row, (list, tuple)):
+            sample_rows.append([sanitize_executive_text(str(v), max_len=40) for v in row[:6]])
+
+    # KPIs detectados automáticamente
+    kpis = [k.get('label') for k in (analisis_data.get('kpis_automaticos') or []) if isinstance(k, dict)]
+
+    # Pareto (columna más dominante por frecuencia)
+    pareto = avanzado.get('pareto') or []
+    pareto_summary = []
+    for p in pareto[:3]:
+        if isinstance(p, dict):
+            pareto_summary.append({
+                'columna': p.get('columna'),
+                'top_valor': (p.get('top_valores') or [{}])[0].get('valor') if p.get('top_valores') else None,
+                'top_pct': (p.get('top_valores') or [{}])[0].get('pct') if p.get('top_valores') else None,
+            })
+
+    # Tendencia temporal
+    tendencia = avanzado.get('tendencia') or {}
+    tendencia_info = {
+        'columna_temporal': tendencia.get('col_temporal'),
+        'columna_valor': tendencia.get('col_valor'),
+        'tendencia_tipo': tendencia.get('tendencia'),
+    } if tendencia else None
+
+    # Bloques textuales detectados
+    temas_textuales = [b.get('title') for b in (analisis_data.get('bloques_textuales') or [])[:4] if isinstance(b, dict)]
+
+    payload = {
+        'archivo': metadatos.get('archivo'),
+        'hojas': metadatos.get('hojas_encontradas'),
+        'hoja_principal': generico.get('hoja_principal') or metadatos.get('hoja_principal'),
+        'total_filas': generico.get('total_filas'),
+        'columnas': columnas[:12],
+        'muestra_filas': sample_rows,
+        'kpis_detectados': kpis[:8],
+        'pareto': pareto_summary,
+        'tendencia': tendencia_info,
+        'temas_hojas': temas_textuales,
+    }
+
+    prompt = f"""Eres un Experto en Storytelling de Datos y Presentaciones Ejecutivas.
+El usuario ha subido un Excel con la siguiente información real:
+
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+
+Tu misión: Genera EXACTAMENTE 5 sugerencias breves, concretas y accionables que el usuario podría escribir como instrucciones para personalizar la generación de su PowerPoint. 
+
+REGLAS:
+- Cada sugerencia debe hacer referencia a datos REALES del Excel (columnas, valores, hojas).
+- Sé específico: menciona nombres de columnas o métricas cuando sea relevante.
+- Mezcla tipos: enfoque en gráficas, en tablas, en conclusiones, en comparativas, en alertas.
+- Longitud: máximo 12 palabras por sugerencia.
+- Idioma: español.
+
+Responde ÚNICAMENTE con este JSON:
+{{
+  "sugerencias": ["sugerencia 1", "sugerencia 2", "sugerencia 3", "sugerencia 4", "sugerencia 5"]
+}}"""
+
+    response_text = call_ai_api(prompt)
+    if response_text:
+        try:
+            json_match = re.search(r'(\{.*\})', response_text.replace('\n', ' '), re.DOTALL)
+            clean = json_match.group(1) if json_match else response_text.replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(clean)
+            if isinstance(parsed.get('sugerencias'), list) and len(parsed['sugerencias']) >= 2:
+                result = {'sugerencias': [s for s in parsed['sugerencias'] if isinstance(s, str) and len(s) > 5][:5]}
+                cache[cache_key] = result
+                save_unified_ai_cache(cache)
+                return result
+        except Exception as exc:
+            print(f"INFO: Error parseando sugerencias IA: {exc}", file=sys.stderr)
+
+    # Fallback con columnas reales si la IA falla
+    fallback = []
+    if columnas:
+        fallback.append(f"Resalta los valores más altos de '{columnas[0]}'")
+    if len(columnas) > 1:
+        fallback.append(f"Crea una gráfica comparativa de '{columnas[1]}'")
+    if kpis:
+        fallback.append(f"Pon los KPIs principales en la portada: {', '.join(kpis[:2])}")
+    fallback += ["Genera conclusiones ejecutivas con alertas en rojo", "Agrupa los datos por categoría y muestra tendencias"]
+    return {"sugerencias": fallback[:5]}
+
+
+def preparar_datos_para_slides(excel_path, user_instructions=None):
     try:
         sheets = pd.read_excel(excel_path, sheet_name=None)
     except Exception as e:
         return {"error": str(e)}
 
     resultado = {}
+    resultado['user_instructions'] = user_instructions
+    resultado['ai_curation_status'] = build_default_ai_curation_status()
     resultado['metadatos'] = {
         'hojas_encontradas': list(sheets.keys()),
         'archivo': os.path.basename(excel_path)
@@ -1898,6 +3266,7 @@ def preparar_datos_para_slides(excel_path):
     resultado['metadatos']['clasificacion_hojas'] = workbook_profile.get('familias_por_hoja', {})
     resultado['metadatos']['familias_detectadas'] = workbook_profile.get('familias_detectadas', [])
     resultado['perfil_libro'] = workbook_profile
+    resultado['bloques_textuales'] = []
 
     # === BUSCAR HOJA PRINCIPAL ===
     target_sheet = None
@@ -1912,7 +3281,6 @@ def preparar_datos_para_slides(excel_path):
         target_sheet = best_sheet
 
     processed_sheets = set()
-    es_comisiones = False
     
     if target_sheet:
         resultado['metadatos']['hoja_principal'] = target_sheet
@@ -1921,7 +3289,15 @@ def preparar_datos_para_slides(excel_path):
         df = remover_filas_basura(df)
         df = limpiar_df(df)
         df.attrs['sheet_name'] = target_sheet
-        es_comisiones = all(col in df.columns for col in ['Solicitante', 'Valor Total Solicitado'])
+        if should_prioritize_primary_story(target_sheet, df):
+            workbook_profile = dict(workbook_profile)
+            workbook_profile['tipo_libro'] = 'general'
+            workbook_profile['conclusiones'] = []
+            workbook_profile['insights'] = []
+            resultado['perfil_libro'] = workbook_profile
+            resultado['metadatos']['tipo_libro'] = 'general'
+        
+        cols_norm = {normalize_semantic_text(c): c for c in df.columns}
         
         # ══════════════════════════════════════════════════════════════
         # ANÁLISIS INTELIGENTE UNIVERSAL
@@ -1982,67 +3358,30 @@ def preparar_datos_para_slides(excel_path):
             'insights': unique_non_empty_texts((workbook_profile.get('insights') or []) + (insights_avanzados or []), limit=MAX_INSIGHTS_AVANZADOS),
         }
         
-        # ── KPIs AUTOMÁTICOS ─────────────────────────────────────────
-        if es_comisiones:
-            total_registros = len(df)
-            valor_total = 0
-            if 'Valor Total Solicitado' in df.columns:
-                valor_profile = build_financial_series(df, 'Valor Total Solicitado')
-                valor_total = float(valor_profile['series_valid'].sum())
-            
-            unique_solicitantes = int(df['Solicitante'].nunique()) if 'Solicitante' in df.columns else 0
-            unique_ciudades = int(df['Ciudad Destino'].nunique()) if 'Ciudad Destino' in df.columns else 0
-            
-            unique_centros = 0
-            if 'Centro de Costos' in df.columns:
-                valid_cc = df[df['Centro de Costos'].astype(str).str.strip().str.len() > 1]
-                unique_centros = int(valid_cc['Centro de Costos'].nunique())
-            
-            promedio_comision = valor_total / total_registros if total_registros > 0 else 0
-            valor_max = float(valor_profile['series_valid'].max()) if 'Valor Total Solicitado' in df.columns and not valor_profile['series_valid'].empty else 0
-            
-            resultado['resumen_ejecutivo'] = {
-                'total_comisiones': total_registros,
-                'valor_total': valor_total,
-                'unique_solicitantes': unique_solicitantes,
-                'unique_ciudades': unique_ciudades,
-                'unique_centros': unique_centros,
-                'promedio_comision': promedio_comision,
-                'valor_max_comision': valor_max,
-                'conversion_resuelta': round(float(valor_profile.get('resolved_ratio') or 0), 3) if 'Valor Total Solicitado' in df.columns else 1.0,
-                'monedas_detectadas': valor_profile.get('currencies_detected', ['COP']) if 'Valor Total Solicitado' in df.columns else ['COP'],
-            }
-        else:
-            resultado['resumen_generico'] = {
-                'hoja_principal': target_sheet,
-                'total_filas': len(df),
-                'total_columnas': int(df.shape[1]),
-                'columnas_numericas': [c['nombre'] for c in cols_info if c['tipo'] == 'numerico'][:8],
-                'columnas': df.columns.tolist()[:12]
-            }
+        # ── RESUMEN UNIVERSAL ────────────────────────────────────────
+        resultado['resumen_generico'] = {
+            'hoja_principal': target_sheet,
+            'total_filas': len(df),
+            'total_columnas': int(df.shape[1]),
+            'columnas_numericas': [c['nombre'] for c in cols_info if c['tipo'] == 'numerico'][:8],
+            'columnas': df.columns.tolist()[:12]
+        }
         
         # KPIs automáticos (para ambas rutas)
         kpis_auto = generar_kpis_automaticos(df, cols_info)
         if kpis_auto:
             resultado['kpis_automaticos'] = kpis_auto
         
-        # Gráficas automáticas (para ruta genérica)
-        if not es_comisiones:
-            graficas_auto = []
-            if workbook_profile.get('tipo_libro') != 'auditoria_control':
-                graficas_auto = generar_graficas_automaticas(df, cols_info, tendencia_result)
-            if graficas_auto:
-                resultado['graficas_automaticas'] = graficas_auto
+        # Gráficas automáticas (fallback)
+        graficas_auto = generar_graficas_automaticas(df, cols_info, tendencia_result)
+        if graficas_auto:
+            resultado['graficas_automaticas'] = graficas_auto
         
         # === TABLA PRINCIPAL ===
-        cols = ['Id Comisión','Solicitante','Ciudad Destino',
-                'Valor Total Solicitado','Estado','Centro de Costos']
-        cols_exist = [c for c in cols if c in df.columns]
+        top_cols = [c['nombre'] for c in cols_info[:MAX_TABLE_COLS]]
+        cols_exist = [c for c in top_cols if c in df.columns]
         if not cols_exist:
-            top_cols = [c['nombre'] for c in cols_info[:MAX_TABLE_COLS]]
-            cols_exist = [c for c in top_cols if c in df.columns]
-            if not cols_exist:
-                cols_exist = df.columns[:MAX_TABLE_COLS].tolist()
+            cols_exist = df.columns[:MAX_TABLE_COLS].tolist()
         
         df_slide = df[cols_exist].copy()
         # Filtrar filas completamente fantasma
@@ -2061,116 +3400,12 @@ def preparar_datos_para_slides(excel_path):
         if validar_tabla(tabla_data['encabezados'], tabla_data['filas']):
             resultado['muestra_tabla'] = tabla_data
         
-        # === GRÁFICAS ESPECIALIZADAS (Comisiones) ===
-        if es_comisiones and 'Estado' in df.columns:
-            serie_estado = limpiar_serie_categorica(df['Estado'])
-            estados = serie_estado.value_counts().head(MAX_CHART_CATEGORIES)
-            labels = estados.index.tolist()
-            valores = estados.values.tolist()
-            labels, valores = compactar_categorias(labels, valores, max_items=MAX_PIE_CATEGORIES)
-            if validar_grafica(labels, valores):
-                resultado['grafica_estados'] = {
-                    'tipo': 'doughnut',
-                    'titulo': 'Distribución por Estado',
-                    'labels': labels,
-                    'valores': [int(v) for v in valores],
-                    'colores': ['1E3A5F','4472C4','70AD47','ED7D31','FF0000','FFC000','9B59B6','3498DB'],
-                    'hoja_origen': target_sheet,
-                }
-        
-        # === GRÁFICA VALORES POR TIPO DE GASTO ===
-        cols_valores = {
-            'Tiquete': 'Valor Tiquete Solicitado',
-            'Alimentación': 'Valor Alimentación Solicitado', 
-            'Hospedaje': 'Valor Hospedaje Solicitado',
-            'Transporte': 'Valor Transporte Solicitado'
-        }
-        vals = {}
-        for nombre, col in cols_valores.items():
-            if col in df.columns:
-                profile = build_financial_series(df, col)
-                v = float(profile['series_valid'].sum())
-                if v > 0:
-                    vals[nombre] = v
-        
-        if es_comisiones and vals:
-            labels = list(vals.keys())
-            valores = list(vals.values())
-            if validar_grafica(labels, valores):
-                resultado['grafica_valores'] = {
-                    'tipo': 'bar',
-                    'titulo': 'Total por Tipo de Gasto (COP)',
-                    'labels': labels,
-                    'valores': valores,
-                    'colores': ['4472C4','ED7D31','A9D18E','FFC000'],
-                    'hoja_origen': target_sheet,
-                }
-        
-        # === TOP CIUDADES ===
-        if es_comisiones and 'Ciudad Destino' in df.columns:
-            serie_cd = limpiar_serie_categorica(df['Ciudad Destino'])
-            ciudades = serie_cd.value_counts().head(MAX_CHART_CATEGORIES)
-            labels = [str(c)[:25] for c in ciudades.index.tolist()]
-            valores = [int(v) for v in ciudades.values.tolist()]
-            labels, valores = compactar_categorias(labels, valores, max_items=MAX_BAR_CATEGORIES)
-            if validar_grafica(labels, valores):
-                resultado['grafica_ciudades'] = {
-                    'tipo': 'bar',
-                    'titulo': 'Top Ciudades de Destino',
-                    'labels': labels,
-                    'valores': valores,
-                    'colores': ['4472C4'],
-                    'hoja_origen': target_sheet,
-                }
-        
-        # === TOP SOLICITANTES POR VALOR ===
-        if es_comisiones and 'Solicitante' in df.columns and 'Valor Total Solicitado' in df.columns:
-            df_vals = df.copy()
-            df_vals['Solicitante'] = limpiar_serie_categorica(df_vals['Solicitante'])
-            df_vals = df_vals[df_vals['Solicitante'].notna() & (df_vals['Solicitante'] != '')]
-            valor_profile = build_financial_series(df_vals, 'Valor Total Solicitado')
-            df_vals['Valor Total Solicitado'] = valor_profile['series_raw']
-            df_vals = df_vals.dropna(subset=['Valor Total Solicitado'])
-            top_sol = df_vals.groupby('Solicitante').agg(
-                total_valor=('Valor Total Solicitado', 'sum'),
-                num_comisiones=('Id Comisión', 'count') if 'Id Comisión' in df_vals.columns else ('Solicitante', 'count')
-            ).sort_values('total_valor', ascending=False).head(8)
-            
-            labels = [str(s)[:30] for s in top_sol.index.tolist()]
-            valores = [float(v) for v in top_sol['total_valor'].tolist()]
-            
-            if validar_grafica(labels, valores):
-                resultado['top_solicitantes'] = {
-                    'labels': labels,
-                    'valores': valores,
-                    'conteos': top_sol['num_comisiones'].tolist(),
-                    'hoja_origen': target_sheet,
-                }
-        
-        # === DISTRIBUCIÓN POR CENTRO DE COSTOS ===
-        if es_comisiones and 'Centro de Costos' in df.columns and 'Valor Total Solicitado' in df.columns:
-            df_cc = df.copy()
-            df_cc['Centro de Costos'] = limpiar_serie_categorica(df_cc['Centro de Costos'])
-            df_cc = df_cc[df_cc['Centro de Costos'].notna() & (df_cc['Centro de Costos'] != '')]
-            valor_profile = build_financial_series(df_cc, 'Valor Total Solicitado')
-            df_cc['Valor Total Solicitado'] = valor_profile['series_raw']
-            df_cc = df_cc.dropna(subset=['Valor Total Solicitado'])
-            cc_top = df_cc.groupby('Centro de Costos')['Valor Total Solicitado'].sum().sort_values(ascending=False).head(MAX_CHART_CATEGORIES)
-            
-            labels = cc_top.index.tolist()
-            valores = [float(v) for v in cc_top.values.tolist()]
-            labels, valores = compactar_categorias(labels, valores, max_items=MAX_BAR_CATEGORIES)
-            
-            if validar_grafica(labels, valores):
-                resultado['centros_costos'] = {
-                    'labels': labels,
-                    'valores': valores,
-                    'hoja_origen': target_sheet,
-                }
+        # === GRÁFICAS ESPECIALIZADAS ELIMINADAS ===
+        # La IA o el algoritmo genérico deciden dinámicamente las gráficas.
         
         # === CONCLUSIONES INTELIGENTES ===
         conclusiones = generar_conclusiones(
-            df, cols_info, kpis_auto, es_comisiones,
+            df, cols_info, kpis_auto, False,
             pareto_results, outliers_results, corr_results, tendencia_result)
         conclusiones = unique_non_empty_texts((workbook_profile.get('conclusiones') or []) + (conclusiones or []), limit=MAX_CONCLUSIONES)
         if conclusiones:
@@ -2219,9 +3454,6 @@ def preparar_datos_para_slides(excel_path):
         sheet_family = workbook_profile.get('familias_por_hoja', {}).get(name, 'general')
         if sheet_family in ('hallazgos', 'oportunidades'):
             continue
-        if sheet_family in ('coso', 'distribucion'):
-            continue
-        
         if df.empty or df.shape[1] < 2 or df.shape[0] < 2:
             continue
             
@@ -2247,22 +3479,154 @@ def preparar_datos_para_slides(excel_path):
     if genericas:
         resultado['genericas'] = genericas
 
-    # === COSO y TD ===
-    coso = leer_coso(excel_path)
-    if coso: resultado['coso'] = coso
-    
-    td = leer_distribucion_mes(excel_path)
-    if td: resultado['distribucion_mes'] = td
+    bloques_textuales = []
+    for name, df in sheets.items():
+        sheet_family = workbook_profile.get('familias_por_hoja', {}).get(name, 'general')
+        if sheet_family not in TEXTUAL_FAMILIES:
+            continue
+        df = remover_filas_basura(df)
+        df = limpiar_df(df)
+        if df.empty:
+            continue
+        block = build_textual_block_from_dataframe(df, name, sheet_family=sheet_family)
+        if block:
+            bloques_textuales.append(block)
+
+    bloques_textuales = bloques_textuales[:MAX_TEXTUAL_BLOCKS]
+    if bloques_textuales:
+        resultado['bloques_textuales'] = enrich_textual_blocks_with_ai(bloques_textuales)
+        resultado['metadatos']['bloques_textuales'] = len(resultado['bloques_textuales'])
+    else:
+        resultado['metadatos']['bloques_textuales'] = 0
 
     # === PRESUPUESTO DE SLIDES ===
-    presupuesto = calcular_presupuesto_slides(resultado, es_comisiones)
+    presupuesto = calcular_presupuesto_slides(resultado, False)
     resultado['presupuesto_slides'] = presupuesto
-    resultado['es_comisiones'] = es_comisiones
+    attach_visual_ids(resultado)
     if not resultado.get('conclusiones') and workbook_profile.get('conclusiones'):
         resultado['conclusiones'] = workbook_profile['conclusiones'][:MAX_CONCLUSIONES]
     if resultado.get('resumen_generico'):
         resultado['resumen_generico']['tipo_libro'] = workbook_profile.get('tipo_libro', 'general')
         resultado['resumen_generico']['familias_detectadas'] = workbook_profile.get('familias_detectadas', [])
+    resultado['bloques_datos'] = build_data_block_inventory(resultado)
+
+    # === IA UNIFICADA: 1 sola llamada cubre resumen + briefing + bloques ===
+    ia_todo = sintetizar_todo_con_ia(resultado)
+    ai_status = dict(resultado.get('ai_curation_status') or build_default_ai_curation_status())
+
+    if ia_todo:
+        ai_status['unified_call_succeeded'] = True
+        # Resumen ejecutivo
+        ia_resumen = ia_todo.get('resumen_ejecutivo_ia')
+        if isinstance(ia_resumen, dict):
+            resultado['resumen_ejecutivo_ia'] = ia_resumen
+            graficas = resultado.get('graficas_automaticas', [])
+            for item in ia_resumen.get('insights_graficas', []):
+                if not isinstance(item, dict): continue
+                idx = item.get('id')
+                if isinstance(idx, int) and 0 <= idx < len(graficas):
+                    graficas[idx]['insight_auto'] = item.get('insight', graficas[idx].get('insight_auto'))
+
+        # Briefing diapositivas 2-3
+        ia_briefing = ia_todo.get('briefing_ejecutivo_ia')
+        if ia_briefing:
+            resultado['briefing_ejecutivo_ia'] = ia_briefing
+            ai_status['briefing_received'] = True
+
+        visual_plan = ia_todo.get('visual_plan_ia')
+        if isinstance(visual_plan, dict):
+            resultado['visual_plan_ia'] = visual_plan
+            ai_status['visual_plan_received'] = True
+            ai_status['visual_curation_ready'] = True
+            ai_status['selected_chart_ids'] = [
+                item.get('id') for item in (visual_plan.get('charts') or [])
+                if isinstance(item, dict) and item.get('id')
+            ]
+            ai_status['selected_table_ids'] = [
+                item.get('id') for item in (visual_plan.get('tables') or [])
+                if isinstance(item, dict) and item.get('id') and item.get('modo') != 'omit'
+            ]
+            ai_status['reason'] = 'visual_plan_received'
+
+            chart_lookup = {
+                chart.get('_visual_ai_id'): chart
+                for chart in (resultado.get('graficas_automaticas') or [])
+                if isinstance(chart, dict) and chart.get('_visual_ai_id')
+            }
+            for chart_item in visual_plan.get('charts') or []:
+                if not isinstance(chart_item, dict):
+                    continue
+                chart = chart_lookup.get(chart_item.get('id'))
+                if not chart:
+                    continue
+                if chart_item.get('mensaje_clave'):
+                    chart['insight_auto'] = sanitize_executive_text(chart_item.get('mensaje_clave'), max_len=180)
+                chart['_visual_ai_selected'] = True
+                chart['_visual_ai_rationale'] = sanitize_executive_text(chart_item.get('por_que_importa'), max_len=180)
+
+            table_candidates = []
+            if isinstance(resultado.get('muestra_tabla'), dict):
+                table_candidates.append(resultado['muestra_tabla'])
+            table_candidates.extend(
+                table for table in (resultado.get('otras_tablas') or {}).values()
+                if isinstance(table, dict)
+            )
+            table_candidates.extend(
+                table for table in (resultado.get('genericas') or {}).values()
+                if isinstance(table, dict)
+            )
+            table_lookup = {
+                table.get('_visual_ai_id'): table
+                for table in table_candidates
+                if table.get('_visual_ai_id')
+            }
+            for table_item in visual_plan.get('tables') or []:
+                if not isinstance(table_item, dict):
+                    continue
+                table = table_lookup.get(table_item.get('id'))
+                if not table:
+                    continue
+                table['_visual_ai_mode'] = table_item.get('modo')
+                table['_visual_ai_selected'] = table_item.get('modo') != 'omit'
+                table['_visual_ai_message'] = sanitize_executive_text(table_item.get('mensaje_clave'), max_len=180)
+                table['_visual_ai_rationale'] = sanitize_executive_text(table_item.get('por_que_importa'), max_len=180)
+
+        # Bloques textuales enriquecidos
+        bloques_enriquecidos = ia_todo.get('bloques_textuales_enriquecidos')
+        if isinstance(bloques_enriquecidos, list) and bloques_enriquecidos:
+            bloques_actuales = resultado.get('bloques_textuales') or []
+            for i, bloque_ia in enumerate(bloques_enriquecidos[:len(bloques_actuales)]):
+                if i < len(bloques_actuales) and isinstance(bloque_ia, dict):
+                    b = dict(bloques_actuales[i])
+                    if bloque_ia.get('title'):
+                        b['title'] = sanitize_executive_text(bloque_ia['title'], max_len=90)
+                    if bloque_ia.get('subtitle'):
+                        b['subtitle'] = sanitize_executive_text(bloque_ia['subtitle'], max_len=90)
+                    if bloque_ia.get('lines'):
+                        b['lines'] = [sanitize_executive_text(l, max_len=180) for l in bloque_ia['lines'] if isinstance(l, str)][:MAX_TEXT_LINES_PER_BLOCK]
+                    b['source_mode'] = 'ai'
+                    bloques_actuales[i] = b
+            resultado['bloques_textuales'] = bloques_actuales
+        if not ai_status.get('visual_plan_received'):
+            ai_status['reason'] = 'unified_ai_without_visual_plan'
+    else:
+        # Fallback: llamadas individuales si la unificada falla
+        ai_status['reason'] = 'unified_ai_unavailable'
+        ia_resumen = sintetizar_resumen_ia(resultado)
+        if isinstance(ia_resumen, dict):
+            resultado['resumen_ejecutivo_ia'] = ia_resumen
+            graficas = resultado.get('graficas_automaticas', [])
+            for item in ia_resumen.get('insights_graficas', []):
+                if not isinstance(item, dict): continue
+                idx = item.get('id')
+                if isinstance(idx, int) and 0 <= idx < len(graficas):
+                    graficas[idx]['insight_auto'] = item.get('insight', graficas[idx].get('insight_auto'))
+        briefing_ia = sintetizar_briefing_ejecutivo_ia(resultado)
+        if briefing_ia:
+            resultado['briefing_ejecutivo_ia'] = briefing_ia
+            ai_status['briefing_received'] = True
+
+    resultado['ai_curation_status'] = ai_status
 
     return resultado
 
@@ -2274,14 +3638,50 @@ if __name__ == "__main__":
     
     import warnings
     warnings.filterwarnings('ignore')
-    
+
+    if sys.argv[1] == "--suggestions":
+        if len(sys.argv) < 3:
+            print(json.dumps({"error": "No file path provided for suggestions"}))
+            sys.exit(1)
+        path_excel = sys.argv[2]
+        try:
+            data = preparar_datos_para_slides(path_excel)
+            sugerencias = generar_sugerencias_ia(data)
+            print(json.dumps(sugerencias, ensure_ascii=False))
+        except Exception as e:
+            print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        sys.exit(0)
+
+    if sys.argv[1] == "--panel-report":
+        if len(sys.argv) < 3:
+            print(json.dumps({"error": "No file path provided for panel report"}))
+            sys.exit(1)
+        path_excel = sys.argv[2]
+        try:
+            user_instructions = sys.argv[3] if len(sys.argv) > 3 else None
+            data = preparar_datos_para_slides(path_excel, user_instructions)
+            sugerencias = generar_sugerencias_ia(data)
+            report = {
+                "analysis": data,
+                "suggestions": sugerencias.get("sugerencias", []) if isinstance(sugerencias, dict) else [],
+                "model": OPENROUTER_MODEL_PRIORITY[0],
+            }
+            print(json.dumps(report, ensure_ascii=False, default=str))
+        except Exception as e:
+            print(json.dumps({"error": str(e)}, ensure_ascii=False, default=str))
+        sys.exit(0)
+
     path_excel = sys.argv[1]
     if not os.path.exists(path_excel):
         print(json.dumps({"error": f"File not found: {path_excel}"}))
         sys.exit(1)
         
     try:
-        data = preparar_datos_para_slides(path_excel)
+        user_instructions = None
+        if len(sys.argv) > 2:
+            user_instructions = sys.argv[2]
+            
+        data = preparar_datos_para_slides(path_excel, user_instructions)
         print(json.dumps(data, ensure_ascii=False, default=str))
     except Exception as e:
         print(json.dumps({"error": str(e)}, ensure_ascii=False, default=str))

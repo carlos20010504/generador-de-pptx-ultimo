@@ -7,11 +7,17 @@ const RUNTIME_STATUS_TTL_MS = 30 * 1000;
 
 export const ORGANIZER_SCRIPT_NAME = 'organizer.py';
 export const GENERATOR_SCRIPT_NAME = 'generate_template_presentation.py';
+export const PPTX_ANALYZER_SCRIPT_NAME = 'analyze_presentation.py';
 export const TEMPLATE_PRESENTATION_NAME = 'Plantilla_Presentacion_Socya (1) (1).pptx';
+export type RuntimeCapability = 'analysis' | 'generation';
 
 export interface RuntimeDependencyStatus {
   ok: boolean;
   checkedAt: string;
+  capabilities: {
+    analysis: boolean;
+    generation: boolean;
+  };
   python: {
     ok: boolean;
     version: string | null;
@@ -20,6 +26,7 @@ export interface RuntimeDependencyStatus {
   scripts: {
     organizer: boolean;
     generator: boolean;
+    analyzer: boolean;
     template: boolean;
   };
 }
@@ -69,20 +76,29 @@ export async function getRuntimeDependencyStatus(forceRefresh = false): Promise<
     return cachedRuntimeStatus;
   }
 
-  const [python, organizerExists, generatorExists, templateExists] = await Promise.all([
+  const [python, organizerExists, generatorExists, analyzerExists, templateExists] = await Promise.all([
     detectPython(),
     fileExists(ORGANIZER_SCRIPT_NAME),
     fileExists(GENERATOR_SCRIPT_NAME),
+    fileExists(PPTX_ANALYZER_SCRIPT_NAME),
     fileExists(TEMPLATE_PRESENTATION_NAME),
   ]);
 
+  const analysisReady = python.ok && organizerExists;
+  const generationReady = analysisReady && generatorExists && templateExists;
+
   const status: RuntimeDependencyStatus = {
-    ok: python.ok && organizerExists && generatorExists,
+    ok: generationReady,
     checkedAt: nowIso(),
+    capabilities: {
+      analysis: analysisReady,
+      generation: generationReady,
+    },
     python,
     scripts: {
       organizer: organizerExists,
       generator: generatorExists,
+      analyzer: analyzerExists,
       template: templateExists,
     },
   };
@@ -92,13 +108,20 @@ export async function getRuntimeDependencyStatus(forceRefresh = false): Promise<
   return status;
 }
 
-export function getRuntimeFailureMessage(status: RuntimeDependencyStatus): string {
+export function getRuntimeFailureMessage(
+  status: RuntimeDependencyStatus,
+  capability: RuntimeCapability = 'analysis'
+): string {
   if (!status.python.ok) {
     return `El runtime de Python no esta disponible: ${status.python.error || 'error desconocido'}`;
   }
 
   if (!status.scripts.organizer) {
     return 'No se encontro el script organizer.py requerido por el backend.';
+  }
+
+  if (capability === 'analysis') {
+    return 'El backend no tiene todas sus dependencias de analisis operativas disponibles.';
   }
 
   if (!status.scripts.generator) {

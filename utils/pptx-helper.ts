@@ -1,6 +1,6 @@
 import type { OrganizerMode } from '@/utils/excel-organizer';
 
-const DOWNLOAD_TIMEOUT_MS = 2 * 60 * 1000;
+const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
 
 function sanitizeDownloadName(fileName: string): string {
   return fileName.replace(/[<>:"/\\|?*\x00-\x1F]+/g, '_').trim() || `Reporte_Socya_${Date.now()}.pptx`;
@@ -14,13 +14,20 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-export async function generatePowerPointFromExcel(file: File, visualMode: OrganizerMode = 'mixed'): Promise<void> {
+export async function generatePowerPointFromExcel(
+  file: File, 
+  visualMode: OrganizerMode = 'mixed',
+  userPrompt: string = ''
+): Promise<void> {
   try {
     console.log('[1/3] 📤 Enviando archivo al backend premium...');
 
     const formData = new FormData();
     formData.append('file', file);
     formData.append('visualMode', visualMode === 'auto' ? 'mixed' : visualMode);
+    if (userPrompt) {
+      formData.append('userPrompt', userPrompt);
+    }
 
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
@@ -62,7 +69,7 @@ export async function generatePowerPointFromExcel(file: File, visualMode: Organi
   } catch (err: unknown) {
     console.error('[PPTX Helper] Error:', err);
     if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error('La generación tardó demasiado tiempo. Intenta con un archivo más pequeño o simplificado.');
+      throw new Error('La generación tardó demasiado tiempo. Intenta de nuevo o usa un archivo más pequeño si el Excel es especialmente pesado.');
     }
     throw new Error(getErrorMessage(err, 'Error al generar la presentación.'));
   }

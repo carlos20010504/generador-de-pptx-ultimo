@@ -146,11 +146,13 @@ export default function Home() {
 
       {/* ── Uploader Component ── */}
       <div
-        style={{ width: '100%', maxWidth: '760px', zIndex: 10 }}
+        style={{ width: '100%', maxWidth: '1180px', zIndex: 10 }}
         className="animate-fade-in-up stagger-2"
       >
         <ExcelUploader />
       </div>
+
+
 
       {/* ── Feature Grid ── */}
       <div

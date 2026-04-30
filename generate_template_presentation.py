@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import tempfile
+import unicodedata
 from datetime import datetime
 from datetime import UTC
 from pathlib import Path
@@ -30,17 +31,20 @@ if hasattr(sys.stderr, "reconfigure"):
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BASE_DIR / "Plantilla_Presentacion_Socya (1) (1).pptx"
 
-COLOR_BLUE = RGBColor(0, 51, 102)
-COLOR_ORANGE = RGBColor(255, 102, 0)
+DEFAULT_COLOR_BLUE = RGBColor(0, 51, 102)
+DEFAULT_COLOR_ORANGE = RGBColor(255, 102, 0)
 COLOR_WHITE = RGBColor(255, 255, 255)
 COLOR_TEXT = RGBColor(34, 34, 34)
 COLOR_SOFT = RGBColor(102, 102, 102)
 COLOR_LINE = RGBColor(220, 226, 232)
-COLOR_GREEN = RGBColor(67, 160, 71)
+DEFAULT_COLOR_GREEN = RGBColor(67, 160, 71)
 COLOR_YELLOW = RGBColor(237, 167, 0)
 COLOR_RED = RGBColor(198, 40, 40)
 COLOR_LIGHT = RGBColor(245, 247, 250)
 COLOR_PANEL = RGBColor(248, 249, 252)
+COLOR_BLUE = DEFAULT_COLOR_BLUE
+COLOR_ORANGE = DEFAULT_COLOR_ORANGE
+COLOR_GREEN = DEFAULT_COLOR_GREEN
 
 
 def rgb_components(color):
@@ -82,21 +86,50 @@ SLIDE4 = {
 
 ROWS_PER_TABLE_PAGE = 10
 MAX_TABLE_COLS = 6
-MAX_CONTENT_BLOCKS = 60
-SLIDE3_MAX_BULLETS = 2
+MAX_CONTENT_BLOCKS = 14
+SLIDE3_MAX_BULLETS = 3
 MAX_DASHBOARD_BARS = 4
 MAX_BOARDROOM_ITEMS = 5
 MAX_DERIVED_CHARTS = 3
 MAX_CHART_BLOCKS = 3
 MAX_KPI_DASHBOARDS = 5
 
-REQUESTED_VISUAL_MODE = str(os.getenv("SOCYA_PRESENTATION_MODE", "mixed")).strip().lower()
+REQUESTED_VISUAL_MODE = str(os.getenv("SOCYA_PRESENTATION_MODE", "boardroom")).strip().lower()
 PRESENTATION_VISUAL_MODE = REQUESTED_VISUAL_MODE if REQUESTED_VISUAL_MODE in {"charts", "tables", "mixed", "boardroom"} else "mixed"
 IS_BOARDROOM_MODE = PRESENTATION_VISUAL_MODE == "boardroom"
+
+NUMBER_WORDS = {
+    "un": 1,
+    "una": 1,
+    "uno": 1,
+    "dos": 2,
+    "tres": 3,
+    "cuatro": 4,
+    "cinco": 5,
+}
+
+DEFAULT_PROMPT_PREFERENCES = {
+    "raw": "",
+    "normalized": "",
+    "chart_slides": 0,
+    "table_slides": 0,
+    "kpi_slides": 0,
+    "conclusion_slides": 0,
+    "prefer_short_tables": False,
+    "prefer_bar_charts": False,
+    "prefer_executive_tone": False,
+    "prefer_dark_blue_green_palette": False,
+    "explicit_structure": False,
+    "max_boardroom_blocks": 4,
+    "max_total_content_blocks": MAX_CONTENT_BLOCKS,
+    "priority_tokens": [],
+}
+STRICT_VISUAL_CURATION_MODE = True
 
 
 TEXT_ARTIFACT_REPLACEMENTS = {
     "├í": "á",
+    "├⌐": "é",
     "├®": "í",
     "├│": "ó",
     "├║": "ú",
@@ -111,23 +144,74 @@ TEXT_ARTIFACT_REPLACEMENTS = {
     "Ã³": "ó",
     "Ãº": "ú",
     "Ã±": "ñ",
+    "Ã": "A",
+    "â€™": "'",
+    "â€œ": '"',
+    "â€\x9d": '"',
+    "â€“": "-",
+    "â€”": "-",
+    "â€¢": "-",
+    "’": "'",
+    "‘": "'",
+    "“": '"',
+    "”": '"',
     "¾": "ó",
     "ß": "á",
     "Ý": "í",
+    "Ú": "É",
     "Ë": "Ó",
     "═": "Í",
     "³": "",
+    "┐": "¿",
     "┬┐": "¿",
-    "À": "·",
+    "À": "-",
 }
+
+MOJIBAKE_HINT_CHARS = "ÃÂ├┤┐╔╗═¾ÝËÐ�"
 
 
 def repair_text_artifacts(text):
     cleaned = str(text or "")
+    cleaned = repair_mojibake_text(cleaned)
     for source, target in TEXT_ARTIFACT_REPLACEMENTS.items():
         cleaned = cleaned.replace(source, target)
+    cleaned = unicodedata.normalize("NFKC", cleaned)
+    cleaned = re.sub(r"[\u200b-\u200f\u202a-\u202e]", "", cleaned)
+    cleaned = cleaned.replace("\xa0", " ").replace("_x000d_", " ")
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
+
+
+def mojibake_score(text):
+    return sum(text.count(char) for char in MOJIBAKE_HINT_CHARS)
+
+
+def attempt_redecode(text, source_encoding, target_encoding):
+    try:
+        return text.encode(source_encoding, errors="ignore").decode(target_encoding, errors="ignore")
+    except Exception:
+        return text
+
+
+def repair_mojibake_text(text):
+    current = str(text or "")
+    if not current:
+        return current
+    best = current
+    best_score = mojibake_score(current)
+    candidates = [
+        attempt_redecode(current, "latin1", "utf-8"),
+        attempt_redecode(current, "cp1252", "utf-8"),
+        attempt_redecode(current, "latin1", "cp1252"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        score = mojibake_score(candidate)
+        if score < best_score and sum(char.isalnum() for char in candidate) >= max(2, sum(char.isalnum() for char in current) // 2):
+            best = candidate
+            best_score = score
+    return best
 
 
 def clean_text(value, max_len=None):
@@ -135,10 +219,109 @@ def clean_text(value, max_len=None):
         return ""
     text = str(value).replace("_x000d_", " ").replace("\r", " ").replace("\n", " ")
     text = repair_text_artifacts(text)
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     text = " ".join(text.split()).strip()
     if text.lower() in {"nan", "none", "null", "n/a", "nd", "s/d"}:
         return ""
     return text
+
+
+def get_ai_curation_status(data):
+    status = data.get("ai_curation_status")
+    if isinstance(status, dict):
+        return status
+    return {
+        "strict_visual_mode": STRICT_VISUAL_CURATION_MODE,
+        "visual_curation_ready": False,
+        "visual_plan_received": False,
+        "selected_chart_ids": [],
+        "selected_table_ids": [],
+        "reason": "ai_status_missing",
+    }
+
+
+def is_visual_curation_ready(data):
+    status = get_ai_curation_status(data)
+    if not status.get("strict_visual_mode", STRICT_VISUAL_CURATION_MODE):
+        return bool(data.get("visual_plan_ia"))
+    return bool(status.get("visual_curation_ready")) and bool(data.get("visual_plan_ia"))
+
+
+def count_request_near_keywords(normalized_prompt, keywords):
+    if not normalized_prompt:
+        return 0
+    keyword_pattern = "|".join(re.escape(keyword) for keyword in keywords)
+    pattern = re.compile(
+        rf"\b(\d+|un|una|uno|dos|tres|cuatro|cinco)\b(?:\s+(?:diapositiva|diapositivas|slide|slides|grafica|graficas|grafico|graficos|tabla|tablas|kpi|kpis|resumen|cierres?))?[^.:\n]{{0,45}}\b(?:{keyword_pattern})\b"
+    )
+    matches = pattern.findall(normalized_prompt)
+    if not matches:
+        return 0
+    raw_count = matches[-1].lower()
+    return NUMBER_WORDS.get(raw_count, int(raw_count) if raw_count.isdigit() else 0)
+
+
+def parse_prompt_preferences(user_instructions):
+    raw_prompt = clean_text(user_instructions)
+    if not raw_prompt:
+        return dict(DEFAULT_PROMPT_PREFERENCES)
+
+    normalized = normalize_header_key(raw_prompt)
+    chart_slides = count_request_near_keywords(normalized, ("grafica", "graficas", "grafico", "graficos", "barras", "comparativa", "comparativas"))
+    table_slides = count_request_near_keywords(normalized, ("tabla", "tablas", "hallazgos"))
+    kpi_slides = count_request_near_keywords(normalized, ("kpi", "kpis", "indicador", "indicadores"))
+    conclusion_slides = count_request_near_keywords(normalized, ("conclusion", "conclusiones", "recomendacion", "recomendaciones", "cierre"))
+
+    priority_tokens = []
+    topic_aliases = {
+        "hallazgos": ("hallazgo", "hallazgos"),
+        "costos": ("costo", "costos", "monto", "montos", "valor", "valores"),
+        "estado": ("estado", "estados"),
+        "coso": ("coso", "control interno", "controles"),
+        "riesgos": ("riesgo", "riesgos", "alerta", "alertas"),
+    }
+    for token, aliases in topic_aliases.items():
+        if any(alias in normalized for alias in aliases):
+            priority_tokens.append(token)
+
+    explicit_structure = any(value > 0 for value in (chart_slides, table_slides, kpi_slides, conclusion_slides))
+    max_total_content_blocks = MAX_CONTENT_BLOCKS
+    max_boardroom_blocks = 4
+    if explicit_structure:
+        requested_total = sum(value for value in (chart_slides, table_slides, kpi_slides, conclusion_slides) if value > 0)
+        max_total_content_blocks = max(6, min(9, requested_total + 3))
+        max_boardroom_blocks = 2
+
+    return {
+        "raw": raw_prompt,
+        "normalized": normalized,
+        "chart_slides": chart_slides,
+        "table_slides": table_slides,
+        "kpi_slides": kpi_slides,
+        "conclusion_slides": conclusion_slides,
+        "prefer_short_tables": any(token in normalized for token in ("tabla corta", "tablas cortas", "evita tablas extensas", "resume solo", "resumir solo")),
+        "prefer_bar_charts": any(token in normalized for token in ("barras", "bar chart", "barra comparativa", "graficas comparativas", "comparativa")),
+        "prefer_executive_tone": any(token in normalized for token in ("ejecutiva", "ejecutivo", "comite", "comité", "boardroom", "directivo", "sobria")),
+        "prefer_dark_blue_green_palette": any(
+            token in normalized
+            for token in ("azul oscuro y verde", "paleta azul", "azul oscuro", "verde")
+        ),
+        "explicit_structure": explicit_structure,
+        "max_boardroom_blocks": max_boardroom_blocks,
+        "max_total_content_blocks": max_total_content_blocks,
+        "priority_tokens": priority_tokens,
+    }
+
+
+def apply_prompt_palette(preferences):
+    global COLOR_BLUE, COLOR_ORANGE, COLOR_GREEN
+    COLOR_BLUE = DEFAULT_COLOR_BLUE
+    COLOR_ORANGE = DEFAULT_COLOR_ORANGE
+    COLOR_GREEN = DEFAULT_COLOR_GREEN
+    if preferences.get("prefer_dark_blue_green_palette"):
+        COLOR_BLUE = RGBColor(15, 23, 42)
+        COLOR_ORANGE = RGBColor(14, 165, 140)
+        COLOR_GREEN = RGBColor(34, 139, 94)
 
 
 def is_noise_text(value):
@@ -219,6 +402,36 @@ def trim_sparse_columns(headers, rows):
         for row in rows
     ]
     return trimmed_headers, trimmed_rows
+
+
+def densify_table_matrix(headers, rows, min_rows=2):
+    if not headers or not rows:
+        return [], []
+
+    normalized_rows = []
+    for row in rows:
+        current = [clean_text(row[index]) if index < len(row) else "" for index in range(len(headers))]
+        normalized_rows.append(current)
+
+    keep_indexes = []
+    for index, _header in enumerate(headers):
+        column_values = [row[index] for row in normalized_rows]
+        if column_values and all(not is_noise_text(value) for value in column_values):
+            keep_indexes.append(index)
+
+    if len(keep_indexes) < 2:
+        return [], []
+
+    dense_headers = [headers[index] for index in keep_indexes]
+    dense_rows = []
+    for row in normalized_rows:
+        candidate = [row[index] for index in keep_indexes]
+        if all(not is_noise_text(value) for value in candidate):
+            dense_rows.append(candidate)
+
+    if len(dense_rows) < min_rows:
+        return [], []
+    return dense_headers, dense_rows
 
 
 def looks_like_sentence(value):
@@ -371,6 +584,65 @@ def compact_line(text, max_len=120):
     return clean_text(cleaned)
 
 
+def build_ranked_metric_summary(labels, values, kind="number"):
+    pairs = []
+    for label, value in zip(safe_list(labels), safe_list(values)):
+        label_text = clean_text(label, 48)
+        numeric_value = try_number(value)
+        if not label_text or numeric_value is None:
+            continue
+        pairs.append((label_text, float(numeric_value)))
+    if not pairs:
+        return None
+    pairs.sort(key=lambda item: item[1], reverse=True)
+    total = sum(max(value, 0) for _, value in pairs)
+    top_label, top_value = pairs[0]
+    share = (top_value / total) if total > 0 else None
+    return {
+        "items": pairs,
+        "total": total,
+        "top_label": top_label,
+        "top_value": top_value,
+        "share": share,
+        "top_text": format_metric_full(top_value, kind),
+        "share_text": format_value(share, "percent", compact=False) if share is not None else None,
+    }
+
+
+def looks_like_code_value(value):
+    text = clean_text(value)
+    compact = re.sub(r"[\s\-_/]", "", text)
+    if len(compact) < 4 or len(compact) > 14:
+        return False
+    if " " in text:
+        return False
+    return bool(re.fullmatch(r"[A-Z]*\d+[A-Z0-9]*", compact))
+
+
+def present_story_label(value, fallback_label):
+    text = clean_text(value, 44)
+    if not text:
+        return fallback_label
+    if looks_like_code_value(text):
+        return fallback_label
+    if text == text.upper() and not looks_like_code_value(text):
+        text = " ".join(part.capitalize() for part in text.split())
+    return text
+
+
+def is_management_noise_line(value):
+    normalized = normalize_header_key(value)
+    if not normalized:
+        return True
+    blocked_tokens = (
+        "hoja", "hojas", "tabla", "tablas", "grafica", "graficas",
+        "auditoria y control", "archivo corresponde", "hoja principal",
+        "filas", "columnas", "funcionales", "coso", "procedimiento",
+        "distribucion", "oportunidades",
+    )
+    return any(token in normalized for token in blocked_tokens)
+
+
 def try_number(value):
     if value is None:
         return None
@@ -456,6 +728,8 @@ def format_spanish_number(value, decimals=0):
 
 def infer_metric_kind(label=None, values=None):
     normalized = normalize_header_key(label)
+    if any(token in normalized for token in ("fecha", "date", "mes", "month", "periodo", "period", "ano", "anio", "year", "semana", "week", "dia", "day")):
+        return "temporal"
     if "%" in clean_text(label) or any(
         token in normalized
         for token in ("porcentaje", "ratio", "participacion", "share", "margen", "cumplimiento", "avance")
@@ -831,6 +1105,9 @@ def choose_table_numeric_column(headers, rows):
     best_index = None
     best_score = -1
     for index, header in enumerate(headers):
+        normalized_header = normalize_header_key(header)
+        if any(token in normalized_header for token in ("fecha", "date", "mes", "month", "periodo", "period", "ano", "anio", "year", "semana", "week", "dia", "day")):
+            continue
         values = [try_number(row[index]) for row in rows if index < len(row)]
         numeric_values = [value for value in values if value is not None]
         if len(numeric_values) < 2:
@@ -848,7 +1125,10 @@ def choose_table_numeric_column(headers, rows):
             score -= 12
         if is_executive_metric_header(header):
             score += 4
-        if infer_metric_kind(header, numeric_values) in {"currency", "percent"}:
+        metric_kind = infer_metric_kind(header, numeric_values)
+        if metric_kind == "temporal":
+            continue
+        if metric_kind in {"currency", "percent"}:
             score += 2
         if unique_ratio >= 0.9 and not is_executive_metric_header(header):
             score -= 6
@@ -870,22 +1150,57 @@ def choose_table_numeric_column(headers, rows):
 def collect_table_candidates(data):
     candidates = []
     if data.get("muestra_tabla"):
-        candidates.append(("Tabla principal", data.get("muestra_tabla"), resolve_source_sheet_name(data, data.get("muestra_tabla", {}).get("hoja_origen"), "Tabla principal")))
+        primary_source = resolve_source_sheet_name(data, data.get("muestra_tabla", {}).get("hoja_origen"), "Tabla Principal")
+        candidates.append((present_sheet_title(primary_source) or "Tabla Principal", data.get("muestra_tabla"), primary_source))
     for name, table in (data.get("otras_tablas") or {}).items():
         candidates.append((clean_text(name, 70) or "Tabla", table, resolve_source_sheet_name(data, table.get("hoja_origen"), name)))
     for name, table in (data.get("genericas") or {}).items():
         candidates.append((clean_text(name, 70) or "Tabla", table, resolve_source_sheet_name(data, table.get("hoja_origen"), name)))
-    if data.get("coso"):
-        candidates.append(("Evaluacion COSO", data.get("coso"), resolve_source_sheet_name(data, data.get("coso", {}).get("hoja_origen"), "Evaluacion COSO")))
-    if data.get("distribucion_mes"):
-        candidates.append(("Distribucion por mes", data.get("distribucion_mes"), resolve_source_sheet_name(data, data.get("distribucion_mes", {}).get("hoja_origen"), "Distribucion por mes")))
     return candidates
+
+
+def score_table_candidate(table_name, table, source_sheet=None):
+    headers, rows = extract_table_payload(table)
+    if len(headers) < 2 or not rows:
+        return -999
+
+    profile = build_table_signal_profile(headers, rows)
+    basis = derive_table_basis(headers, rows)
+    truth = evaluate_table_truth(headers, rows, basis=basis, source_sheet=source_sheet)
+    score = 0.0
+    score += (truth.get("score") or 0) * 100
+    score += min(profile.get("informative_rows", 0), 12) * 2.5
+    score += min(len(rows), 20) * 0.8
+    score += min(len(headers), 6) * 1.4
+    score += (profile.get("numeric_cell_ratio") or 0) * 18
+    score += (1 - min(profile.get("noise_cell_ratio") or 0, 1)) * 10
+
+    if basis.get("numeric_index") is not None:
+        score += 10
+    if profile.get("detail_allowed"):
+        score += 8
+
+    if profile.get("table_kind") == "narrative":
+        score -= 8
+    if profile.get("avg_text_len", 0) >= 55 and profile.get("sentence_cell_ratio", 0) >= 0.30:
+        score -= 14
+    if is_low_signal_sheet_name(table_name) or is_low_signal_sheet_name(source_sheet):
+        score -= 35
+
+    return score
 
 
 def build_derived_chart_blocks(data):
     blocks = []
     seen_titles = set()
-    for table_name, table, source_sheet in collect_table_candidates(data):
+    ranked_candidates = sorted(
+        collect_table_candidates(data),
+        key=lambda item: score_table_candidate(item[0], item[1], item[2]),
+        reverse=True,
+    )
+    for table_name, table, source_sheet in ranked_candidates:
+        if is_low_signal_sheet_name(table_name) or is_low_signal_sheet_name(source_sheet):
+            continue
         headers, rows = extract_table_payload(table)
         if len(headers) < 2 or len(rows) < 3:
             continue
@@ -901,7 +1216,7 @@ def build_derived_chart_blocks(data):
         numeric_index = choose_table_numeric_column(headers, rows)
         if numeric_index is not None:
             normalized_numeric = normalize_header_key(headers[numeric_index])
-            if any(token in normalized_numeric for token in ("id", "codigo", "consecutivo", "numero", "nro")):
+            if any(token in normalized_numeric for token in ("id", "codigo", "consecutivo", "numero", "nro", "fecha", "date", "month", "mes", "periodo", "semana", "dia", "year", "anio", "ano")):
                 numeric_index = None
         dimension_candidates = []
         for index, header in enumerate(headers):
@@ -936,7 +1251,8 @@ def build_derived_chart_blocks(data):
             total_value = sum(values) or 1
             lead_share = (values[0] / total_value) * 100 if total_value else 0
             metric_kind = infer_metric_kind(metric_label, values)
-            title = clean_text(f"{table_name} · {headers[label_index]}", 78) or "Grafica derivada"
+            exec_table_name = present_sheet_title(table_name)
+            title = clean_text(f"{exec_table_name} \u00b7 {headers[label_index]}", 78) or "Grafica derivada"
             if title.casefold() in seen_titles:
                 continue
             chart_payload = {
@@ -971,19 +1287,27 @@ def build_derived_chart_blocks(data):
 
 
 def infer_excel_topic(data, excel_path):
-    if data.get("es_comisiones"):
-        return "solicitudes de comision y gastos asociados"
-
-    sheet_tokens = " ".join(safe_list(data.get("metadatos", {}).get("hojas_encontradas"))).lower()
-    if any(token in sheet_tokens for token in ("auditoria", "hallazgo", "oportunidad", "coso", "control")):
-        return "auditoria, controles y oportunidades de mejora"
-    if any(token in sheet_tokens for token in ("inventario", "stock", "producto", "bodega")):
-        return "inventario, referencias y niveles de stock"
-    if any(token in sheet_tokens for token in ("venta", "ingreso", "factura", "cliente")):
-        return "ventas, ingresos y comportamiento comercial"
-
     generic = data.get("resumen_generico") or {}
     primary_sheet = clean_text(generic.get("hoja_principal"), 52)
+    normalized_primary = normalize_header_key(primary_sheet)
+    normalized_columns = " ".join(normalize_header_key(item) for item in safe_list(generic.get("columnas")))
+    if any(
+        token in normalized_columns or token in normalized_primary
+        for token in ("comision", "tiquete", "hospedaje", "transporte", "viatico", "centro de costos", "ciudad destino")
+    ):
+        return "comisiones, viaticos y gastos de viaje"
+    if any(token in normalized_columns for token in ("inventario", "stock", "producto", "bodega")):
+        return "inventario, referencias y niveles de stock"
+    if any(token in normalized_columns for token in ("venta", "ingreso", "factura", "cliente")):
+        return "ventas, ingresos y comportamiento comercial"
+
+    sheet_tokens = " ".join(
+        clean_text(name)
+        for name in safe_list(data.get("metadatos", {}).get("hojas_encontradas"))
+        if not is_low_signal_sheet_name(name)
+    ).lower()
+    if any(token in sheet_tokens for token in ("auditoria", "hallazgo", "oportunidad", "coso", "control")):
+        return "auditoria, controles y oportunidades de mejora"
     if primary_sheet:
         return f"datos operativos concentrados en {primary_sheet}"
     return f"datos ejecutivos extraidos de {basename_label(excel_path)}"
@@ -992,19 +1316,16 @@ def infer_excel_topic(data, excel_path):
 def build_management_highlights(data, excel_path, limit=4):
     highlights = []
     topic = infer_excel_topic(data, excel_path)
-    highlights.append(f"El Excel trata sobre {topic}.")
+    highlights.append(f"El analisis se enfoca en {topic}.")
 
     summary = data.get("resumen_ejecutivo") or {}
     if summary:
-        total = summary.get("total_comisiones")
+        total = summary.get("total_registros")
         value = try_number(summary.get("valor_total"))
-        requesters = summary.get("unique_solicitantes")
         if total:
-            highlights.append(f"Se analizaron {format_metric_full(total)} registros base de comision.")
+            highlights.append(f"Se analizaron {format_metric_full(total)} registros base.")
         if value is not None and value > 0:
             highlights.append(f"El valor total observado asciende a {format_metric_full(value, 'currency')}.")
-        if requesters:
-            highlights.append(f"Participan {format_metric_full(requesters)} solicitantes distintos en la muestra.")
 
     financial = data.get("contexto_financiero") or {}
     currencies = safe_list(financial.get("currencies_detected"))
@@ -1018,15 +1339,17 @@ def build_management_highlights(data, excel_path, limit=4):
 
     quality = data.get("calidad_datos") or {}
     quality_score = quality.get("quality_score")
-    if quality_score is not None:
+    if quality_score is not None and float(quality_score) < 0.9:
         highlights.append(f"La validacion de calidad estima una integridad del {int(round(float(quality_score) * 100))}%.")
-    if quality.get("duplicate_rows"):
-        highlights.append(f"Se vigilan {format_metric_full(quality.get('duplicate_rows'))} filas potencialmente duplicadas para evitar ruido analitico.")
+    duplicate_rows = try_number(quality.get("duplicate_rows")) or 0
+    total_rows = try_number((data.get("resumen_generico") or {}).get("total_filas")) or 0
+    if duplicate_rows and total_rows and (duplicate_rows / max(total_rows, 1)) >= 0.12:
+        highlights.append(f"El archivo exige depuracion previa porque el volumen de duplicados puede distorsionar la lectura gerencial.")
     sparse_columns = safe_list(quality.get("sparse_numeric_columns"))
-    if sparse_columns:
+    if sparse_columns and total_rows >= 20:
         column_name = clean_text((sparse_columns[0] or {}).get("columna"), 28)
         missing_pct = int(round(((sparse_columns[0] or {}).get("missing_ratio") or 0) * 100))
-        if column_name:
+        if column_name and missing_pct >= 35:
             highlights.append(f"La columna {column_name} presenta {missing_pct}% de vacios y se interpreta de forma conservadora.")
 
     generic = data.get("resumen_generico") or {}
@@ -1053,7 +1376,27 @@ def build_management_highlights(data, excel_path, limit=4):
         if insight:
             highlights.append(insight)
 
-    return unique_texts(highlights, limit=limit, min_len=14)
+    curated = []
+    low_value_tokens = (
+        "filas potencialmente duplicadas",
+        "hojas detectadas",
+        "hojas funcionales",
+        "archivo corresponde",
+        "base principal",
+        "columnas utiles",
+        "integridad del",
+        "vacios y se interpreta",
+        "motor",
+        "sistema",
+        "placeholders",
+        "celdas fantasma",
+    )
+    for line in unique_texts(highlights, limit=limit * 3, min_len=14):
+        normalized = clean_text(line).lower()
+        if any(token in normalized for token in low_value_tokens):
+            continue
+        curated.append(line)
+    return curated[:limit]
 
 
 def get_primary_table_profile(data):
@@ -1164,7 +1507,10 @@ def build_workplan_lines(data, limit=4):
     lines = []
 
     if samples["activity"]:
-        lines.append(f"Frente de trabajo: {compact_line(samples['activity'][0], 78)}.")
+        activity_line = compact_line(samples["activity"][0], 78)
+        normalized_activity = clean_text(activity_line).lower()
+        if not any(token in normalized_activity for token in ("accion correctiva", "oportunidad de mejora", "hallazgo", "procedimiento")):
+            lines.append(f"Frente de trabajo: {activity_line}.")
     if samples["question"]:
         lines.append(f"Pregunta de control: {compact_line(samples['question'][0], 78)}.")
     if samples["risk"]:
@@ -1293,7 +1639,7 @@ def build_technical_highlights(data, excel_path, limit=4):
     if primary_sheet:
         lines.append(f"La hoja principal priorizada es {primary_sheet}.")
 
-    total_rows = generic.get("total_filas") or summary.get("total_comisiones")
+    total_rows = generic.get("total_filas")
     total_cols = generic.get("total_columnas")
     if total_rows and total_cols:
         lines.append(
@@ -1383,10 +1729,7 @@ def build_dynamic_objectives(data, excel_path, limit=3):
 
 def build_presentation_topics(data, limit=4):
     topics = []
-    generic = data.get("resumen_generico") or {}
-    primary_sheet = clean_text(generic.get("hoja_principal"), 36)
-    if primary_sheet:
-        topics.append(f"Base principal: {primary_sheet}.")
+    visual_curation_ready = is_visual_curation_ready(data)
 
     for kpi in safe_list(data.get("kpis_automaticos"))[:3]:
         label = clean_text((kpi or {}).get("label"), 36).lower()
@@ -1395,16 +1738,17 @@ def build_presentation_topics(data, limit=4):
         if "total registros" in label:
             topics.append("Dimension y volumen del dataset.")
         elif "promedio" in label:
-            topics.append(f"Promedios del indicador {clean_text((kpi or {}).get('label'), 32)}.")
+            topics.append("Promedios y dispersion del indicador principal.")
         elif "total" in label:
-            topics.append(f"Acumulado principal: {clean_text((kpi or {}).get('label'), 32)}.")
+            topics.append("Acumulados principales con impacto para la decision.")
         else:
-            topics.append(f"Indicador clave: {clean_text((kpi or {}).get('label'), 32)}.")
+            topics.append("Indicadores clave para priorizar seguimiento.")
 
-    for chart in safe_list(data.get("graficas_automaticas"))[:2]:
-        title = clean_text((chart or {}).get("titulo"), 42)
-        if title:
-            topics.append(f"Tendencia visual: {title}.")
+    if visual_curation_ready:
+        for chart in safe_list(data.get("graficas_automaticas"))[:2]:
+            title = clean_text((chart or {}).get("titulo"), 42)
+            if title and not is_low_signal_sheet_name(title):
+                topics.append(f"Tendencia visual: {title}.")
 
     if data.get("analisis_avanzado"):
         advanced = data.get("analisis_avanzado") or {}
@@ -1431,7 +1775,13 @@ def build_presentation_topics(data, limit=4):
     topics.extend(build_workplan_lines(data, limit=3))
     topics.extend(build_native_sheet_briefing(data, limit=2))
 
-    return unique_texts([clean_text(item) for item in topics], limit=limit, min_len=16)
+    filtered = []
+    for item in unique_texts([clean_text(value) for value in topics], limit=limit * 2, min_len=16):
+        normalized = clean_text(item).lower()
+        if any(token in normalized for token in ("base principal", "hoja ", "archivo corresponde")):
+            continue
+        filtered.append(item)
+    return filtered[:limit]
 
 
 def build_intro_briefing(data, excel_path):
@@ -1440,6 +1790,7 @@ def build_intro_briefing(data, excel_path):
     objectives = build_dynamic_objectives(data, excel_path, limit=3)
     topics = build_presentation_topics(data, limit=4)
     workplan = build_workplan_lines(data, limit=4)
+    executive_ai = data.get("briefing_ejecutivo_ia") if isinstance(data.get("briefing_ejecutivo_ia"), dict) else None
 
     return {
         "summary": summary,
@@ -1447,19 +1798,20 @@ def build_intro_briefing(data, excel_path):
         "objectives": objectives,
         "topics": topics,
         "workplan": workplan,
+        "executive_ai": executive_ai,
     }
 
 
 def build_showcase_items(data):
     items = []
-    if IS_BOARDROOM_MODE:
+    if IS_BOARDROOM_MODE and is_visual_curation_ready(data):
         items.append("semaforos ejecutivos")
         items.append("riesgos y oportunidades")
         items.append("comparativos antes/despues")
         items.append("top 5 con alertas")
-    if len(build_chart_blocks(data)) > 0:
+    if is_visual_curation_ready(data) and len(build_chart_blocks(data)) > 0:
         items.append("graficas priorizadas")
-    if data.get("muestra_tabla") or data.get("otras_tablas") or data.get("genericas"):
+    if is_visual_curation_ready(data) and (data.get("muestra_tabla") or data.get("otras_tablas") or data.get("genericas")):
         items.append("tablas resumidas")
     return unique_texts(items, limit=4, min_len=6)
 
@@ -1532,8 +1884,8 @@ def build_boardroom_traffic_payload(data):
 
     return {
         "type": "boardroom_traffic",
-        "title": "Semaforo ejecutivo",
-        "subtitle": "Estado sintetico de los principales frentes del Excel",
+        "title": "Semaforo de Control",
+        "subtitle": "Estado sintetico de los principales frentes de auditoria",
         "items": items[:4],
     }
 
@@ -1606,8 +1958,8 @@ def build_risk_opportunity_payload(data):
 
     return {
         "type": "risk_opportunity_cards",
-        "title": "Tarjetas de riesgo y oportunidad",
-        "subtitle": "Lectura boardroom construida con hallazgos reales del Excel",
+        "title": "Riesgos y Oportunidades",
+        "subtitle": "Analisis de brechas construido con datos reales del Excel",
         "risks": risks[:2],
         "opportunities": opportunities[:2],
     }
@@ -1630,7 +1982,7 @@ def build_before_after_payload(data):
     return {
         "type": "before_after_compare",
         "title": f"Comparativo antes/despues de {clean_text(tendencia.get('columna_valor'), 42)}",
-        "subtitle": "Comparacion temporal inferida desde el propio Excel",
+        "subtitle": "Evolucion temporal inferida desde datos del propio Excel",
         "before_label": "Inicio",
         "before_value": format_metric_full(start, metric_kind),
         "after_label": "Cierre",
@@ -1693,8 +2045,8 @@ def build_boardroom_blocks(data, excel_path):
     if summary_lines:
         blocks.append({
             "type": "text",
-            "title": "Boardroom summary",
-            "subtitle": f"Lectura de gerencia sobre {topic}",
+            "title": "Vision Ejecutiva",
+            "subtitle": f"Panorama gerencial: {topic}",
             "lines": summary_lines,
         })
 
@@ -1718,7 +2070,7 @@ def build_table_summary_lines(table_name, headers, rows):
     label_index = basis["label_index"]
     numeric_index = basis["numeric_index"]
     lines = [
-        f"La tabla concentra {row_count} filas utiles y {col_count} columnas analizables.",
+        f"El analisis cubre {row_count} registros y {col_count} variables relevantes.",
     ]
 
     if profile["table_kind"] == "narrative":
@@ -2175,6 +2527,7 @@ def choose_table_focus_column(headers, rows, excluded_indexes=None):
 
 def build_table_dashboard_payload(table_name, headers, rows, source_sheet=None):
     profile = build_table_signal_profile(headers, rows)
+    display_title = present_sheet_title(table_name)
     row_count = len(rows)
     col_count = len(headers)
     basis = derive_table_basis(headers, rows)
@@ -2184,8 +2537,8 @@ def build_table_dashboard_payload(table_name, headers, rows, source_sheet=None):
     focus_index = choose_table_focus_column(headers, rows, excluded_indexes={label_index, numeric_index} if numeric_index is not None else {label_index})
 
     kpis = [
-        {"label": "Filas utiles", "value": format_metric_full(row_count)},
-        {"label": "Columnas", "value": format_metric_full(col_count)},
+        {"label": "Registros analizados", "value": format_metric_full(row_count)},
+        {"label": "Variables", "value": format_metric_full(col_count)},
     ]
 
     ranking = []
@@ -2222,21 +2575,13 @@ def build_table_dashboard_payload(table_name, headers, rows, source_sheet=None):
             if focus_counts[0][1] > 1 or len(focus_counts) <= 3:
                 insights.append(f"El foco {focus_header} se concentra en {focus_counts[0][0]}.")
 
-    normalized = clean_text(table_name).lower()
-    if "hallazgo" in normalized:
-        insights.append("Priorizar los casos repetitivos y los riesgos con mayor impacto potencial.")
-    elif "coso" in normalized:
-        insights.append("Escalar los componentes con mas observaciones para seguimiento del control.")
-    elif "principal" in normalized:
-        insights.append("Usar este tablero como base para seleccionar casos que justifiquen revision puntual.")
-
     if not ranking and not insights and not profile["detail_allowed"]:
         return None
 
     return {
         "type": "kpi_dashboard",
-        "title": table_name,
-        "subtitle": "Tablero ejecutivo",
+        "title": display_title,
+        "subtitle": "Indicadores clave",
         "source_basis": build_source_basis_text(basis["dimension_label"], basis["metric_label"], basis["aggregation"]),
         "traceability": build_traceability(source_sheet, basis["aggregation"], truth["score"], row_count=row_count, col_count=col_count, numeric_coverage=truth["numeric_coverage"]),
         "dimension_label": basis["dimension_label"],
@@ -2248,7 +2593,6 @@ def build_table_dashboard_payload(table_name, headers, rows, source_sheet=None):
 
 
 def should_render_kpi_dashboard(table_name, headers, rows, budget):
-    normalized = clean_text(table_name).lower()
     profile = build_table_signal_profile(headers, rows)
     if profile["table_kind"] == "narrative" and profile["numeric_cell_ratio"] < 0.35:
         return False
@@ -2260,8 +2604,6 @@ def should_render_kpi_dashboard(table_name, headers, rows, budget):
     if numeric_index is not None and label_index is not None and len(rows) >= 8 and profile["informative_rows"] >= 4:
         if numeric_is_good and label_is_good:
             return True
-    if any(keyword in normalized for keyword in ("principal", "hallazgo", "coso", "consolidado")) and len(rows) >= 4 and profile["noise_cell_ratio"] <= 0.72:
-        return True
     return (
         len(headers) >= 5
         and len(rows) >= max(6, int(budget.get("genericas", 2) or 2) * 2)
@@ -2274,18 +2616,18 @@ def should_render_table_summary(table_name, headers, rows):
     profile = build_table_signal_profile(headers, rows)
     if profile["informative_rows"] < 2:
         return False
+    if len(rows) < 4:
+        return False
     if profile["table_kind"] == "narrative":
         return True
     if len(rows) >= 5:
         return True
     if len(headers) >= 5:
         return True
-    normalized = clean_text(table_name).lower()
-    return any(keyword in normalized for keyword in ("principal", "hallazgo", "coso", "distribucion"))
+    return False
 
 
 def should_render_table_detail(table_name, headers, rows, budget, has_chart_blocks):
-    normalized = clean_text(table_name).lower()
     profile = build_table_signal_profile(headers, rows)
     if not profile["detail_allowed"]:
         return False
@@ -2293,14 +2635,8 @@ def should_render_table_detail(table_name, headers, rows, budget, has_chart_bloc
     if profile["avg_text_len"] >= 48 and profile["sentence_cell_ratio"] >= 0.25:
         return False
     # Long cells are truncated at render time — no blocking needed here
-    if "consolidado" in normalized:
-        return False
     if len(headers) > 6:
         return False
-    if "principal" in normalized:
-        return len(headers) <= 6
-    if "hallazgo" in normalized or "coso" in normalized:
-        return len(rows) <= 18 and len(headers) <= 6
     # Allow tables even when charts exist — charts and tables complement each other
     if len(rows) <= 6:
         return True
@@ -2309,72 +2645,84 @@ def should_render_table_detail(table_name, headers, rows, budget, has_chart_bloc
 
 def build_slide_2_cards(data, excel_path):
     briefing = build_intro_briefing(data, excel_path)
-    technical = briefing["technical"]
     objectives = briefing["objectives"]
     topics = briefing["topics"]
     summary = briefing["summary"]
     workplan = briefing["workplan"]
-    sheet_count = len(safe_list(data.get("metadatos", {}).get("hojas_encontradas")))
-    table_count = 0
-    table_count += 1 if data.get("muestra_tabla") else 0
-    table_count += len(data.get("otras_tablas") or {})
-    table_count += len(data.get("genericas") or {})
-    table_count += 1 if data.get("coso") else 0
-    table_count += 1 if data.get("distribucion_mes") else 0
+    executive_ai = briefing.get("executive_ai") or {}
+    visual_plan = data.get("visual_plan_ia") or {}
+    visual_curation_ready = is_visual_curation_ready(data)
     topic = compact_line(infer_excel_topic(data, excel_path), 44)
-    showcase_items = build_showcase_items(data)[:3]
-    objective_line = objectives[0] if objectives else "Enfocar la presentacion en datos reales y prioridades."
-    technical_line = technical[1] if len(technical) > 1 else (technical[0] if technical else f"Hojas: {sheet_count} | Tablas: {table_count}")
-    headline = summary[1] if len(summary) > 1 else (summary[0] if summary else "No se detectaron alertas ejecutivas adicionales.")
-    planning_line = workplan[0] if workplan else objective_line
-    topics_line = topics[0] if topics else ("; ".join(showcase_items) if showcase_items else "Hallazgos, indicadores y prioridades.")
     mode_label = "Boardroom" if IS_BOARDROOM_MODE else "Ejecutivo"
+    fallback_topic = f"Analisis ejecutivo de {topic}." if topic else "Analisis ejecutivo con datos reales del Excel."
+    fallback_importance = [
+        (data.get("resumen_ejecutivo_ia") or {}).get("alerta_principal") or (summary[1] if len(summary) > 1 else ""),
+        (data.get("resumen_ejecutivo_ia") or {}).get("recomendacion") or (topics[0] if topics else ""),
+    ]
+    fallback_chart_topics = [
+        compact_line((chart or {}).get("insight_auto"), 42)
+        for chart in safe_list(data.get("graficas_automaticas"))[:2]
+        if compact_line((chart or {}).get("insight_auto"), 42)
+    ] if visual_curation_ready else []
+    fallback_planning = [
+        objectives[0] if objectives else f"{mode_label} orientado a decisiones y seguimiento.",
+        "Se prioriza evidencia util para decidir y actuar, evitando anexos o soportes secundarios.",
+    ]
+    fallback_topics = safe_list(visual_plan.get("storyline"))[:2] or fallback_chart_topics[:2] or [
+        topics[0] if topics else "Se priorizan mensajes con impacto real para la gerencia.",
+        topics[1] if len(topics) > 1 else "Se evita informacion tecnica que no ayude a decidir.",
+    ]
 
-    card_1_lines = expand_lines_for_slide([topic, technical_line], max_len=42, max_items=3)
+    ai_topic = clean_text(executive_ai.get("de_que_trata"))
+    ai_importance = safe_list(executive_ai.get("breve_resumen")) or safe_list(executive_ai.get("datos_tecnicos"))
+    ai_planning = safe_list(executive_ai.get("planeamiento")) or safe_list(executive_ai.get("objetivos"))
+    ai_topics = safe_list(executive_ai.get("puntos_a_tratar")) or safe_list(executive_ai.get("elementos_prioritarios"))
+
+    card_1_lines = expand_lines_for_slide([ai_topic or fallback_topic], max_len=42, max_items=3)
     card_2_lines = expand_lines_for_slide(
-        [f"Hojas: {sheet_count or 'N/D'} | Tablas: {table_count}", technical[0] if technical else "Cobertura tecnica validada."],
+        ai_importance[:2] or fallback_importance,
         max_len=42,
-        max_items=3,
+        max_items=4,
     )
-    card_3_lines = expand_lines_for_slide([f"{mode_label} con datos reales.", planning_line], max_len=42, max_items=3)
-    card_4_lines = expand_lines_for_slide([topics_line, headline], max_len=42, max_items=3)
+    card_3_lines = expand_lines_for_slide(ai_planning[:2] or fallback_planning, max_len=42, max_items=4)
+    card_4_lines = expand_lines_for_slide(ai_topics[:2] or fallback_topics, max_len=42, max_items=4)
 
     cards = [
         {
             "badge": "01",
-            "title": "De que trata",
+            "title": "Contexto",
             "body": "\n".join(card_1_lines),
             "x": Inches(1.2),
             "y": Inches(1.85),
             "w": Inches(3.55),
-            "h": Inches(1.2),
+            "h": Inches(1.46),
         },
         {
             "badge": "02",
-            "title": "Datos tecnicos",
+            "title": "Por que importa",
             "body": "\n".join(card_2_lines),
             "x": Inches(6.15),
             "y": Inches(1.85),
             "w": Inches(3.55),
-            "h": Inches(1.2),
+            "h": Inches(1.46),
         },
         {
             "badge": "03",
-            "title": "Planeamiento",
+            "title": "Enfoque",
             "body": "\n".join(card_3_lines),
             "x": Inches(1.2),
             "y": Inches(3.92),
             "w": Inches(3.55),
-            "h": Inches(1.28),
+            "h": Inches(1.46),
         },
         {
             "badge": "04",
-            "title": "Puntos a tratar",
+            "title": "Decisiones",
             "body": "\n".join(card_4_lines),
             "x": Inches(6.15),
             "y": Inches(3.92),
             "w": Inches(3.55),
-            "h": Inches(1.28),
+            "h": Inches(1.46),
         },
     ]
     return cards
@@ -2386,8 +2734,11 @@ def build_slide_3_sections(data, excel_path):
     objectives = briefing["objectives"]
     priorities = briefing["topics"][:]
     workplan = briefing["workplan"]
+    executive_ai = briefing.get("executive_ai") or {}
+    visual_plan = data.get("visual_plan_ia") or {}
+    visual_curation_ready = is_visual_curation_ready(data)
 
-    if IS_BOARDROOM_MODE:
+    if IS_BOARDROOM_MODE and visual_curation_ready:
         boardroom_blocks = build_boardroom_blocks(data, excel_path)
         for block in boardroom_blocks:
             if block["type"] == "boardroom_traffic":
@@ -2398,22 +2749,32 @@ def build_slide_3_sections(data, excel_path):
                 priorities.append("Se incorpora un comparativo antes/despues cuando el Excel evidencia secuencia temporal.")
             elif block["type"] == "top5_alerts":
                 priorities.append("Se construye un top 5 con umbrales y alertas automaticas sobre la tabla mas relevante.")
-    for chart in safe_list(data.get("graficas_automaticas")):
-        insight = compact_line(chart.get("insight_auto"), 84)
-        if insight:
-            priorities.append(insight)
-    if data.get("muestra_tabla"):
-        headers, rows = extract_table_payload(data.get("muestra_tabla"))
-        if headers and rows:
-            priorities.append(compact_line(
-                f"Tabla principal con {len(rows)} filas utiles y {len(headers)} columnas visibles para analisis.",
-                84,
-            ))
+    if visual_curation_ready:
+        for chart in safe_list(data.get("graficas_automaticas")):
+            insight = compact_line(chart.get("insight_auto"), 84)
+            if insight:
+                priorities.append(insight)
     priorities.extend(workplan[:2])
+    priorities.extend(safe_list(visual_plan.get("storyline"))[:2])
     priorities = unique_texts(priorities, limit=SLIDE3_MAX_BULLETS, min_len=18)
     summary = expand_lines_for_slide(summary[:SLIDE3_MAX_BULLETS], max_len=76, max_items=4)
     objectives = expand_lines_for_slide(unique_texts(objectives, limit=SLIDE3_MAX_BULLETS, min_len=18), max_len=76, max_items=4)
     priorities = expand_lines_for_slide(priorities[:SLIDE3_MAX_BULLETS], max_len=76, max_items=4)
+
+    if executive_ai:
+        return [
+            ("BREVE RESUMEN", safe_list(executive_ai.get("breve_resumen"))[:SLIDE3_MAX_BULLETS] or summary[:SLIDE3_MAX_BULLETS] or ["Lectura ejecutiva generada con datos reales del archivo."]),
+            ("OBJETIVOS", safe_list(executive_ai.get("objetivos"))[:SLIDE3_MAX_BULLETS] or objectives[:SLIDE3_MAX_BULLETS] or ["Sintetizar la informacion critica del Excel para decision gerencial."]),
+            ("ELEMENTOS PRIORITARIOS", safe_list(executive_ai.get("elementos_prioritarios"))[:SLIDE3_MAX_BULLETS] or priorities[:SLIDE3_MAX_BULLETS] or ["Se priorizan los frentes con mayor impacto sobre seguimiento y control."]),
+        ]
+
+    resumen_ia = data.get("resumen_ejecutivo_ia")
+    if resumen_ia and isinstance(resumen_ia, dict):
+        return [
+            ("VISIÓN GENERAL (AI)", [resumen_ia.get("vision_general", "N/D")]),
+            ("ALERTA PRINCIPAL", [resumen_ia.get("alerta_principal", "N/D")]),
+            ("RECOMENDACIÓN ESTRATÉGICA", [resumen_ia.get("recomendacion", "N/D")]),
+        ]
 
     return [
         ("BREVE RESUMEN", summary[:SLIDE3_MAX_BULLETS] or ["No se identifico un resumen confiable del Excel analizado."]),
@@ -2424,17 +2785,69 @@ def build_slide_3_sections(data, excel_path):
 
 def build_text_blocks(data):
     blocks = []
-    detailed = unique_texts(data.get("conclusiones"), limit=8, min_len=18)
+    for item in safe_list(data.get("bloques_textuales"))[:4]:
+        lines = unique_texts(item.get("lines"), limit=6, min_len=16)
+        raw_title = clean_text(item.get("title")) or ""
+        normalized_title = raw_title.lower()
+        if any(token in normalized_title for token in ("coso", "procedimiento", "oportunidad", "hallazgo", "evidencia", "cuestionario")):
+            continue
+        if not lines:
+            continue
+        display_title = present_sheet_title(raw_title) if raw_title else "Analisis complementario"
+        raw_subtitle = clean_text(item.get("subtitle"), 80) or ""
+        # Replace internal subtitle labels with consultive equivalents
+        _subtitle_map = {
+            "hallazgos relevantes": "Puntos de atencion criticos",
+            "lectura nativa": "Contenido analitico",
+            "focos documentales": "Puntos de atencion prioritarios",
+            "lectura ejecutiva": "Vision consolidada",
+            "lectura documental": "Analisis documental",
+            "contenido textual del excel": "Contenido analitico del archivo",
+        }
+        display_subtitle = _subtitle_map.get(raw_subtitle.lower(), raw_subtitle) or "Contenido analitico del archivo"
+        blocks.append({
+            "type": "text",
+            "origin": "sheet_text",
+            "title": display_title,
+            "subtitle": display_subtitle,
+            "lines": expand_lines_for_slide(lines, max_len=108, max_items=6),
+        })
+
+    filtered_conclusions = []
+    for line in unique_texts(data.get("conclusiones"), limit=12, min_len=18):
+        normalized = clean_text(line).lower()
+        if any(
+            token in normalized
+            for token in (
+                "hojas funcionales",
+                "auditoria y control",
+                "frentes de distribucion",
+                "coso",
+                "procedimiento",
+                "base de datos",
+                "columnas con informacion",
+                "archivo corresponde",
+                "ids",
+                "identificador",
+            )
+        ):
+            continue
+        filtered_conclusions.append(line)
+    detailed = filtered_conclusions[:6]
     if not detailed:
         return blocks
 
     expanded = expand_lines_for_slide(detailed, max_len=114, max_items=10)
+    if blocks:
+        expanded = expanded[:5]
     chunk_size = 5
     for index in range(0, len(expanded), chunk_size):
+        chunk_num = index // chunk_size + 1
         blocks.append({
             "type": "text",
-            "title": "Sintesis detallada",
-            "subtitle": f"Bloque {index // chunk_size + 1}",
+            "origin": "conclusions",
+            "title": "Conclusiones del Analisis",
+            "subtitle": f"Hallazgos clave · Seccion {chunk_num}" if chunk_num > 1 else "Hallazgos y recomendaciones clave",
             "lines": expanded[index:index + chunk_size],
         })
     return blocks
@@ -2446,15 +2859,28 @@ def build_chart_blocks(data):
         if not is_valid_chart(chart):
             continue
         source_sheet = resolve_source_sheet_name(data, chart.get("hoja_origen"), chart.get("titulo"))
+        if is_low_signal_sheet_name(source_sheet):
+            continue
         truth = evaluate_chart_truth(chart, source_sheet=source_sheet)
         if truth["blocked"]:
             continue
         source_basis = build_source_basis_text(chart.get("dimension_label"), chart.get("metric_label"), chart.get("aggregation"))
+        raw_chart_title = clean_text(chart.get("titulo"), 80) or "Grafica"
+        # Translate sheet name segment if title has pattern "SheetName · ColumnName"
+        if " · " in raw_chart_title:
+            sheet_part, _, col_part = raw_chart_title.partition(" · ")
+            exec_sheet = present_sheet_title(sheet_part.strip())
+            chart_display_title = f"{exec_sheet} · {col_part.strip()}"
+        else:
+            chart_display_title = present_sheet_title(raw_chart_title) if raw_chart_title else "Grafica"
         blocks.append({
             "type": "chart",
-            "title": clean_text(chart.get("titulo"), 80) or "Grafica",
+            "title": chart_display_title,
             "chart": chart,
             "insight": clean_text(chart.get("insight_auto"), 160),
+            "visual_id": clean_text(chart.get("_visual_ai_id"), 80),
+            "ai_rationale": clean_text(chart.get("_visual_ai_rationale"), 160),
+            "ai_selected": bool(chart.get("_visual_ai_selected")),
             "source_basis": source_basis,
             "traceability": build_traceability(source_sheet, chart.get("aggregation"), truth["score"], row_count=len(safe_list(chart.get("labels"))), col_count=2, numeric_coverage=truth["numeric_coverage"]),
         })
@@ -2468,20 +2894,47 @@ def build_chart_blocks(data):
 
 
 def classify_table_bucket(table_name):
-    normalized = clean_text(table_name).lower()
-    if "principal" in normalized:
-        return "tabla_principal"
-    if "hallazgo" in normalized:
-        return "hallazgos"
-    if "coso" in normalized:
-        return "coso"
-    if "distribucion" in normalized:
-        return "genericas"
     return "genericas"
 
 
 def normalize_sheet_family_hint(table):
     return clean_text((table or {}).get("sheet_family")).lower()
+
+
+def is_low_signal_sheet_name(name):
+    normalized = normalize_header_key(name)
+    if not normalized:
+        return True
+    weak_tokens = (
+        "hoja",
+        "sheet",
+        "soporte",
+        "anexo",
+        "aux",
+        "auxiliar",
+        "backup",
+        "copia",
+        "borrador",
+        "basetemp",
+        "tmp",
+    )
+    if normalized in {"td", "hoja1", "hoja 1"}:
+        return True
+    if normalized.startswith("muestra total"):
+        return True
+    if normalized.startswith("modelo"):
+        return True
+    if re.fullmatch(r"\d+(?:[ ._-]\d+)*", normalized):
+        return True
+    if any(normalized.startswith(token) for token in weak_tokens):
+        return True
+    return False
+
+
+def present_sheet_title(name):
+    if is_low_signal_sheet_name(name):
+        return "Hoja Analizada"
+    return clean_text(name)
 
 
 def resolve_sheet_type_from_family(sheet_family, fallback_type):
@@ -2508,8 +2961,6 @@ def is_documentary_sheet_family(sheet_family):
 def resolve_table_page_limit(table_name, budget, has_chart_blocks):
     bucket = classify_table_bucket(table_name)
     raw_limit = int(budget.get(bucket, 1) or 1)
-    if bucket == "tabla_principal":
-        raw_limit = max(2, raw_limit)
     # Charts and tables coexist — don't penalize table pages when charts are present
     return max(1, min(raw_limit, 4))
 
@@ -2555,12 +3006,21 @@ def build_table_blocks(data):
         if profile["table_kind"] != "narrative":
             return 1  # operational but no detail (KPI dashboards)
         return 2  # narrative/text-only last
-    ordered_tables = sorted(raw_candidates, key=_candidate_priority)
+    ordered_tables = sorted(
+        raw_candidates,
+        key=lambda candidate: (
+            _candidate_priority(candidate),
+            -score_table_candidate(candidate[0], candidate[1], candidate[2]),
+        ),
+    )
 
     blocks = []
     for table_name, table, source_sheet in ordered_tables:
+        display_title = present_sheet_title(table_name)
         headers, rows = extract_table_payload(table)
         if len(headers) < 2 or not rows:
+            continue
+        if is_low_signal_sheet_name(table_name) or is_low_signal_sheet_name(source_sheet):
             continue
         sheet_family = normalize_sheet_family_hint(table)
         profile = build_table_signal_profile(headers, rows)
@@ -2569,9 +3029,12 @@ def build_table_blocks(data):
         sheet_type = resolve_sheet_type_from_family(sheet_family, classify_sheet_type(table_name, headers, rows))
         native_lines = build_native_sheet_highlights(sheet_type, table_name, headers, rows)
         detail_candidate = should_render_table_detail(table_name, headers, rows, budget, has_chart_blocks) and not truth["blocked_detail"]
+        has_sensitive_headers = any(is_identifier_header(header) or is_person_like_header(header) for header in headers)
+        if has_sensitive_headers:
+            detail_candidate = False
         if is_documentary_sheet_family(sheet_family):
             detail_candidate = False
-        allow_dashboard = (dashboard_count < MAX_KPI_DASHBOARDS or "principal" in clean_text(table_name).lower()) and not is_documentary_sheet_family(sheet_family)
+        allow_dashboard = dashboard_count < MAX_KPI_DASHBOARDS and not is_documentary_sheet_family(sheet_family)
         dashboard_candidate = None
         if allow_dashboard and should_render_kpi_dashboard(table_name, headers, rows, budget) and not truth["blocked_dashboard"]:
             dashboard_candidate = build_table_dashboard_payload(table_name, headers, rows, source_sheet=source_sheet)
@@ -2579,11 +3042,21 @@ def build_table_blocks(data):
         # For purely narrative/documentary tables (no detail), limit to 1 block to save slide budget
         is_text_only = not dashboard_candidate and not detail_candidate
         if native_lines and (profile["table_kind"] == "narrative" or is_text_only):
+            _native_subtitles = {
+                "findings": "Hallazgos identificados",
+                "evidence": "Soporte documental",
+                "risk": "Gestion de riesgos",
+                "operational": "Analisis operacional",
+            }
+            native_subtitle = _native_subtitles.get(sheet_type, "Contenido analitico")
             blocks.append({
                 "type": "text",
-                "title": table_name,
-                "subtitle": f"Lectura nativa: {sheet_type}",
+                "title": display_title,
+                "subtitle": native_subtitle,
                 "lines": expand_lines_for_slide(native_lines, max_len=92, max_items=5),
+                "visual_id": clean_text(table.get("_visual_ai_id"), 80),
+                "ai_rationale": clean_text(table.get("_visual_ai_rationale"), 160),
+                "ai_selected": bool(table.get("_visual_ai_selected")),
             })
             if len(blocks) >= max_table_blocks:
                 return blocks
@@ -2593,6 +3066,10 @@ def build_table_blocks(data):
 
         kpi_rendered = False
         if dashboard_candidate:
+            if table.get("_visual_ai_id"):
+                dashboard_candidate["visual_id"] = clean_text(table.get("_visual_ai_id"), 80)
+                dashboard_candidate["ai_rationale"] = clean_text(table.get("_visual_ai_rationale"), 160)
+                dashboard_candidate["ai_selected"] = bool(table.get("_visual_ai_selected"))
             blocks.append(dashboard_candidate)
             kpi_rendered = True
             dashboard_count += 1
@@ -2600,26 +3077,37 @@ def build_table_blocks(data):
                 return blocks
 
         if should_render_table_summary(table_name, headers, rows) and not kpi_rendered and not truth["blocked_summary"]:
+            _summary_subtitle = "Analisis documental" if profile["table_kind"] == "narrative" else "Vision consolidada"
+            summary_lines = build_table_summary_lines(table_name, headers, rows)
+            ai_message = clean_text(table.get("_visual_ai_message"), 160)
+            if ai_message:
+                summary_lines = unique_texts([ai_message] + summary_lines, limit=5, min_len=18)
             blocks.append({
                 "type": "table_summary",
-                "title": table_name,
-                "subtitle": "Lectura documental" if profile["table_kind"] == "narrative" else "Lectura ejecutiva",
-                "lines": build_table_summary_lines(table_name, headers, rows),
+                "title": display_title,
+                "subtitle": _summary_subtitle,
+                "lines": summary_lines,
+                "visual_id": clean_text(table.get("_visual_ai_id"), 80),
+                "ai_rationale": clean_text(table.get("_visual_ai_rationale"), 160),
+                "ai_selected": bool(table.get("_visual_ai_selected")),
                 "source_basis": build_source_basis_text(basis["dimension_label"], basis["metric_label"], basis["aggregation"]),
                 "traceability": build_traceability(source_sheet, basis["aggregation"], truth["score"], row_count=len(rows), col_count=len(headers), numeric_coverage=truth["numeric_coverage"]),
             })
             if len(blocks) >= max_table_blocks:
                 return blocks
 
-        # Focos documentales only when not hitting budget and table has real narrative insights
+        # Narrative focus lines only when not hitting budget and table has real narrative insights
         if profile["table_kind"] == "narrative" and not detail_candidate:
             narrative_lines = build_narrative_focus_lines(table_name, headers, rows)
             if narrative_lines:
                 blocks.append({
                     "type": "text",
-                    "title": table_name,
-                    "subtitle": "Focos documentales",
+                    "title": display_title,
+                    "subtitle": "Puntos de atencion prioritarios",
                     "lines": expand_lines_for_slide(narrative_lines, max_len=92, max_items=6),
+                    "visual_id": clean_text(table.get("_visual_ai_id"), 80),
+                    "ai_rationale": clean_text(table.get("_visual_ai_rationale"), 160),
+                    "ai_selected": bool(table.get("_visual_ai_selected")),
                 })
                 if len(blocks) >= max_table_blocks:
                     return blocks
@@ -2628,64 +3116,377 @@ def build_table_blocks(data):
             continue
 
         for subset_headers, subset_rows, label in split_table_columns(headers, rows):
+            subset_headers, subset_rows = densify_table_matrix(subset_headers, subset_rows, min_rows=2)
+            if len(subset_headers) < 2 or len(subset_rows) < 2:
+                continue
             max_pages_for_table = resolve_table_page_limit(table_name, budget, has_chart_blocks)
             rows_per_page = resolve_rows_per_table_page(subset_headers, subset_rows)
             total_pages = max(1, math.ceil(len(subset_rows) / rows_per_page))
+            if total_pages > 6:
+                continue
             for page_index in range(min(total_pages, max_pages_for_table)):
                 chunk = subset_rows[page_index * rows_per_page : (page_index + 1) * rows_per_page]
                 if not chunk:
                     continue
+                page_headers, chunk = densify_table_matrix(subset_headers, chunk, min_rows=2)
+                if len(page_headers) < 2 or len(chunk) < 2:
+                    continue
                 page_label = f"Pagina {page_index + 1}/{total_pages}"
                 suffix = f"{label} · {page_label}" if label else page_label
-                table_basis = derive_table_basis(subset_headers, subset_rows)
-                page_truth = evaluate_table_truth(subset_headers, chunk, basis=table_basis, source_sheet=source_sheet)
+                insight_tabla = data.get("resumen_ejecutivo_ia", {}).get("insight_tabla")
+                if insight_tabla and page_index == 0:
+                    suffix = f"{insight_tabla} | {suffix}"
+                table_basis = derive_table_basis(page_headers, chunk)
+                page_truth = evaluate_table_truth(page_headers, chunk, basis=table_basis, source_sheet=source_sheet)
                 if page_truth["blocked_detail"]:
                     continue
                 blocks.append({
                     "type": "table",
-                    "title": table_name,
+                    "title": display_title,
                     "subtitle": suffix,
-                    "headers": subset_headers,
+                    "headers": page_headers,
                     "rows": chunk,
+                    "visual_id": clean_text(table.get("_visual_ai_id"), 80),
+                    "ai_rationale": clean_text(table.get("_visual_ai_rationale"), 160),
+                    "ai_selected": bool(table.get("_visual_ai_selected")),
                     "source_basis": build_source_basis_text(table_basis["dimension_label"], table_basis["metric_label"], table_basis["aggregation"]),
-                    "traceability": build_traceability(source_sheet, table_basis["aggregation"], page_truth["score"], row_count=len(chunk), col_count=len(subset_headers), numeric_coverage=page_truth["numeric_coverage"]),
+                    "traceability": build_traceability(source_sheet, table_basis["aggregation"], page_truth["score"], row_count=len(chunk), col_count=len(page_headers), numeric_coverage=page_truth["numeric_coverage"]),
                 })
                 if len(blocks) >= max_table_blocks:
                     return blocks
     return blocks
 
 
-def build_content_blocks(data):
+def build_visual_plan_maps(data):
+    plan = data.get("visual_plan_ia") or {}
+    chart_map = {}
+    for order, item in enumerate(safe_list(plan.get("charts"))):
+        if not isinstance(item, dict):
+            continue
+        visual_id = clean_text(item.get("id"), 80)
+        if not visual_id:
+            continue
+        chart_map[visual_id] = {
+            "order": order,
+            "message": clean_text(item.get("mensaje_clave"), 160),
+        }
+
+    table_map = {}
+    for order, item in enumerate(safe_list(plan.get("tables"))):
+        if not isinstance(item, dict):
+            continue
+        visual_id = clean_text(item.get("id"), 80)
+        mode = clean_text(item.get("modo"), 20).lower()
+        if not visual_id:
+            continue
+        table_map[visual_id] = {
+            "order": order,
+            "mode": mode,
+            "message": clean_text(item.get("mensaje_clave"), 160),
+        }
+    return chart_map, table_map
+
+
+def score_block_against_visual_plan(block, chart_map, table_map):
+    visual_id = clean_text(block.get("visual_id"), 80)
+    if not visual_id:
+        return 0
+    block_type = clean_text(block.get("type")).lower()
+    score = 0
+    if block_type == "chart" and visual_id in chart_map:
+        score += 40 - chart_map[visual_id]["order"] * 4
+    elif visual_id in table_map:
+        mode = table_map[visual_id]["mode"]
+        score += 30 - table_map[visual_id]["order"] * 3
+        if mode == "summary" and block_type == "table_summary":
+            score += 12
+        elif mode == "detail" and block_type == "table":
+            score += 12
+        elif mode == "omit":
+            score -= 20
+        elif block_type in {"text", "kpi_dashboard"}:
+            score += 2
+    if block.get("ai_selected"):
+        score += 6
+    return score
+
+
+def score_block_against_prompt(block, preferences):
+    if not preferences:
+        return 0
+    haystack = " ".join(
+        clean_text(item)
+        for item in (
+            block.get("title"),
+            block.get("subtitle"),
+            block.get("source_basis"),
+            " ".join(safe_list(block.get("lines"))),
+        )
+        if clean_text(item)
+    ).lower()
+    score = 0
+    for token in preferences.get("priority_tokens") or []:
+        if token == "hallazgos" and any(keyword in haystack for keyword in ("hallazgo", "auditoria", "riesgo")):
+            score += 7
+        elif token == "costos" and any(keyword in haystack for keyword in ("costo", "valor", "monto", "gasto", "centro de costo")):
+            score += 6
+        elif token == "estado" and "estado" in haystack:
+            score += 5
+        elif token == "coso" and any(keyword in haystack for keyword in ("coso", "control interno", "control")):
+            score += 6
+        elif token == "riesgos" and any(keyword in haystack for keyword in ("riesgo", "alerta", "anomalia", "anomal", "outlier")):
+            score += 5
+    if preferences.get("prefer_short_tables") and block.get("type") == "table":
+        row_count = len(block.get("rows") or [])
+        if row_count <= 8:
+            score += 4
+        elif row_count <= 12:
+            score += 2
+        else:
+            score -= 3
+    if block.get("type") == "kpi_dashboard":
+        score += 2
+    return score
+
+
+def order_blocks_by_prompt(blocks, preferences):
+    if not preferences:
+        return list(blocks)
+    return sorted(
+        blocks,
+        key=lambda block: score_block_against_prompt(block, preferences),
+        reverse=True,
+    )
+
+
+def enforce_chart_preferences(chart_blocks, preferences):
+    adjusted = []
+    for block in chart_blocks:
+        current = dict(block)
+        if preferences and preferences.get("prefer_bar_charts"):
+            chart = dict(current.get("chart") or {})
+            chart_type = clean_text(chart.get("tipo")).lower()
+            if chart_type in {"pie", "doughnut"}:
+                chart["tipo"] = "bar"
+                current["chart"] = chart
+        adjusted.append(current)
+    return adjusted
+
+
+def append_unique_blocks(target, blocks, seen_signatures, limit=None):
+    for block in blocks:
+        signature = (
+            block.get("type"),
+            clean_text(block.get("title"), 80).casefold(),
+            clean_text(block.get("subtitle"), 80).casefold(),
+        )
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        target.append(block)
+        if limit and len(target) >= limit:
+            break
+
+
+def build_content_blocks(data, prompt_preferences=None):
     blocks = []
-    if IS_BOARDROOM_MODE:
-        blocks.extend(build_boardroom_blocks(data, data.get("metadatos", {}).get("archivo") or "archivo"))
-    chart_blocks = build_chart_blocks(data)
+    chart_blocks = enforce_chart_preferences(build_chart_blocks(data), prompt_preferences)
     text_blocks = build_text_blocks(data)
+    boardroom_blocks = build_boardroom_blocks(data, data.get("metadatos", {}).get("archivo") or "archivo")
+    table_blocks = build_table_blocks(data)
+    chart_plan, table_plan = build_visual_plan_maps(data)
+    ai_status = get_ai_curation_status(data)
+    visual_curation_ready = is_visual_curation_ready(data)
     if len(chart_blocks) >= 3 and len(text_blocks) > 1:
-        text_blocks = text_blocks[:1]
-    if PRESENTATION_VISUAL_MODE == "charts":
-        blocks.extend(chart_blocks)
-        blocks.extend(text_blocks)
-        blocks.extend(build_table_blocks(data))
-    elif PRESENTATION_VISUAL_MODE == "tables":
-        blocks.extend(build_table_blocks(data))
-        blocks.extend(chart_blocks)
-        blocks.extend(text_blocks)
+        sheet_text_blocks = [block for block in text_blocks if block.get("origin") == "sheet_text"]
+        conclusion_blocks = [block for block in text_blocks if block.get("origin") != "sheet_text"]
+        if sheet_text_blocks:
+            text_blocks = sheet_text_blocks + conclusion_blocks[:1]
+        else:
+            text_blocks = text_blocks[:1]
+
+    kpi_blocks = [block for block in table_blocks if block.get("type") == "kpi_dashboard"]
+    summary_blocks = [block for block in table_blocks if block.get("type") == "table_summary"]
+    detail_blocks = [block for block in table_blocks if block.get("type") == "table"]
+    narrative_blocks = [block for block in text_blocks if block.get("origin") != "sheet_text"]
+    sheet_text_blocks = [block for block in text_blocks if block.get("origin") == "sheet_text"]
+    preferred_chart_blocks = list(chart_blocks)
+    preferred_kpi_blocks = list(kpi_blocks)
+    preferred_summary_blocks = list(summary_blocks)
+    preferred_detail_blocks = list(detail_blocks)
+
+    if STRICT_VISUAL_CURATION_MODE:
+        if visual_curation_ready:
+            selected_chart_ids = set(ai_status.get("selected_chart_ids") or [])
+            selected_table_ids = set(ai_status.get("selected_table_ids") or [])
+            chart_blocks = [block for block in chart_blocks if clean_text(block.get("visual_id"), 80) in selected_chart_ids]
+            kpi_blocks = [block for block in kpi_blocks if clean_text(block.get("visual_id"), 80) in selected_table_ids]
+            summary_blocks = [block for block in summary_blocks if clean_text(block.get("visual_id"), 80) in selected_table_ids]
+            detail_blocks = [block for block in detail_blocks if clean_text(block.get("visual_id"), 80) in selected_table_ids]
+            table_blocks = kpi_blocks + summary_blocks + detail_blocks
+            preferred_chart_blocks = list(chart_blocks)
+            preferred_kpi_blocks = list(kpi_blocks)
+            preferred_summary_blocks = list(summary_blocks)
+            preferred_detail_blocks = list(detail_blocks)
+        else:
+            chart_blocks = []
+            kpi_blocks = []
+            summary_blocks = []
+            detail_blocks = []
+            table_blocks = []
+            preferred_chart_blocks = []
+            preferred_kpi_blocks = []
+            preferred_summary_blocks = []
+            preferred_detail_blocks = []
+            boardroom_blocks = [block for block in boardroom_blocks if block.get("type") == "text"]
+
+    if chart_plan:
+        chart_blocks = sorted(
+            chart_blocks,
+            key=lambda block: score_block_against_visual_plan(block, chart_plan, table_plan),
+            reverse=True,
+        )
+        selected_chart_blocks = [block for block in chart_blocks if clean_text(block.get("visual_id"), 80) in chart_plan]
+        if selected_chart_blocks:
+            chart_blocks = selected_chart_blocks + [block for block in chart_blocks if block not in selected_chart_blocks]
+            preferred_chart_blocks = selected_chart_blocks
+
+    if table_plan:
+        ordered_table_blocks = sorted(
+            table_blocks,
+            key=lambda block: score_block_against_visual_plan(block, chart_plan, table_plan),
+            reverse=True,
+        )
+        kpi_blocks = [block for block in ordered_table_blocks if block.get("type") == "kpi_dashboard"]
+        summary_blocks = [block for block in ordered_table_blocks if block.get("type") == "table_summary"]
+        detail_blocks = [block for block in ordered_table_blocks if block.get("type") == "table"]
+        preferred_kpi_blocks = [
+            block for block in kpi_blocks
+            if clean_text(block.get("visual_id"), 80) in table_plan
+            and table_plan[clean_text(block.get("visual_id"), 80)]["mode"] != "omit"
+        ] or kpi_blocks
+        preferred_summary_blocks = [
+            block for block in summary_blocks
+            if clean_text(block.get("visual_id"), 80) in table_plan
+            and table_plan[clean_text(block.get("visual_id"), 80)]["mode"] == "summary"
+        ] or summary_blocks
+        preferred_detail_blocks = [
+            block for block in detail_blocks
+            if clean_text(block.get("visual_id"), 80) in table_plan
+            and table_plan[clean_text(block.get("visual_id"), 80)]["mode"] == "detail"
+        ] or detail_blocks
+
+    if prompt_preferences and prompt_preferences.get("explicit_structure"):
+        boardroom_blocks = order_blocks_by_prompt(boardroom_blocks, prompt_preferences)
+        kpi_blocks = order_blocks_by_prompt(kpi_blocks, prompt_preferences)
+        summary_blocks = order_blocks_by_prompt(summary_blocks, prompt_preferences)
+        detail_blocks = order_blocks_by_prompt(detail_blocks, prompt_preferences)
+        narrative_blocks = order_blocks_by_prompt(narrative_blocks, prompt_preferences)
+        sheet_text_blocks = order_blocks_by_prompt(sheet_text_blocks, prompt_preferences)
+        chart_blocks = order_blocks_by_prompt(chart_blocks, prompt_preferences)
+
+        seen_signatures = set()
+        append_unique_blocks(blocks, boardroom_blocks[: prompt_preferences.get("max_boardroom_blocks", 2)], seen_signatures)
+        append_unique_blocks(blocks, kpi_blocks[: prompt_preferences.get("kpi_slides", 0)], seen_signatures)
+        append_unique_blocks(blocks, chart_blocks[: prompt_preferences.get("chart_slides", 0)], seen_signatures)
+
+        table_goal = prompt_preferences.get("table_slides", 0)
+        preferred_tables = summary_blocks if prompt_preferences.get("prefer_short_tables") else (detail_blocks + summary_blocks)
+        if prompt_preferences.get("prefer_short_tables"):
+            preferred_tables = summary_blocks + detail_blocks
+        append_unique_blocks(blocks, preferred_tables[:table_goal], seen_signatures)
+
+        append_unique_blocks(blocks, narrative_blocks[: prompt_preferences.get("conclusion_slides", 0)], seen_signatures)
+
+        fallback_pool = (
+            chart_blocks
+            + kpi_blocks
+            + summary_blocks
+            + detail_blocks
+            + narrative_blocks
+            + sheet_text_blocks
+        )
+        append_unique_blocks(blocks, fallback_pool, seen_signatures, limit=prompt_preferences.get("max_total_content_blocks", MAX_CONTENT_BLOCKS))
     else:
-        blocks.extend(chart_blocks)
-        blocks.extend(text_blocks)
-        blocks.extend(build_table_blocks(data))
+        lead_chart_pool = preferred_chart_blocks or chart_blocks
+        lead_kpi_pool = preferred_kpi_blocks or kpi_blocks
+        lead_summary_pool = preferred_summary_blocks or summary_blocks
+        lead_detail_pool = preferred_detail_blocks or detail_blocks
+        primary_sheet_name = clean_text((data.get("resumen_generico") or {}).get("hoja_principal"), 80)
+        primary_kpi_pool = [
+            block for block in lead_kpi_pool
+            if clean_text((block.get("traceability") or {}).get("source_sheet"), 80) == primary_sheet_name
+        ] or lead_kpi_pool
+        if lead_chart_pool:
+            blocks.append(lead_chart_pool[0])
+        elif primary_kpi_pool:
+            blocks.append(primary_kpi_pool[0])
+        elif lead_summary_pool:
+            blocks.append(lead_summary_pool[0])
+
+        if visual_curation_ready:
+            if IS_BOARDROOM_MODE or boardroom_blocks:
+                blocks.extend(boardroom_blocks[:2])
+            blocks.extend(lead_chart_pool[1:2])
+            blocks.extend(lead_kpi_pool[:2])
+            blocks.extend(lead_summary_pool[:1])
+            blocks.extend(narrative_blocks[:1])
+            blocks.extend(sheet_text_blocks[:1])
+            blocks.extend(lead_detail_pool[:1])
+        else:
+            boardroom_text_blocks = [block for block in boardroom_blocks if block.get("type") == "text"]
+            if boardroom_text_blocks:
+                blocks.extend(boardroom_text_blocks[:1])
+            if lead_chart_pool:
+                blocks.extend(lead_chart_pool[:1])
+            if primary_kpi_pool:
+                blocks.extend(primary_kpi_pool[:1])
+            elif not lead_chart_pool:
+                blocks.extend(lead_summary_pool[:1])
+            blocks.extend(narrative_blocks[:1])
+            if not narrative_blocks:
+                blocks.extend(sheet_text_blocks[:1])
+
+        deduped_blocks = []
+        seen_signatures = set()
+        for block in blocks:
+            signature = (
+                block.get("type"),
+                clean_text(block.get("title"), 80).casefold(),
+                clean_text(block.get("subtitle"), 80).casefold(),
+            )
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            deduped_blocks.append(block)
+        blocks = deduped_blocks
+
     if not blocks:
         blocks.append({
             "type": "text",
             "title": "Contenido principal",
-            "subtitle": "Sin insumos visuales",
+            "subtitle": "Curaduria visual",
             "lines": [
-                "No se detectaron tablas o graficas validas para poblar la slide de contenido.",
-                "La presentacion se limita a la sintesis real del Excel origen y preserva la plantilla.",
+                "No se renderizan graficas ni tablas ejecutivas sin curaduria visual valida de Hermes.",
+                "La presentacion conserva solo contenido textual confiable hasta recibir seleccion explicita de la IA.",
             ],
         })
-    return blocks[:MAX_CONTENT_BLOCKS]
+    max_blocks = prompt_preferences.get("max_total_content_blocks", MAX_CONTENT_BLOCKS) if prompt_preferences else MAX_CONTENT_BLOCKS
+    return blocks[:max_blocks]
+
+
+def summarize_effective_slide_budget(data, content_blocks):
+    budget = dict(data.get("presupuesto_slides") or {})
+    effective_chart_count = len([item for item in content_blocks if item.get("type") == "chart"])
+    effective_table_count = len([item for item in content_blocks if item.get("type") == "table"])
+    effective_text_count = len([item for item in content_blocks if item.get("type") == "text"])
+    effective_dashboard_count = len([item for item in content_blocks if item.get("type") == "kpi_dashboard"])
+
+    budget["graficas"] = max(int(budget.get("graficas", 0) or 0), effective_chart_count)
+    budget["tabla_principal"] = max(int(budget.get("tabla_principal", 0) or 0), min(2, effective_table_count))
+    budget["hallazgos"] = max(int(budget.get("hallazgos", 0) or 0), min(4, effective_text_count))
+    budget["genericas"] = max(int(budget.get("genericas", 0) or 0), min(4, effective_dashboard_count))
+    return budget
 
 
 def run_content_quality_checks(data, content_blocks):
@@ -2721,14 +3522,20 @@ def run_content_quality_checks(data, content_blocks):
                 continue
         checked_blocks.append(block)
     if not checked_blocks:
+        fallback_lines = [
+            "No se detectaron bloques suficientemente confiables para poblar la presentacion final.",
+            "El motor conserva la plantilla y evita mostrar contenido dudoso o inconsistente.",
+        ]
+        if STRICT_VISUAL_CURATION_MODE and not is_visual_curation_ready(data):
+            fallback_lines = [
+                "Hermes no entrego una curaduria visual valida para esta ejecucion.",
+                "El modo estricto bloquea graficas y tablas ejecutivas hasta recibir seleccion explicita de la IA.",
+            ]
         checked_blocks.append({
             "type": "text",
             "title": "Contenido principal",
             "subtitle": "Validacion de calidad",
-            "lines": [
-                "No se detectaron bloques suficientemente confiables para poblar la presentacion final.",
-                "El motor conserva la plantilla y evita mostrar contenido dudoso o inconsistente.",
-            ],
+            "lines": fallback_lines,
         })
     return checked_blocks[:MAX_CONTENT_BLOCKS], issues
 
@@ -2776,19 +3583,23 @@ def fill_description_slide(slide, data, excel_path):
         p1 = box.text_frame.paragraphs[0]
         p1.text = card["title"]
         p1.alignment = PP_ALIGN.LEFT
+        p1.space_after = Pt(3)
         for run in p1.runs:
             run.font.name = "Calibri"
-            run.font.size = Pt(15)
+            run.font.size = Pt(15.5)
             run.font.bold = True
             run.font.color.rgb = COLOR_BLUE
 
-        p2 = box.text_frame.add_paragraph()
-        p2.text = card["body"]
-        p2.alignment = PP_ALIGN.LEFT
-        for run in p2.runs:
-            run.font.name = "Calibri"
-            run.font.size = Pt(11.5)
-            run.font.color.rgb = COLOR_TEXT
+        for line_index, line in enumerate([clean_text(part) for part in str(card["body"]).splitlines() if clean_text(part)]):
+            paragraph = box.text_frame.add_paragraph()
+            paragraph.text = line
+            paragraph.alignment = PP_ALIGN.LEFT
+            paragraph.space_after = Pt(1 if line_index == 0 else 0)
+            for run in paragraph.runs:
+                run.font.name = "Calibri"
+                run.font.size = Pt(10.6)
+                run.font.bold = False
+                run.font.color.rgb = COLOR_TEXT
 
 
 def fill_priority_slide(slide, data, excel_path):
@@ -2812,26 +3623,38 @@ def fill_priority_slide(slide, data, excel_path):
         header_paragraph = text_frame.paragraphs[0] if section_index == 0 else text_frame.add_paragraph()
         header_paragraph.text = header
         header_paragraph.alignment = PP_ALIGN.LEFT
-        header_paragraph.space_after = Pt(5)
+        header_paragraph.space_after = Pt(4)
         for run in header_paragraph.runs:
             run.font.name = "Calibri"
-            run.font.size = Pt(13.5)
+            run.font.size = Pt(14)
             run.font.bold = True
             run.font.color.rgb = COLOR_ORANGE
 
         for bullet in bullets[:SLIDE3_MAX_BULLETS]:
             paragraph = text_frame.add_paragraph()
-            paragraph.text = f"• {clean_text(bullet)}"
+            paragraph.text = f"- {clean_text(bullet)}"
             paragraph.alignment = PP_ALIGN.LEFT
-            paragraph.space_after = Pt(3)
+            paragraph.space_after = Pt(2)
             for run in paragraph.runs:
                 run.font.name = "Calibri"
-                run.font.size = Pt(10.6)
+                run.font.size = Pt(10.2)
                 run.font.bold = False
                 run.font.color.rgb = COLOR_WHITE
 
 
 def add_content_title(slide, title, subtitle):
+    # Franja vertical decorativa izquierda (acento de color)
+    accent_stripe = slide.shapes.add_shape(
+        1,
+        SLIDE4["title_x"] - Inches(0.12),
+        SLIDE4["title_y"] - Inches(0.02),
+        Inches(0.048),
+        Inches(0.56),
+    )
+    accent_stripe.fill.solid()
+    accent_stripe.fill.fore_color.rgb = RGBColor(0, 87, 184)
+    accent_stripe.line.fill.background()
+
     title_box = slide.shapes.add_textbox(
         SLIDE4["title_x"],
         SLIDE4["title_y"],
@@ -2840,7 +3663,7 @@ def add_content_title(slide, title, subtitle):
     )
     title_frame = title_box.text_frame
     title_frame.text = clean_text(title)
-    style_text_frame(title_frame, font_size=21, color=COLOR_BLUE, bold=True)
+    style_text_frame(title_frame, font_size=22, color=RGBColor(8, 40, 90), bold=True)
 
     if subtitle:
         subtitle_box = slide.shapes.add_textbox(
@@ -2851,7 +3674,8 @@ def add_content_title(slide, title, subtitle):
         )
         subtitle_frame = subtitle_box.text_frame
         subtitle_frame.text = clean_text(subtitle)
-        style_text_frame(subtitle_frame, font_size=9.5, color=COLOR_SOFT, bold=False)
+        style_text_frame(subtitle_frame, font_size=9.5, color=RGBColor(90, 110, 140), bold=False)
+
 
 
 def add_content_footer(slide, excel_path, index, total):
@@ -2861,7 +3685,7 @@ def add_content_footer(slide, excel_path, index, total):
         SLIDE4["footer_w"],
         SLIDE4["footer_h"],
     )
-    footer.text_frame.text = f"Fuente: {clean_text(Path(excel_path).name)} · Contenido {index}/{total}"
+    footer.text_frame.text = f"Fuente: {clean_text(Path(excel_path).name)} | Contenido {index}/{total}"
     style_text_frame(footer.text_frame, font_size=8, color=COLOR_SOFT, bold=False)
 
 
@@ -2872,11 +3696,21 @@ def render_chart_image(chart, output_path):
     layout = build_chart_layout_profile(labels, values)
     wrapped_labels = [wrap_chart_label(item, max_len=layout["label_max_len"], max_lines=2) for item in labels]
     metric_kind = infer_metric_kind(chart.get("metric_label") or chart.get("titulo"), values)
-    palette = ["#0B5CAB", "#5EA33B", "#F2994A", "#37A7B3", "#6C63FF", "#9AA5B1"]
+    # Premium color palette — vibrant, corporate-consultive
+    PALETTE_PREMIUM = [
+        "#0057B8",  # Azul corporativo profundo
+        "#00B0CC",  # Cyan-teal
+        "#FFB300",  # Dorado ejecutivo
+        "#26C676",  # Verde éxito
+        "#EF5350",  # Rojo alerta
+        "#7C4DFF",  # Violeta premium
+    ]
+    palette = PALETTE_PREMIUM
 
     plt.ioff()
+    BG_LIGHT = "#F8FAFB"  # Fondo blanco-azulado premium
     figure_height = 4.6 if chart_type in {"pie", "doughnut"} else (4.7 if layout["count"] <= 4 else 5.0)
-    fig = plt.figure(figsize=(8.4, figure_height), dpi=180, facecolor="white")
+    fig = plt.figure(figsize=(8.4, figure_height), dpi=180, facecolor=BG_LIGHT)
     title = clean_text(chart.get("titulo"), 72) or "Grafica"
 
     if chart_type in {"pie", "doughnut"}:
@@ -2894,8 +3728,22 @@ def render_chart_image(chart, output_path):
         )
         pie_ax.set(aspect="equal")
         total_value = sum(values)
-        pie_ax.text(0, 0.10, "Total", ha="center", va="center", fontsize=10, color="#5B6573", fontweight="bold")
-        pie_ax.text(0, -0.08, format_value(total_value, metric_kind, compact=True), ha="center", va="center", fontsize=16, color="#0B5CAB", fontweight="bold")
+        total_label = format_value(total_value, metric_kind, compact=True)
+        total_len = len(str(total_label))
+        total_font = 16
+        total_y = -0.08
+        if chart_type == "doughnut":
+            if total_len >= 13:
+                total_font = 11.5
+                total_y = -0.04
+            elif total_len >= 10:
+                total_font = 13
+                total_y = -0.05
+            elif total_len >= 8:
+                total_font = 14
+                total_y = -0.06
+        pie_ax.text(0, 0.12, "Total", ha="center", va="center", fontsize=9.5, color="#5B6573", fontweight="bold")
+        pie_ax.text(0, total_y, total_label, ha="center", va="center", fontsize=total_font, color="#0B5CAB", fontweight="bold")
         legend_ax.set_xlim(0, 1)
         legend_ax.set_ylim(0, 1)
         legend_step = 0.18 if len(pairs) <= 4 else 0.16
@@ -2913,7 +3761,7 @@ def render_chart_image(chart, output_path):
                 color="#5B6573",
                 va="center",
             )
-        pie_ax.set_title(title, loc="left", pad=12, color="#0B5CAB", fontsize=13, fontweight="bold")
+        pie_ax.set_title(title, loc="left", pad=12, color="#0057B8", fontsize=13.5, fontweight="bold")
     elif chart_type == "line":
         ax = fig.add_subplot(111)
         positions = list(range(len(values)))
@@ -2962,12 +3810,15 @@ def render_chart_image(chart, output_path):
         ax.spines["bottom"].set_color("#D9E1EA")
         ax.tick_params(axis="x", length=0)
         ax.tick_params(axis="y", labelsize=layout["axis_font"], colors="#5B6573")
-        ax.set_title(title, loc="left", pad=12, color="#0B5CAB", fontsize=13, fontweight="bold")
+        ax.set_title(title, loc="left", pad=12, color="#0057B8", fontsize=13.5, fontweight="bold")
     else:
         ax = fig.add_subplot(111)
+        ax.set_facecolor(BG_LIGHT)
         positions = list(range(len(values)))
-        bar_colors = ["#0B5CAB"] + ["#7DAEDB"] * max(0, len(values) - 1)
-        bars = ax.barh(positions, values, color=bar_colors[: len(values)], height=0.58)
+        # Barras premium: primera barra en azul profundo, resto en gradiente cyan
+        bar_colors = [PALETTE_PREMIUM[0]] + [PALETTE_PREMIUM[1]] * max(0, len(values) - 1)
+        bars = ax.barh(positions, values, color=bar_colors[: len(values)], height=0.58,
+                       edgecolor='white', linewidth=0.8)
         ax.set_yticks(positions)
         ax.set_yticklabels(wrapped_labels, fontsize=layout["label_font"], color="#243041")
         ax.invert_yaxis()
@@ -2993,10 +3844,12 @@ def render_chart_image(chart, output_path):
                 max_value,
                 format_chart_callout_value(value, metric_kind, prefer_compact=layout["prefer_compact_callout"]),
             )
-        ax.set_title(title, loc="left", pad=12, color="#0B5CAB", fontsize=13, fontweight="bold")
+        ax.set_title(title, loc="left", pad=12, color="#0057B8", fontsize=13.5, fontweight="bold",
+                     fontfamily='DejaVu Sans')
 
+    fig.patch.set_facecolor(BG_LIGHT)
     fig.subplots_adjust(left=layout["left_margin"], right=0.965, top=0.86, bottom=layout["bottom_margin"])
-    plt.savefig(output_path, facecolor="white", format="png")
+    plt.savefig(output_path, facecolor=BG_LIGHT, format="png")
     plt.close("all")
 
 
@@ -3021,71 +3874,104 @@ def render_chart_slide(slide, block, excel_path, content_index, total_blocks):
             image_path.unlink(missing_ok=True)
 
     panel_x = SLIDE4["content_x"] + Inches(7.48)
+    # Fondo del panel premium con borde sutil
     panel = slide.shapes.add_shape(1, panel_x, SLIDE4["content_y"], Inches(3.47), Inches(4.95))
     panel.fill.solid()
-    panel.fill.fore_color.rgb = COLOR_PANEL
-    panel.line.color.rgb = COLOR_LINE
+    panel.fill.fore_color.rgb = RGBColor(248, 250, 253)  # Azul muy claro premium
+    panel.line.color.rgb = RGBColor(210, 220, 235)
+    panel.line.width = Pt(0.5)
 
+    # Acento superior del panel (barra horizontal azul)
+    panel_accent = slide.shapes.add_shape(1, panel_x, SLIDE4["content_y"], Inches(3.47), Inches(0.055))
+    panel_accent.fill.solid()
+    panel_accent.fill.fore_color.rgb = RGBColor(0, 87, 184)  # Azul profundo
+    panel_accent.line.fill.background()
+
+    # Colores de acento por tipo de métrica
+    stat_colors = [
+        RGBColor(0, 87, 184),    # Azul — categoría
+        RGBColor(255, 179, 0),   # Dorado — valor
+        RGBColor(38, 198, 118),  # Verde — total
+        RGBColor(0, 176, 204),   # Teal — participación
+    ]
     stat_specs = [
-        ("Lider", summary["top_label"], COLOR_BLUE),
-        ("Valor top", summary["top_value"], COLOR_ORANGE),
-        ("Base total", summary["total_value"], COLOR_GREEN),
-        ("Participacion", summary["share"], COLOR_BLUE),
+        ("Categoria principal", summary["top_label"], stat_colors[0]),
+        ("Valor destacado",     summary["top_value"],  stat_colors[1]),
+        ("Total analizado",     summary["total_value"], stat_colors[2]),
+        ("Peso relativo",       summary["share"],       stat_colors[3]),
     ]
     for index, (label, value, color) in enumerate(stat_specs):
-        y = SLIDE4["content_y"] + Inches(0.18) + Inches(0.82) * index
-        stat = slide.shapes.add_shape(1, panel_x + Inches(0.16), y, Inches(3.15), Inches(0.66))
+        y = SLIDE4["content_y"] + Inches(0.20) + Inches(0.83) * index
+
+        # Card fondo blanco con sombra suave
+        stat = slide.shapes.add_shape(1, panel_x + Inches(0.14), y, Inches(3.18), Inches(0.70))
         stat.fill.solid()
-        stat.fill.fore_color.rgb = COLOR_WHITE if index % 2 == 0 else RGBColor(252, 248, 242)
-        stat.line.color.rgb = COLOR_LINE if index % 2 == 0 else RGBColor(234, 205, 177)
+        stat.fill.fore_color.rgb = COLOR_WHITE
+        stat.line.color.rgb = RGBColor(225, 232, 242)
+        stat.line.width = Pt(0.4)
 
-        label_box = slide.shapes.add_textbox(panel_x + Inches(0.3), y + Inches(0.08), Inches(2.7), Inches(0.18))
+        # Franja de color a la izquierda del card
+        stripe = slide.shapes.add_shape(1, panel_x + Inches(0.14), y, Inches(0.055), Inches(0.70))
+        stripe.fill.solid()
+        stripe.fill.fore_color.rgb = color
+        stripe.line.fill.background()
+
+        label_box = slide.shapes.add_textbox(panel_x + Inches(0.28), y + Inches(0.08), Inches(2.78), Inches(0.18))
         label_box.text_frame.text = label
-        style_text_frame(label_box.text_frame, font_size=9.4, color=COLOR_SOFT, bold=False)
+        style_text_frame(label_box.text_frame, font_size=9.0, color=COLOR_SOFT, bold=False)
 
-        value_box = slide.shapes.add_textbox(panel_x + Inches(0.3), y + Inches(0.28), Inches(2.7), Inches(0.24))
+        value_box = slide.shapes.add_textbox(panel_x + Inches(0.28), y + Inches(0.29), Inches(2.78), Inches(0.30))
         value_box.text_frame.text = clean_text(value)
-        style_text_frame(value_box.text_frame, font_size=13.2, color=color if color != COLOR_TEXT else COLOR_BLUE, bold=True)
+        style_text_frame(value_box.text_frame, font_size=15.5, color=color, bold=True)
 
-    insight = clean_text(block.get("insight"))
+    # ── Panel de insight con badge IA ───────────────────────────────────────
+    insight = clean_text(block.get("insight"))  # Definir antes del panel
+    insight_panel_y = SLIDE4["content_y"] + Inches(3.55)
+    insight_panel = slide.shapes.add_shape(
+        1, panel_x + Inches(0.14), insight_panel_y, Inches(3.18), Inches(1.25)
+    )
+    insight_panel.fill.solid()
+    insight_panel.fill.fore_color.rgb = RGBColor(0, 57, 120)  # Azul oscuro premium
+    insight_panel.line.fill.background()
+
+    # Badge IA dorado
+    badge = slide.shapes.add_textbox(
+        panel_x + Inches(0.22), insight_panel_y + Inches(0.07), Inches(0.80), Inches(0.18)
+    )
+    badge.text_frame.text = "AI"
+    style_text_frame(badge.text_frame, font_size=8.5, color=RGBColor(255, 193, 7), bold=True)
+
+    # Texto de insight en blanco
+    insight_box = slide.shapes.add_textbox(
+        panel_x + Inches(0.22), insight_panel_y + Inches(0.26), Inches(2.90), Inches(0.92)
+    )
+    insight_box.text_frame.word_wrap = True
+    insight_text = clean_text(insight or "La concentracion observada representa una oportunidad de optimizacion detectada automaticamente.")
+    insight_box.text_frame.text = insight_text
+    style_text_frame(insight_box.text_frame, font_size=9.0, color=COLOR_WHITE, bold=False)
+
+    # Sección de distribución detallada
     note = slide.shapes.add_textbox(
         panel_x + Inches(0.18),
-        SLIDE4["content_y"] + Inches(3.48),
+        SLIDE4["content_y"] + Inches(4.82) - Inches(0.42),
         Inches(3.05),
-        Inches(1.22),
+        Inches(0.38),
     )
     note_frame = note.text_frame
     note_frame.word_wrap = True
-    note_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     note_frame.margin_left = Pt(4)
     note_frame.margin_right = Pt(3)
-    note_frame.margin_top = Pt(3)
+    note_frame.margin_top = Pt(2)
     note_frame.margin_bottom = Pt(2)
     note_frame.clear()
     detail_header = note_frame.paragraphs[0]
-    detail_header.text = "Detalle visualizado"
+    detail_header.text = "Distribucion observada"
     for run in detail_header.runs:
         run.font.name = "Calibri"
-        run.font.size = Pt(10.2)
+        run.font.size = Pt(9.5)
         run.font.bold = True
-        run.font.color.rgb = COLOR_BLUE
-    for line in detail_lines[:3]:
-        paragraph = note_frame.add_paragraph()
-        paragraph.text = f"• {clean_text(line)}"
-        paragraph.alignment = PP_ALIGN.LEFT
-        paragraph.space_after = Pt(1)
-        for run in paragraph.runs:
-            run.font.name = "Calibri"
-            run.font.size = Pt(8.8)
-            run.font.color.rgb = COLOR_TEXT
-    insight_line = note_frame.add_paragraph()
-    insight_line.text = clean_text(insight or "La lectura visual resume la concentracion principal detectada en el Excel.")
-    insight_line.alignment = PP_ALIGN.LEFT
-    insight_line.space_before = Pt(2)
-    for run in insight_line.runs:
-        run.font.name = "Calibri"
-        run.font.size = Pt(8.6)
-        run.font.color.rgb = COLOR_SOFT
+        run.font.color.rgb = RGBColor(0, 87, 184)
+
 
     if trace_caption:
         trace_box = slide.shapes.add_textbox(
@@ -3214,10 +4100,7 @@ def render_table_slide(slide, block, excel_path, content_index, total_blocks):
             display_value = value
             if col_index == numeric_index and numeric_value is not None:
                 display_value = format_value(numeric_value, metric_kind, compact=False)
-            # Truncate very long cell text to keep the table readable
-            cell_text = clean_text(display_value)
-            if len(cell_text) > 68:
-                display_value = cell_text[:65] + "..."
+            display_value = clean_text(display_value)
             set_cell_text(cell, display_value, header=False)
             base_fill = COLOR_LIGHT if row_index % 2 == 0 else COLOR_WHITE
             if col_index == label_index:
@@ -3281,7 +4164,7 @@ def render_table_summary_slide(slide, block, excel_path, content_index, total_bl
     text_frame.clear()
 
     header = text_frame.paragraphs[0]
-    header.text = "Resumen ejecutivo de la tabla"
+    header.text = "Analisis de la tabla"
     header.alignment = PP_ALIGN.LEFT
     for run in header.runs:
         run.font.name = "Calibri"
@@ -3291,7 +4174,7 @@ def render_table_summary_slide(slide, block, excel_path, content_index, total_bl
 
     for line in block.get("lines") or []:
         paragraph = text_frame.add_paragraph()
-        paragraph.text = f"• {clean_text(line)}"
+        paragraph.text = f"- {clean_text(line)}"
         paragraph.alignment = PP_ALIGN.LEFT
         paragraph.space_after = Pt(7)
         for run in paragraph.runs:
@@ -3346,7 +4229,7 @@ def render_kpi_dashboard_slide(slide, block, excel_path, content_index, total_bl
     rank_shape.line.color.rgb = COLOR_LINE
 
     rank_title = slide.shapes.add_textbox(rank_box_x + Inches(0.18), rank_box_y + Inches(0.12), rank_box_w - Inches(0.3), Inches(0.25))
-    rank_title.text_frame.text = "Ranking y concentracion"
+    rank_title.text_frame.text = "Concentracion de valor"
     style_text_frame(rank_title.text_frame, font_size=12.5, color=COLOR_BLUE, bold=True)
 
     ranking = block.get("ranking") or []
@@ -3377,7 +4260,7 @@ def render_kpi_dashboard_slide(slide, block, excel_path, content_index, total_bl
     insight_box.line.color.rgb = RGBColor(234, 205, 177)
 
     insight_title = slide.shapes.add_textbox(insight_box_x + Inches(0.18), rank_box_y + Inches(0.12), Inches(3.95), Inches(0.25))
-    insight_title.text_frame.text = "Focos ejecutivos"
+    insight_title.text_frame.text = "Hallazgos ejecutivos"
     style_text_frame(insight_title.text_frame, font_size=12.5, color=COLOR_BLUE, bold=True)
 
     insight_text = slide.shapes.add_textbox(insight_box_x + Inches(0.18), rank_box_y + Inches(0.48), Inches(3.95), Inches(2.58))
@@ -3387,7 +4270,7 @@ def render_kpi_dashboard_slide(slide, block, excel_path, content_index, total_bl
     insight_frame.clear()
     for idx, line in enumerate((block.get("insights") or [])[:3]):
         paragraph = insight_frame.paragraphs[0] if idx == 0 else insight_frame.add_paragraph()
-        paragraph.text = f"• {clean_text(line)}"
+        paragraph.text = f"- {clean_text(line)}"
         paragraph.alignment = PP_ALIGN.LEFT
         paragraph.space_after = Pt(8)
         for run in paragraph.runs:
@@ -3625,7 +4508,7 @@ def render_text_slide(slide, block, excel_path, content_index, total_blocks):
             card_frame = card_text.text_frame
             card_frame.word_wrap = True
             card_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-            card_frame.text = f"• {clean_text(line)}"
+            card_frame.text = f"- {clean_text(line)}"
             style_text_frame(card_frame, font_size=13.2, color=COLOR_TEXT, bold=False)
     else:
         box = slide.shapes.add_textbox(
@@ -3645,7 +4528,7 @@ def render_text_slide(slide, block, excel_path, content_index, total_blocks):
 
         for line_index, line in enumerate(lines):
             paragraph = text_frame.paragraphs[0] if line_index == 0 else text_frame.add_paragraph()
-            paragraph.text = f"• {clean_text(line)}"
+            paragraph.text = f"- {clean_text(line)}"
             paragraph.alignment = PP_ALIGN.LEFT
             paragraph.space_after = Pt(8)
             for run in paragraph.runs:
@@ -3685,6 +4568,7 @@ def move_slide_to_end(prs, slide_index):
 
 
 def build_audit_record(excel_path, output_path, data, content_blocks, quality_issues=None):
+    effective_budget = summarize_effective_slide_budget(data, content_blocks)
     return {
         "generatedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "inputFile": str(Path(excel_path).resolve()),
@@ -3710,7 +4594,7 @@ def build_audit_record(excel_path, output_path, data, content_blocks, quality_is
             "tableSummaryBlocks": len([item for item in content_blocks if item["type"] == "table_summary"]),
             "textContentBlocks": len([item for item in content_blocks if item["type"] == "text"]),
             "conclusions": len(unique_texts(data.get("conclusiones"), limit=20, min_len=18)),
-            "slideBudget": data.get("presupuesto_slides") or {},
+            "slideBudget": effective_budget,
             "minimumConfidenceApplied": {
                 "chart": 0.58,
                 "tableDetail": 0.56,
@@ -3723,6 +4607,7 @@ def build_audit_record(excel_path, output_path, data, content_blocks, quality_is
             "issuesCount": len(safe_list(quality_issues)),
             "issues": safe_list(quality_issues),
         },
+        "aiCurationStatus": get_ai_curation_status(data),
         "contentAudit": [
             {
                 "type": item.get("type"),
@@ -3735,11 +4620,13 @@ def build_audit_record(excel_path, output_path, data, content_blocks, quality_is
     }
 
 
-def generate_presentation(excel_path, output_path):
+def generate_presentation(excel_path, output_path, user_instructions=None):
     if not TEMPLATE_PATH.exists():
         raise FileNotFoundError(f"No se encontro la plantilla requerida: {TEMPLATE_PATH}")
 
-    data = preparar_datos_para_slides(excel_path)
+    prompt_preferences = parse_prompt_preferences(user_instructions)
+    apply_prompt_palette(prompt_preferences)
+    data = preparar_datos_para_slides(excel_path, user_instructions)
     prs = Presentation(str(TEMPLATE_PATH))
     if len(prs.slides) < 5:
         raise RuntimeError("La plantilla no contiene las 5 diapositivas base requeridas.")
@@ -3748,7 +4635,7 @@ def generate_presentation(excel_path, output_path):
     fill_description_slide(prs.slides[1], data, excel_path)
     fill_priority_slide(prs.slides[2], data, excel_path)
 
-    content_blocks, quality_issues = run_content_quality_checks(data, build_content_blocks(data))
+    content_blocks, quality_issues = run_content_quality_checks(data, build_content_blocks(data, prompt_preferences=prompt_preferences))
     content_layout = prs.slides[3].slide_layout
 
     for index, block in enumerate(content_blocks, start=1):
@@ -3784,7 +4671,9 @@ def main():
         safe_name = basename_label(excel_resolved)
         output_path = str(excel_resolved.with_name(f"Presentacion_Plantilla_{safe_name}.pptx"))
 
-    final_output = generate_presentation(str(excel_resolved), output_path)
+    user_instructions = sys.argv[3] if len(sys.argv) > 3 else None
+
+    final_output = generate_presentation(str(excel_resolved), output_path, user_instructions)
     print(f"Presentación creada en: {final_output}")
     print(f"Auditoría creada en: {Path(final_output).with_suffix('.audit.json')}")
 

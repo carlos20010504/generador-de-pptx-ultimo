@@ -1,51 +1,39 @@
-# 🚀 Generador PPTX Socya - GEMINI.md
+# GEMINI.md - Contexto de Instrucción del Proyecto
 
-Este proyecto es un sistema inteligente de generación de presentaciones de PowerPoint (`.pptx`) a partir de archivos Excel, diseñado para automatizar reportes de auditoría y comisiones con un enfoque en calidad visual, fidelidad al dato y procesamiento eficiente.
+## Información General del Proyecto
+Este es el **Generador PPTX Socya**, una aplicación web moderna (Next.js v15/16) diseñada para transformar archivos Excel complejos en presentaciones de PowerPoint (.pptx) profesionales y auditables. Combina la agilidad de una interfaz web con el poder de procesamiento de datos de Python y capacidades de IA generativa (Gemini).
 
-## 📌 Visión General del Proyecto
+### Arquitectura
+- **Frontend:** Next.js (App Router) con TypeScript. Interfaz orientada a la experiencia del usuario con animaciones y flujos guiados.
+- **API (Backend Node.js):** Actúa como orquestador, gestionando la carga de archivos, validaciones y la ejecución de subprocesos Python.
+- **Motor de Procesamiento (Python):** Scripts especializados que realizan el análisis estadístico, la organización de datos y la renderización final del PPTX.
+- **Integración de IA:** Utiliza la familia de modelos Gemini (Flash 1.5/2.0) para generar resúmenes ejecutivos e insights avanzados directamente desde los datos del Excel.
 
-La arquitectura combina **Python** para el análisis del Excel y la generación final del `.pptx`, junto con **TypeScript (Next.js)** para la experiencia web y la orquestación del flujo.
+## Comandos Clave y Configuración
 
-### 🛠 Tecnologías Principales
-- **Frontend:** Next.js 16 (App Router), React 19, TailwindCSS 4.
-- **Procesamiento de Datos:** Python 3 + Pandas (vía `organizer.py`).
-- **Generación PPTX:** Python + `python-pptx` + `matplotlib` (vía `generate_template_presentation.py`).
-- **Validación de archivos:** `xlsx` en el frontend y backend.
+### Requisitos Previos
+- **Node.js:** Versión compatible con Next.js 15+.
+- **Python 3.x:** Debe estar disponible en el `PATH` como `python`.
+- **Dependencias de Python:** `pandas`, `numpy`, `python-pptx`, `matplotlib`, `google-generativeai`.
 
-## 🏗 Arquitectura del Sistema
+### Desarrollo y Ejecución
+- **Instalación:** `npm install`
+- **Servidor de Desarrollo:** `npm run dev` (disponible en `http://localhost:3001` por defecto).
+- **Verificación de Salud:** `GET /api/health` permite verificar si el entorno de Python y los scripts necesarios están correctamente configurados.
 
-1.  **Capa de Entrada:** El usuario sube un archivo Excel mediante `ExcelUploader.tsx`.
-2.  **Capa de Análisis (Python):** La API ejecuta `organizer.py`, que utiliza un motor de priorización (Scoring Algorithm) para:
-    *   Identificar KPIs globales (totales, promedios, conteos).
-    *   Generar distribuciones (por estado, ciudad, centro de costos).
-    *   Extraer tablas críticas (Hallazgos, COSO, Oportunidades de Mejora).
-    *   Aplicar "Compresión Inteligente" (agrupa datos masivos en "Top 5 + Otros").
-3.  **Capa de Orquestación UI/API:** `app/api/advanced-generate/route.ts` prepara el Excel organizado y `app/api/generate-pptx/route.ts` dispara la generación final.
-4.  **Capa de Renderizado:** `generate_template_presentation.py` aplica la plantilla corporativa, genera gráficos/tablas y guarda el archivo final.
+## Estructura de Archivos Críticos
+- `app/api/`: Contiene las rutas de la API (`generate-pptx`, `advanced-generate`, `health`).
+- `organizer.py`: Lógica principal de análisis de Excel y preparación de datos para los slides.
+- `generate_template_presentation.py`: Renderizador de PowerPoint usando `python-pptx`.
+- `utils/server-runtime.ts`: Gestiona la detección del runtime de Python y la disponibilidad de scripts.
+- `Plantilla_Presentacion_Socya (1) (1).pptx`: La plantilla base obligatoria para la generación.
 
-## 🚀 Comandos Clave
+## Convenciones de Desarrollo
+- **Idiomas:** Código y comentarios mayoritariamente en español/inglés. Los mensajes de usuario y logs de negocio están en español.
+- **Manejo de Python:** La comunicación entre Node.js y Python se realiza mediante `child_process.execFile`, pasando datos a través de archivos temporales o argumentos de línea de comandos.
+- **Validaciones:** Se aplican estrictos límites de tamaño y timeouts para evitar bloqueos del servidor durante el procesamiento de Excels pesados.
+- **Estilo de Código:** Sigue las convenciones estándar de Next.js para el frontend y PEP 8 para los scripts de Python.
 
-| Comando | Descripción |
-|---------|-------------|
-| `npm run dev` | Inicia el servidor de desarrollo en `localhost:3000`. |
-| `npm run build` | Compila la aplicación para producción. |
-| `npm run start` | Inicia la aplicación compilada. |
-| `npm run lint` | Ejecuta el linter (ESLint). |
-| `python organizer.py <path_excel>` | Ejecuta el análisis de datos de forma independiente (útil para pruebas). |
-
-> **Nota:** Se requiere tener instalado **Python** con la librería **pandas** en el entorno de ejecución para que la generación de reportes funcione correctamente.
-
-## 🧠 Convenciones de Desarrollo
-
-- **Tipado Estricto:** La capa web usa TypeScript para validar entradas, tamaños y estados de UI.
-- **Fidelidad al Dato:** El flujo productivo siempre depende del Excel subido en la solicitud actual; no se permite fallback a archivos legados.
-- **Sanitización:** Los nombres de archivo y el texto serializado deben limpiarse para evitar errores en la generación y en la descarga.
-- **Paginación Inteligente:** Las tablas extensas se fragmentan y priorizan para conservar legibilidad en la plantilla final.
-
-## 📂 Archivos Críticos
-
-- `app/api/advanced-generate/route.ts`: Punto de entrada para organización guiada del Excel.
-- `app/api/generate-pptx/route.ts`: Punto de entrada para la generación final del PowerPoint.
-- `organizer.py`: El "cerebro" analítico en Python.
-- `generate_template_presentation.py`: Motor principal de renderizado y composición del `.pptx`.
-- `components/ExcelUploader.tsx`: Flujo guiado de carga, organización y generación.
+## Notas de Operación
+- El sistema utiliza un sistema de prioridad de modelos Gemini (`flash-lite`, `flash`, etc.) con mecanismos de enfriamiento (cooldown) para manejar las cuotas de la API gratuita.
+- Existen archivos de caché en `.cache/` para los resultados de la IA, optimizando costos y tiempos de respuesta.

@@ -8,9 +8,10 @@ import {
   TrendingUp, PieChart, Wand2, Eye,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import { ACCEPTED_EXCEL_EXTENSIONS, MAX_EXCEL_UPLOAD_BYTES, validateExcelUpload, validateExcelContents } from '@/utils/excel-file';
+import { ACCEPTED_EXCEL_EXTENSIONS, MAX_EXCEL_UPLOAD_BYTES, shouldSkipClientContentValidation, validateExcelUpload, validateExcelContents } from '@/utils/excel-file';
 import { generatePowerPointFromExcel } from '@/utils/pptx-helper';
 import { autoOrganizeExcel, OrganizerMode } from '@/utils/excel-organizer';
+import AIControlPanel from './AIControlPanel';
 
 type Tab = 'generate' | 'organize';
 type Status = 'idle' | 'processing' | 'success' | 'organized' | 'previewed' | 'error';
@@ -55,7 +56,7 @@ const PRIMARY_MODE_OPTIONS: ModeOption[] = [
   {
     id: 'mixed', label: 'Mixto',
     desc: 'La opción más segura: balancea gráficos y tablas automáticamente.',
-    Icon: LayoutDashboard, color: '#7C3AED', glow: 'rgba(124,58,237,0.35)', recommended: true,
+    Icon: LayoutDashboard, color: '#7C3AED', glow: 'rgba(124,58,237,0.35)',
   },
   {
     id: 'charts', label: 'Gráficos',
@@ -76,6 +77,7 @@ const ADVANCED_MODE_OPTION: ModeOption = {
   Icon: Sparkles,
   color: '#EA580C',
   glow: 'rgba(234,88,12,0.35)',
+  recommended: true,
 };
 
 const STEP_TABS: { id: Tab; title: string; short: string; hint: string }[] = [
@@ -134,7 +136,7 @@ export default function ExcelUploader() {
   const [status, setStatus] = useState<Status>('idle');
   const [errorMessage, setErrorMessage] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('organize');
-  const [orgMode, setOrgMode] = useState<OrganizerMode>('mixed');
+  const [orgMode, setOrgMode] = useState<OrganizerMode>('boardroom');
   const [currentStep, setCurrentStep] = useState(0);
   const [stats, setStats] = useState<GenerationStats | null>(null);
   const [previewSlides, setPreviewSlides] = useState<PreviewSlide[]>([]);
@@ -142,6 +144,7 @@ export default function ExcelUploader() {
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [justAutoAdvanced, setJustAutoAdvanced] = useState(false);
+  const [userPrompt, setUserPrompt] = useState('');
   const [viewportHeight, setViewportHeight] = useState(960);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -191,13 +194,15 @@ export default function ExcelUploader() {
     }
 
     try {
-      const contentError = await validateExcelContents(f);
-      if (contentError) {
-        setFile(null);
-        setStatus('error');
-        setErrorMessage(contentError);
-        setJustAutoAdvanced(false);
-        return;
+      if (!shouldSkipClientContentValidation(f)) {
+        const contentError = await validateExcelContents(f);
+        if (contentError) {
+          setFile(null);
+          setStatus('error');
+          setErrorMessage(contentError);
+          setJustAutoAdvanced(false);
+          return;
+        }
       }
       
       setFile(f);
@@ -206,7 +211,7 @@ export default function ExcelUploader() {
       setStats(null);
       setPreviewSlides([]);
       setJustAutoAdvanced(false);
-    } catch (err) {
+    } catch {
       setFile(null);
       setStatus('error');
       setErrorMessage('Error validando el contenido del archivo.');
@@ -240,14 +245,20 @@ export default function ExcelUploader() {
     setStats(null);
     const start = performance.now();
     try {
-      await generatePowerPointFromExcel(file, orgMode);
+      await generatePowerPointFromExcel(file, orgMode, userPrompt);
       const duration = ((performance.now() - start) / 1000);
       setStats({ duration, mode: orgMode, fileName: file.name });
       setStatus('success');
     } catch (err: unknown) {
       console.error('Error generating PPTX:', err);
       setStatus('error');
-      setErrorMessage(getErrorMessage(err, 'Error al generar la presentación. Revisa la consola.'));
+      
+      const errorStr = String(err).toLowerCase();
+      if (errorStr.includes('429') || errorStr.includes('quota') || errorStr.includes('cuota')) {
+        setErrorMessage('La cuota gratuita de la IA se ha agotado temporalmente. Por favor, espera 1 minuto antes de volver a intentarlo para permitir que el sistema se libere.');
+      } else {
+        setErrorMessage(getErrorMessage(err, 'Error al generar la presentación. Revisa la consola.'));
+      }
     }
   };
 
@@ -261,6 +272,9 @@ export default function ExcelUploader() {
     try {
       const formData = new FormData();
       formData.append('file', file);
+      if (userPrompt.trim()) {
+        formData.append('userPrompt', userPrompt.trim());
+      }
 
       const response = await fetch('/api/advanced-generate', {
         method: 'POST',
@@ -350,18 +364,20 @@ export default function ExcelUploader() {
   const isShortViewport = viewportHeight <= 840;
 
   return (
-    <div
-      style={{
-        background: 'rgba(255,255,255,0.03)',
-        backdropFilter: 'blur(24px) saturate(180%)',
-        borderRadius: '24px',
-        border: '1px solid rgba(255,255,255,0.08)',
-        overflow: 'hidden',
-        boxShadow: '0 24px 80px rgba(0,0,0,0.5), 0 0 1px rgba(255,255,255,0.1) inset',
-      }}
-      className="animate-scale-in"
-    >
+    <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', width: '100%' }}>
       <div
+        style={{
+          flex: '1 1 0%',
+          background: 'rgba(255,255,255,0.03)',
+          backdropFilter: 'blur(24px) saturate(180%)',
+          borderRadius: '24px',
+          border: '1px solid rgba(255,255,255,0.08)',
+          overflow: 'hidden',
+          boxShadow: '0 24px 80px rgba(0,0,0,0.5), 0 0 1px rgba(255,255,255,0.1) inset',
+        }}
+        className="animate-scale-in"
+      >
+        <div
         style={{
           padding: isShortViewport ? '0.8rem 0.85rem 0.7rem' : (isCompactViewport ? '0.9rem 0.95rem 0.75rem' : '1rem 1rem 0.85rem'),
           borderBottom: '1px solid rgba(255,255,255,0.05)',
@@ -678,6 +694,7 @@ export default function ExcelUploader() {
             )}
           </div>
         )}
+
 
         <div style={{ marginTop: '1rem', marginBottom: '1rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.7rem', marginBottom: '0.55rem', flexWrap: 'wrap' }}>
@@ -1116,6 +1133,13 @@ export default function ExcelUploader() {
           )}
         </div>
       </div>
+    </div>
+      {/* Sidebar AIControlPanel */}
+      <AIControlPanel
+        file={file}
+        onPromptChange={setUserPrompt}
+        onFocusChange={(f) => setOrgMode(f === 'text' ? 'mixed' : f)}
+      />
     </div>
   );
 }
