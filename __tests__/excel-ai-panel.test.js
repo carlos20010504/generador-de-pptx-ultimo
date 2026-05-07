@@ -101,7 +101,21 @@ test('normaliza un reporte rico de IA para el panel derecho', () => {
   assert.equal(report.dataset.sheetCount, 3);
   assert.equal(report.processing.tier, 'alto-volumen');
   assert.equal(report.powerPointPlan.palette.name, 'Comité Ejecutivo');
-  assert.ok(report.executiveSummary.includes('Revisión ejecutiva'));
+  // executiveSummary is now built from semanticSummary.aboutText (added in b91c4c0).
+  // It no longer echoes briefing_ejecutivo_ia.de_que_trata verbatim; instead it
+  // produces a topic-derived sentence that always references the workbook families.
+  assert.ok(
+    report.executiveSummary.length > 0,
+    'executiveSummary should be a non-empty string',
+  );
+  assert.ok(
+    report.semanticSummary && report.semanticSummary.aboutText,
+    'semanticSummary.aboutText must be present (introduced in b91c4c0)',
+  );
+  assert.ok(
+    /auditoria/i.test(report.executiveSummary),
+    'executiveSummary should reference the detected workbook topic (auditoria)',
+  );
   assert.ok(report.trends.some((item) => /tendencia ascendente/i.test(item)));
   assert.ok(report.patterns.some((item) => /Tesorería/i.test(item)));
   assert.ok(report.powerPointPlan.recommendedSlides.length >= 4);
