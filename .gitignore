@@ -62,4 +62,5 @@ next-env.d.ts
 !docs/superpowers/plans/*.md
 /template_unpacked/
 /ppt_review_*/
-/__pycache__/
+__pycache__/
+*.pyc
