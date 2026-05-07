@@ -43,6 +43,7 @@ next-env.d.ts
 # data files
 *.xlsx
 !__tests__/baseline-snapshots/*.xlsx
+!__tests__/fixtures/*.xlsx
 *.pptx
 *.json
 *.pdf
