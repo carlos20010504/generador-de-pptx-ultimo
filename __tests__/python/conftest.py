@@ -1,5 +1,4 @@
 import pytest
-import pandas as pd
 from pathlib import Path
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
