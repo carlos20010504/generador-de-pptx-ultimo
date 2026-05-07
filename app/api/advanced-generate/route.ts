@@ -389,11 +389,7 @@ export async function POST(req: NextRequest) {
         env: {
           ...process.env,
           PYTHONUTF8: '1',
-          SOCYA_AI_WAIT_ON_RATE_LIMIT: '0',
-          SOCYA_AI_MAX_WAIT_SECONDS: '0',
-          SOCYA_AI_WAIT_POLL_SECONDS: '15',
-          SOCYA_AI_EXECUTION_MODE: 'best_effort',
-          SOCYA_AI_HARD_DEADLINE_SECONDS: '35',
+          SOCYA_AI_PROFILE: 'fast',
         },
       });
 

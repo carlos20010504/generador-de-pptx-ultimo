@@ -1918,109 +1918,34 @@ def enrich_textual_blocks_with_ai(blocks):
 
 
 def call_ai_api(prompt, response_mime_type="application/json"):
+    """Compat shim: delegates to socya_pipeline.AIChain."""
+    from socya_pipeline.ai_chain import AIChain, AIProfile
+    from socya_pipeline.errors import PipelineError
+
     api_key = get_openrouter_api_key()
     if not api_key:
         return None
-    best_effort_mode = AI_EXECUTION_MODE != "blocking"
-    wait_budget_seconds = 0 if best_effort_mode else AI_MAX_WAIT_SECONDS
-    request_timeout_seconds = max(10, min(AI_REQUEST_TIMEOUT_SECONDS, AI_HARD_DEADLINE_SECONDS)) if best_effort_mode else AI_REQUEST_TIMEOUT_SECONDS
-    max_retries = 1 if best_effort_mode else AI_MAX_RETRIES
-    if is_ai_temporarily_blocked():
-        if best_effort_mode:
-            return None
-        waited, wait_budget_seconds = maybe_wait_for_ai_cooldown(wait_budget_seconds)
-        if waited <= 0 and is_ai_temporarily_blocked():
-            return None
 
-    import requests
-    system_msg = "You must output strictly valid JSON." if response_mime_type == "application/json" else "You are a helpful assistant."
-    payload = {
-        "model": OPENROUTER_MODEL_PRIORITY[0],
-        "messages": [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2 if response_mime_type == "application/json" else 0.4,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": OPENROUTER_SITE_URL,
-        "X-Title": OPENROUTER_APP_NAME,
-    }
+    profile_name = (os.environ.get("SOCYA_AI_PROFILE") or "fast").strip().lower()
+    profile = AIProfile.PATIENT if profile_name == "patient" else AIProfile.FAST
 
-    last_error = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            resp = requests.post(
-                url="https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=request_timeout_seconds,
-            )
-            response_text = resp.text or ""
+    system_msg = ("You must output strictly valid JSON."
+                  if response_mime_type == "application/json"
+                  else "You are a helpful assistant.")
+    temperature = 0.2 if response_mime_type == "application/json" else 0.4
 
-            if resp.status_code == 429:
-                mark_ai_quota_blocked(response_text)
-                if best_effort_mode:
-                    return None
-                waited, wait_budget_seconds = maybe_wait_for_ai_cooldown(wait_budget_seconds)
-                if waited > 0 and attempt < max_retries:
-                    continue
-                return None
+    try:
+        result = AIChain(api_key=api_key, profile=profile).call(
+            prompt, system_msg=system_msg, temperature=temperature
+        )
+    except PipelineError as exc:
+        print(f"INFO: AIChain falló: {exc.code.value} {exc.message}", file=sys.stderr)
+        return None
 
-            if not resp.ok:
-                error_message = extract_openrouter_error_message(
-                    resp.json() if "application/json" in str(resp.headers.get("content-type", "")).lower() else response_text
-                )
-                if is_openrouter_rate_limit_message(error_message):
-                    mark_ai_quota_blocked(error_message)
-                    if best_effort_mode:
-                        return None
-                    waited, wait_budget_seconds = maybe_wait_for_ai_cooldown(wait_budget_seconds)
-                    if waited > 0 and attempt < max_retries:
-                        continue
-                    return None
-                if is_transient_openrouter_message(error_message) and attempt < max_retries:
-                    time.sleep(min(2 ** (attempt - 1), 6))
-                    continue
-                print(f"INFO: Error HTTP OpenRouter ({resp.status_code}): {error_message}", file=sys.stderr)
-                return None
-
-            data = resp.json()
-            if isinstance(data, dict) and 'choices' in data and len(data['choices']) > 0:
-                content = ((data['choices'][0] or {}).get('message') or {}).get('content')
-                normalized = normalize_ai_json_response_text(content) if response_mime_type == "application/json" else content
-                if normalized:
-                    clear_ai_quota_block()
-                    return normalized
-                last_error = "respuesta sin contenido util"
-            else:
-                error_message = extract_openrouter_error_message(data)
-                if is_openrouter_rate_limit_message(error_message):
-                    mark_ai_quota_blocked(error_message)
-                    return None
-                last_error = error_message or "respuesta OpenRouter sin choices"
-        except Exception as exc:
-            if is_openrouter_rate_limit_message(exc):
-                mark_ai_quota_blocked(exc)
-                if best_effort_mode:
-                    return None
-                waited, wait_budget_seconds = maybe_wait_for_ai_cooldown(wait_budget_seconds)
-                if waited > 0 and attempt < max_retries:
-                    continue
-                return None
-            last_error = str(exc)
-            if is_transient_openrouter_message(exc) and attempt < max_retries:
-                time.sleep(min(2 ** (attempt - 1), 6))
-                continue
-            if attempt < max_retries:
-                time.sleep(min(2 ** (attempt - 1), 6))
-                continue
-
-    if last_error:
-        print(f"INFO: Error cargando OpenRouter: {last_error}", file=sys.stderr)
-    return None
+    content = result.content
+    if response_mime_type == "application/json":
+        return normalize_ai_json_response_text(content)
+    return content
 
 
 def build_data_block_inventory(resultado):
