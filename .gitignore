@@ -55,6 +55,8 @@ next-env.d.ts
 !CLAUDE.md
 !AGENTS.md
 !Guia_Organizacion_Excel.md
+!docs/superpowers/specs/*.md
+!docs/superpowers/plans/*.md
 /template_unpacked/
 /ppt_review_*/
 /__pycache__/
