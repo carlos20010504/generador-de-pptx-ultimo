@@ -1,8 +1,8 @@
-const STANDARD_TIMEOUT_MS = 6 * 60 * 1000;
-const EXTENDED_TIMEOUT_MS = 10 * 60 * 1000;
-const MAX_TIMEOUT_MS = 15 * 60 * 1000;
-const SHALLOW_VALIDATION_THRESHOLD_BYTES = 12 * 1024 * 1024;
-const EXTENDED_PROCESSING_THRESHOLD_BYTES = 18 * 1024 * 1024;
+const STANDARD_TIMEOUT_MS = 8 * 60 * 1000;
+const EXTENDED_TIMEOUT_MS = 16 * 60 * 1000;
+const MAX_TIMEOUT_MS = 24 * 60 * 1000;
+const SHALLOW_VALIDATION_THRESHOLD_BYTES = 10 * 1024 * 1024;
+const EXTENDED_PROCESSING_THRESHOLD_BYTES = 16 * 1024 * 1024;
 
 function compactNumber(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -37,6 +37,14 @@ function uniqueStrings(values, limit = Infinity) {
   return result;
 }
 
+function normalizeText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
 function collectTableCount(analysis) {
   return [
     analysis?.muestra_tabla ? 1 : 0,
@@ -52,12 +60,12 @@ function buildProcessingProfile({ fileSizeBytes = 0, userPrompt = '' } = {}) {
   let timeoutMs = STANDARD_TIMEOUT_MS;
   let tier = 'estandar';
 
-  if (fileSizeBytes >= SHALLOW_VALIDATION_THRESHOLD_BYTES || promptLength >= 240) {
+  if (fileSizeBytes >= SHALLOW_VALIDATION_THRESHOLD_BYTES || promptLength >= 180) {
     timeoutMs = EXTENDED_TIMEOUT_MS;
     tier = 'extendido';
   }
 
-  if (fileSizeBytes >= EXTENDED_PROCESSING_THRESHOLD_BYTES || promptLength >= 700) {
+  if (fileSizeBytes >= EXTENDED_PROCESSING_THRESHOLD_BYTES || promptLength >= 420) {
     timeoutMs = MAX_TIMEOUT_MS;
     tier = 'alto-volumen';
   }
@@ -77,46 +85,135 @@ function buildRecommendedSlides(analysis, dataset) {
   const kpiCount = Array.isArray(analysis?.kpis_automaticos) ? analysis.kpis_automaticos.length : 0;
   const textBlockCount = Array.isArray(analysis?.bloques_textuales) ? analysis.bloques_textuales.length : 0;
   const tableCount = collectTableCount(analysis);
+  const request = analysis?.presentation_request || {};
+  const promptFocus = String(request?.prompt || '').trim() || String(dataset?.primarySheet || 'datos reales del Excel');
 
   slides.push({
     type: 'title',
-    title: 'Portada ejecutiva',
-    reason: 'Abre con el objetivo del archivo y la lectura gerencial del conjunto de datos.',
+    title: `Apertura sobre ${promptFocus}`.slice(0, 80),
+    reason: 'La portada debe responder al prompt del usuario y no a una plantilla fija.',
   });
 
   if (kpiCount > 0) {
     slides.push({
       type: 'kpi',
-      title: 'KPIs prioritarios',
-      reason: `El análisis detectó ${kpiCount} KPI(s) con suficiente señal para un resumen ejecutivo.`,
+      title: `KPIs para ${promptFocus}`.slice(0, 80),
+      reason: `Se priorizan ${kpiCount} KPI(s) que ayuden a responder el enfoque pedido por el usuario.`,
     });
   }
 
   if (chartCount > 0) {
     slides.push({
       type: 'chart',
-      title: 'Tendencias y concentraciones',
-      reason: `Hay ${chartCount} gráfica(s) candidata(s) para explicar patrones y comparativas.`,
+      title: `Graficas para ${promptFocus}`.slice(0, 80),
+      reason: `Hay ${chartCount} gráfica(s) candidata(s) y deben elegirse según el prompt, no por receta fija.`,
     });
   }
 
   if (tableCount > 0) {
     slides.push({
       type: 'table',
-      title: 'Tabla de soporte',
-      reason: `Se detectaron ${tableCount} bloque(s) tabulares para respaldo y detalle controlado.`,
+      title: `Tablas de soporte para ${promptFocus}`.slice(0, 80),
+      reason: `Se detectaron ${tableCount} bloque(s) tabulares y solo deben entrar si aportan al pedido del usuario.`,
     });
   }
 
   if (textBlockCount > 0 || dataset.workbookType === 'auditoria_control') {
     slides.push({
       type: 'narrative',
-      title: 'Hallazgos y recomendaciones',
-      reason: 'Conviene cerrar con insights, riesgos y acciones sugeridas por la IA.',
+      title: `Narrativa final sobre ${promptFocus}`.slice(0, 80),
+      reason: 'El cierre debe resumir lo que el prompt pidió ver y convertirlo en decisión o recomendación.',
     });
   }
 
   return slides.slice(0, 5);
+}
+
+function inferExcelTopic(analysis, dataset) {
+  const metadata = analysis?.metadatos || {};
+  const generic = analysis?.resumen_generico || {};
+  const columnsText = normalizeText([...(generic?.columnas || []), ...(generic?.columnas_numericas || [])].join(' '));
+  const sheetText = normalizeText([generic?.hoja_principal, ...(metadata?.hojas_encontradas || [])].join(' '));
+  const families = (dataset?.familiesDetected || []).map((item) => normalizeText(item));
+
+  if (
+    families.some((item) => ['hallazgos', 'riesgos', 'coso', 'oportunidades de mejora', 'auditoria', 'control'].some((token) => item.includes(token))) ||
+    ['auditoria', 'hallazgo', 'hallazgos', 'riesgo', 'riesgos', 'coso', 'control', 'oportunidad'].some((token) => sheetText.includes(token))
+  ) {
+    return 'auditoria, riesgos, controles y oportunidades de mejora';
+  }
+
+  if (['comision', 'viatico', 'tiquete', 'hospedaje', 'transporte', 'centro de costos', 'ciudad destino'].some((token) => columnsText.includes(token) || sheetText.includes(token))) {
+    return 'comisiones, viaticos y gastos de viaje';
+  }
+
+  if (['presupuesto', 'ejecucion', 'costo', 'costos', 'gasto', 'gastos', 'rubro', 'valor'].some((token) => columnsText.includes(token) || sheetText.includes(token))) {
+    return 'presupuesto, costos y ejecucion financiera';
+  }
+
+  if (['inventario', 'stock', 'producto', 'bodega', 'referencia'].some((token) => columnsText.includes(token) || sheetText.includes(token))) {
+    return 'inventario, referencias y niveles de stock';
+  }
+
+  if (['venta', 'ventas', 'factura', 'cliente', 'ingreso', 'ingresos', 'comercial'].some((token) => columnsText.includes(token) || sheetText.includes(token))) {
+    return 'ventas, clientes e ingresos comerciales';
+  }
+
+  const primarySheet = String(dataset?.primarySheet || '').trim();
+  if (primarySheet) {
+    return `datos operativos concentrados en ${primarySheet}`;
+  }
+
+  return `informacion estructurada de ${dataset?.fileName || 'el Excel cargado'}`;
+}
+
+function inferInformationType(analysis, dataset) {
+  const generic = analysis?.resumen_generico || {};
+  const numericColumns = Array.isArray(generic?.columnas_numericas) ? generic.columnas_numericas.length : 0;
+  const chartCount = Number(dataset?.chartCount || 0);
+  const tableCount = Number(dataset?.tableCount || 0);
+  const workbookType = String(dataset?.workbookType || '').trim();
+
+  if (workbookType === 'auditoria_control') {
+    return 'matrices de auditoria, hallazgos, riesgos, controles y seguimiento';
+  }
+  if (numericColumns >= 3 && chartCount > 0) {
+    return 'datos tabulares con metricas numericas, distribuciones y senales para graficas';
+  }
+  if (tableCount >= 2) {
+    return 'tablas estructuradas con detalle operativo y soporte para resumen ejecutivo';
+  }
+  return 'informacion tabular estructurada para analisis y presentacion';
+}
+
+function buildSemanticSummary(analysis, dataset) {
+  const topic = inferExcelTopic(analysis, dataset);
+  const informationType = inferInformationType(analysis, dataset);
+  const generic = analysis?.resumen_generico || {};
+  const metadata = analysis?.metadatos || {};
+  const families = uniqueStrings(dataset?.familiesDetected || [], 4);
+  const columns = uniqueStrings(generic?.columnas || [], 5);
+  const emphasis = uniqueStrings([
+    families.length ? `Frentes detectados: ${families.join(', ')}` : '',
+    columns.length ? `Columnas relevantes: ${columns.slice(0, 4).join(', ')}` : '',
+    dataset?.primarySheet ? `Hoja principal: ${dataset.primarySheet}` : '',
+  ], 3);
+
+  const aboutText = uniqueStrings([
+    `El Excel trata sobre ${topic}.`,
+    `Contiene principalmente ${informationType}.`,
+    dataset?.primarySheet ? `La lectura se centra en la hoja "${dataset.primarySheet}".` : '',
+    metadata?.tipo_libro === 'auditoria_control'
+      ? 'El archivo se comporta como un expediente de auditoria y control, no como una base financiera simple.'
+      : '',
+  ], 4).join(' ');
+
+  return {
+    topic,
+    informationType,
+    aboutText,
+    emphasis,
+  };
 }
 
 function buildPatterns(analysis) {
@@ -263,7 +360,9 @@ function buildExcelIntelligenceReport({
   const keyFindings = buildKeyFindings(analysis);
   const trends = buildTrends(analysis);
   const patterns = buildPatterns(analysis);
+  const semanticSummary = buildSemanticSummary(analysis, dataset);
   const executiveSummary = uniqueStrings([
+    semanticSummary.aboutText,
     analysis?.briefing_ejecutivo_ia?.de_que_trata,
     analysis?.resumen_ejecutivo_ia?.vision_general,
     keyFindings[0],
@@ -272,6 +371,7 @@ function buildExcelIntelligenceReport({
   const report = {
     model,
     dataset,
+    semanticSummary,
     processing,
     appliedPrompt: String(userPrompt || '').trim(),
     executiveSummary,
@@ -305,6 +405,7 @@ function buildExcelIntelligenceReport({
     processing.allowsExtendedProcessing
       ? `La ruta habilita hasta ${processing.timeoutMinutes} minutos de procesamiento para análisis extensos.`
       : 'El archivo entra en la ventana estándar de procesamiento.',
+    'Si Hermes no responde o tiene cuota, el sistema usa curaduría local para no bloquear la generación.',
     dataset.totalRows
       ? `Se detectan ${compactNumber(dataset.totalRows)} filas utilizables en la hoja principal.`
       : null,

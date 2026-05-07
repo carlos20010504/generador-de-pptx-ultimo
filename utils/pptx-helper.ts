@@ -1,6 +1,6 @@
 import type { OrganizerMode } from '@/utils/excel-organizer';
 
-const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
+const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 
 function sanitizeDownloadName(fileName: string): string {
   return fileName.replace(/[<>:"/\\|?*\x00-\x1F]+/g, '_').trim() || `Reporte_Socya_${Date.now()}.pptx`;
@@ -17,7 +17,19 @@ function getErrorMessage(error: unknown, fallback: string): string {
 export async function generatePowerPointFromExcel(
   file: File, 
   visualMode: OrganizerMode = 'mixed',
-  userPrompt: string = ''
+  userPrompt: string = '',
+  presentationContext?: {
+    audience: string;
+    language: string;
+    theme: {
+      key: string;
+      name: string;
+      primary_hex: string;
+      accent_hex: string;
+      text_hex: string;
+      bg_hex: string;
+    };
+  }
 ): Promise<void> {
   try {
     console.log('[1/3] 📤 Enviando archivo al backend premium...');
@@ -27,6 +39,11 @@ export async function generatePowerPointFromExcel(
     formData.append('visualMode', visualMode === 'auto' ? 'mixed' : visualMode);
     if (userPrompt) {
       formData.append('userPrompt', userPrompt);
+    }
+    if (presentationContext) {
+      formData.append('audience', presentationContext.audience);
+      formData.append('language', presentationContext.language);
+      formData.append('theme', JSON.stringify(presentationContext.theme));
     }
 
     const controller = new AbortController();

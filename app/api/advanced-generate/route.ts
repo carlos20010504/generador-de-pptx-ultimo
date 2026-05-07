@@ -14,7 +14,7 @@ const { buildProcessingProfile } = panelUtils as {
 };
 
 export const runtime = 'nodejs';
-export const maxDuration = 600;
+export const maxDuration = 1800;
 
 type ExecFileError = Error & { code?: string; killed?: boolean };
 type SlidePayload = Record<string, unknown>;
@@ -62,6 +62,31 @@ type PandasData = {
   distribucion_mes?: TableData;
   otras_tablas?: Record<string, TableData>;
   genericas?: Record<string, TableData>;
+  presentation_request?: {
+    prompt?: string;
+    audience?: string;
+    language?: string;
+    theme?: {
+      name?: string;
+    };
+  };
+  presentation_design_ia?: {
+    presentation_meta?: {
+      title?: string;
+      subtitle?: string;
+    };
+    slides?: Array<{
+      type?: string;
+      title?: string;
+      insight_text?: string;
+      design_notes?: string;
+      cta_text?: string;
+      summary_bullets?: string[];
+    }>;
+  };
+  visual_plan_ia?: {
+    storyline?: string[];
+  };
 };
 
 // ── HARD LIMITS ─────────────────────────────────────────────────────────────
@@ -93,6 +118,37 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function parseTheme(value: FormDataEntryValue | null) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildExtendedTimeoutMs(baseTimeoutMs: number): number {
+  const aiWaitBufferMs = 12 * 60 * 1000;
+  const routeBudgetMs = 28 * 60 * 1000;
+  return Math.max(baseTimeoutMs, Math.min(baseTimeoutMs + aiWaitBufferMs, routeBudgetMs));
+}
+
+function cleanText(value: unknown, fallback = ''): string {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return text || fallback;
+}
+
+function buildPromptFocusPhrase(pandasData: PandasData): string {
+  const prompt = cleanText(pandasData.presentation_request?.prompt);
+  const primarySheet = cleanText(pandasData.resumen_generico?.hoja_principal || pandasData.metadatos?.hojas_encontradas?.[0]);
+  if (prompt && primarySheet) {
+    return `${prompt} · ${primarySheet}`.slice(0, 120);
+  }
+  return prompt || primarySheet || cleanText(pandasData.metadatos?.archivo, 'datos reales del Excel');
+}
+
 /** Validates that a chart dataset has real data (non-zero values). */
 function hasValidChartData(chart: ChartData | undefined): boolean {
   if (!chart?.labels?.length || !chart?.valores?.length) return false;
@@ -119,19 +175,26 @@ function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
   const slides: SlidePayload[] = [];
   const fileLabel = String(pandasData.metadatos?.archivo || 'Archivo Excel');
   const mainSheetName = String(pandasData.resumen_generico?.hoja_principal || pandasData.metadatos?.hojas_encontradas?.[0] || 'Hoja principal');
+  const focusPhrase = buildPromptFocusPhrase(pandasData);
+  const planMeta = pandasData.presentation_design_ia?.presentation_meta || {};
+  const planSlides = Array.isArray(pandasData.presentation_design_ia?.slides) ? pandasData.presentation_design_ia!.slides! : [];
+  const titleSlide = planSlides.find((slide) => slide?.type === 'title_slide');
+  const executiveSlide = planSlides.find((slide) => slide?.type === 'executive_summary');
+  const closingSlide = planSlides.find((slide) => slide?.type === 'closing_slide');
+  const narrativeHints = (pandasData.visual_plan_ia?.storyline || []).map((item) => cleanText(item)).filter(Boolean);
 
   // 1. PORTADA
   slides.push({
     type: 'title',
-    title: 'Reporte Ejecutivo',
-    subtitle: `Análisis inteligente: ${fileLabel}`,
+    title: cleanText(titleSlide?.title || planMeta.title, `Decision ejecutiva sobre ${focusPhrase}`),
+    subtitle: cleanText(planMeta.subtitle, `Lectura guiada por prompt sobre ${fileLabel}`),
   });
 
   // 2. RESUMEN KPIs — Automáticos
   if (pandasData.kpis_automaticos?.length) {
     slides.push({
       type: 'kpi_row',
-      title: 'Indicadores Clave Detectados',
+      title: cleanText(executiveSlide?.title, `Indicadores para responder al prompt: ${focusPhrase}`),
       content: pandasData.kpis_automaticos.map((kpi) => ({
         label: kpi.label,
         value: kpi.value,
@@ -140,7 +203,7 @@ function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
   } else if (pandasData.resumen_generico) {
     slides.push({
       type: 'kpi_row',
-      title: 'Resumen del Archivo',
+      title: `Base priorizada para ${focusPhrase}`,
       content: [
         { label: 'Hoja base', value: mainSheetName },
         { label: 'Filas', value: String(pandasData.resumen_generico.total_filas ?? 0) },
@@ -181,8 +244,8 @@ function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
 
       slides.push({
         type: 'table',
-        title: `Vista principal: ${mainSheetName}${pageLabel}`,
-        subtitle: `Registros ${startRow + 1} - ${endRow} de ${allRows.length}`,
+        title: `Detalle priorizado: ${focusPhrase}${pageLabel}`,
+        subtitle: `Registros ${startRow + 1} - ${endRow} de ${allRows.length} en ${mainSheetName}`,
         content: {
           headers: headers.slice(0, 7),
           rows: pageRows.map((row) => row.slice(0, 7)),
@@ -197,8 +260,8 @@ function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
     if (hasValidTableData(table)) {
       slides.push({
         type: 'table',
-        title: String(name),
-        subtitle: `Datos extraídos de la hoja "${name}"`,
+        title: `Soporte alineado al prompt: ${String(name)}`,
+        subtitle: `Bloque complementario de "${name}" seleccionado desde el Excel`,
         content: {
           headers: (table.encabezados ?? []).slice(0, 6),
           rows: (table.filas ?? []).slice(0, ROWS_PER_TABLE_SLIDE).map((row) => row.slice(0, 6)),
@@ -213,8 +276,8 @@ function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
     if (hasValidTableData(table)) {
       slides.push({
         type: 'table',
-        title: String(name),
-        subtitle: `Detalle adicional de la hoja "${name}"`,
+        title: `Detalle adicional para ${focusPhrase}`,
+        subtitle: `Soporte proveniente de la hoja "${name}"`,
         content: {
           headers: (table.encabezados ?? []).slice(0, 6),
           rows: (table.filas ?? []).slice(0, ROWS_PER_TABLE_SLIDE).map((row) => row.slice(0, 6)),
@@ -227,8 +290,8 @@ function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
   if (slides.length < MAX_SLIDES - 2 && hasValidTableData(pandasData.coso)) {
     slides.push({
       type: 'table',
-      title: 'Evaluación COSO',
-      subtitle: 'Control interno detectado en el archivo',
+      title: `Control priorizado para ${focusPhrase}`,
+      subtitle: 'Vista de control interno solo si aporta al pedido del usuario',
       content: {
         headers: (pandasData.coso!.encabezados ?? []).slice(0, 5),
         rows: (pandasData.coso!.filas ?? []).slice(0, 10).map((row) => row.slice(0, 5)),
@@ -240,8 +303,8 @@ function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
   if (slides.length < MAX_SLIDES - 1 && pandasData.conclusiones?.length) {
     slides.push({
       type: 'text_bullets',
-      title: 'Conclusiones del Análisis',
-      subtitle: 'Hallazgos identificados automáticamente a partir de los datos',
+      title: cleanText(closingSlide?.title, `Conclusiones sobre ${focusPhrase}`),
+      subtitle: cleanText(executiveSlide?.insight_text, narrativeHints[0] || 'Mensajes clave construidos desde el prompt y los datos'),
       content: pandasData.conclusiones.slice(0, 8),
     });
   }
@@ -249,8 +312,8 @@ function buildGenericSlides(pandasData: PandasData): SlidePayload[] {
   // 9. CIERRE
   slides.push({
     type: 'closing',
-    title: 'Fin del Reporte',
-    subtitle: 'La presentación se estructuró con base en las hojas organizadas del Excel.',
+    title: cleanText(closingSlide?.title, `Siguiente decision sobre ${focusPhrase}`),
+    subtitle: cleanText(closingSlide?.cta_text, narrativeHints[1] || 'La salida cambia segun el prompt y la evidencia priorizada del Excel.'),
   });
 
   // ENFORCE: never exceed MAX_SLIDES
@@ -282,6 +345,9 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
     const userPrompt = String(formData.get('userPrompt') ?? '').trim();
+    const audience = String(formData.get('audience') ?? 'ejecutivos').trim();
+    const language = String(formData.get('language') ?? 'Español').trim();
+    const theme = parseTheme(formData.get('theme'));
 
     if (!file) {
       return NextResponse.json({ error: 'No se subió ningún archivo.' }, { status: 400 });
@@ -298,6 +364,7 @@ export async function POST(req: NextRequest) {
       fileSizeBytes: file.size,
       userPrompt,
     });
+    const pythonTimeoutMs = buildExtendedTimeoutMs(processingProfile.timeoutMs);
 
     tempDir = await fs.mkdtemp(path.join(/* turbopackIgnore: true */ os.tmpdir(), 'socya-advanced-'));
     filePath = path.join(tempDir, sanitizeUploadName(file.name));
@@ -305,17 +372,29 @@ export async function POST(req: NextRequest) {
     await fs.writeFile(/* turbopackIgnore: true */ filePath, buffer);
 
     try {
-      const args = ['-X', 'utf8', ORGANIZER_SCRIPT_NAME, filePath];
-      if (userPrompt) {
-        args.push(userPrompt);
-      }
+      const presentationRequest = JSON.stringify({
+        prompt: userPrompt,
+        audience,
+        language,
+        current_date: new Date().toLocaleDateString(),
+        theme,
+      });
+      const args = ['-X', 'utf8', ORGANIZER_SCRIPT_NAME, filePath, presentationRequest];
 
       const { stdout, stderr } = await execFileAsync('python', args, {
         encoding: 'utf8',
-        timeout: processingProfile.timeoutMs,
+        timeout: pythonTimeoutMs,
         maxBuffer: 20 * 1024 * 1024,
         windowsHide: true,
-        env: { ...process.env, PYTHONUTF8: '1' },
+        env: {
+          ...process.env,
+          PYTHONUTF8: '1',
+          SOCYA_AI_WAIT_ON_RATE_LIMIT: '0',
+          SOCYA_AI_MAX_WAIT_SECONDS: '0',
+          SOCYA_AI_WAIT_POLL_SECONDS: '15',
+          SOCYA_AI_EXECUTION_MODE: 'best_effort',
+          SOCYA_AI_HARD_DEADLINE_SECONDS: '35',
+        },
       });
 
       if (stderr?.trim() && !stdout?.trim()) {

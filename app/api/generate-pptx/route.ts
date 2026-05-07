@@ -14,7 +14,7 @@ const { buildProcessingProfile } = panelUtils as {
 };
 
 export const runtime = 'nodejs';
-export const maxDuration = 600;
+export const maxDuration = 1800;
 
 type VisualMode = 'charts' | 'tables' | 'mixed' | 'boardroom';
 type ExecFileError = Error & { code?: string; killed?: boolean; stderr?: string };
@@ -73,6 +73,23 @@ function getRelevantPythonWarnings(stderr: string): string[] {
     .filter((line) => !/^INFO:\s+Error en fallback de OpenRouter/i.test(line));
 }
 
+function parseTheme(value: FormDataEntryValue | null) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildExtendedTimeoutMs(baseTimeoutMs: number): number {
+  const aiWaitBufferMs = 12 * 60 * 1000;
+  const routeBudgetMs = 28 * 60 * 1000;
+  return Math.max(baseTimeoutMs, Math.min(baseTimeoutMs + aiWaitBufferMs, routeBudgetMs));
+}
+
 export async function POST(req: NextRequest) {
   let tempDir = '';
   let inputPath = '';
@@ -96,6 +113,9 @@ export async function POST(req: NextRequest) {
     const file = formData.get('file');
     const visualMode = normalizeVisualMode(formData.get('visualMode'));
     const userPrompt = String(formData.get('userPrompt') ?? '').trim();
+    const audience = String(formData.get('audience') ?? 'ejecutivos').trim();
+    const language = String(formData.get('language') ?? 'Español').trim();
+    const theme = parseTheme(formData.get('theme'));
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: 'No se subió ningún archivo Excel válido.' }, { status: 400 });
@@ -110,6 +130,7 @@ export async function POST(req: NextRequest) {
       fileSizeBytes: file.size,
       userPrompt,
     });
+    const pythonTimeoutMs = buildExtendedTimeoutMs(processingProfile.timeoutMs);
 
     tempDir = await fs.mkdtemp(path.join(/* turbopackIgnore: true */ os.tmpdir(), 'socya-pptx-'));
     inputPath = path.join(tempDir, sanitizeUploadName(file.name));
@@ -118,20 +139,29 @@ export async function POST(req: NextRequest) {
     const bytes = await file.arrayBuffer();
     await fs.writeFile(/* turbopackIgnore: true */ inputPath, Buffer.from(bytes));
 
-    const args = ['-X', 'utf8', GENERATOR_SCRIPT_NAME, inputPath, outputPath];
-    if (userPrompt) {
-      args.push(userPrompt);
-    }
+    const presentationRequest = JSON.stringify({
+      prompt: userPrompt,
+      audience,
+      language,
+      current_date: new Date().toLocaleDateString(),
+      theme,
+    });
+    const args = ['-X', 'utf8', GENERATOR_SCRIPT_NAME, inputPath, outputPath, presentationRequest];
 
     const { stderr } = await execFileAsync('python', args, {
       encoding: 'utf8',
       maxBuffer: 20 * 1024 * 1024,
-      timeout: processingProfile.timeoutMs,
+      timeout: pythonTimeoutMs,
       windowsHide: true,
       env: {
         ...process.env,
         PYTHONUTF8: '1',
         SOCYA_PRESENTATION_MODE: visualMode,
+        SOCYA_AI_WAIT_ON_RATE_LIMIT: '0',
+        SOCYA_AI_MAX_WAIT_SECONDS: '0',
+        SOCYA_AI_WAIT_POLL_SECONDS: '15',
+        SOCYA_AI_EXECUTION_MODE: 'best_effort',
+        SOCYA_AI_HARD_DEADLINE_SECONDS: '35',
       },
     });
 

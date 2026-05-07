@@ -1,39 +1,53 @@
-# GEMINI.md - Contexto de Instrucción del Proyecto
+# Generador PPTX Socya
 
-## Información General del Proyecto
-Este es el **Generador PPTX Socya**, una aplicación web moderna (Next.js v15/16) diseñada para transformar archivos Excel complejos en presentaciones de PowerPoint (.pptx) profesionales y auditables. Combina la agilidad de una interfaz web con el poder de procesamiento de datos de Python y capacidades de IA generativa (Gemini).
+Este proyecto es una aplicación **Next.js 16** diseñada para transformar archivos Excel (.xlsx, .xls, .xlsm) en presentaciones PowerPoint (.pptx) corporativas. Utiliza un backend híbrido donde la orquestación y la API residen en Node.js, mientras que el análisis de datos y la generación de diapositivas se delegan a scripts de **Python**.
 
-### Arquitectura
-- **Frontend:** Next.js (App Router) con TypeScript. Interfaz orientada a la experiencia del usuario con animaciones y flujos guiados.
-- **API (Backend Node.js):** Actúa como orquestador, gestionando la carga de archivos, validaciones y la ejecución de subprocesos Python.
-- **Motor de Procesamiento (Python):** Scripts especializados que realizan el análisis estadístico, la organización de datos y la renderización final del PPTX.
-- **Integración de IA:** Utiliza la familia de modelos Gemini (Flash 1.5/2.0) para generar resúmenes ejecutivos e insights avanzados directamente desde los datos del Excel.
+## Arquitectura y Componentes Principales
 
-## Comandos Clave y Configuración
+El flujo de trabajo se divide en dos fases principales:
 
-### Requisitos Previos
-- **Node.js:** Versión compatible con Next.js 15+.
-- **Python 3.x:** Debe estar disponible en el `PATH` como `python`.
-- **Dependencias de Python:** `pandas`, `numpy`, `python-pptx`, `matplotlib`, `google-generativeai`.
+1.  **Análisis y Organización (`organizer.py`):**
+    *   Procesa el Excel usando `pandas`.
+    *   Detecta automáticamente KPIs, tablas y gráficos.
+    *   Utiliza etiquetas especiales (opcionales) en el Excel como `TITLE:`, `SUBTITLE:` y `TYPE:` para guiar la generación.
+    *   Integra inteligencia artificial (vía OpenRouter/Hermes) para generar insights y resúmenes ejecutivos si el usuario proporciona un "prompt".
+2.  **Generación de PowerPoint (`generate_template_presentation.py`):**
+    *   Utiliza la librería `python-pptx` para manipular una plantilla corporativa (`Plantilla_Presentacion_Socya (1) (1).pptx`).
+    *   Genera gráficos usando `matplotlib`.
+    *   Aplica lógica de paginación para tablas largas y límites visuales para mantener la legibilidad.
 
-### Desarrollo y Ejecución
-- **Instalación:** `npm install`
-- **Servidor de Desarrollo:** `npm run dev` (disponible en `http://localhost:3001` por defecto).
-- **Verificación de Salud:** `GET /api/health` permite verificar si el entorno de Python y los scripts necesarios están correctamente configurados.
+## Tecnologías Clave
 
-## Estructura de Archivos Críticos
-- `app/api/`: Contiene las rutas de la API (`generate-pptx`, `advanced-generate`, `health`).
-- `organizer.py`: Lógica principal de análisis de Excel y preparación de datos para los slides.
-- `generate_template_presentation.py`: Renderizador de PowerPoint usando `python-pptx`.
-- `utils/server-runtime.ts`: Gestiona la detección del runtime de Python y la disponibilidad de scripts.
-- `Plantilla_Presentacion_Socya (1) (1).pptx`: La plantilla base obligatoria para la generación.
+*   **Frontend/API:** Next.js 16 (TypeScript), Tailwind CSS (inferido por `globals.css` y `postcss.config.mjs`).
+*   **Backend de Datos:** Python 3.x, `pandas`, `numpy`, `python-pptx`, `matplotlib`.
+*   **IA:** Integración con modelos de lenguaje a través de OpenRouter (prioridad: Hermes-3-Llama-3.1-405b).
 
-## Convenciones de Desarrollo
-- **Idiomas:** Código y comentarios mayoritariamente en español/inglés. Los mensajes de usuario y logs de negocio están en español.
-- **Manejo de Python:** La comunicación entre Node.js y Python se realiza mediante `child_process.execFile`, pasando datos a través de archivos temporales o argumentos de línea de comandos.
-- **Validaciones:** Se aplican estrictos límites de tamaño y timeouts para evitar bloqueos del servidor durante el procesamiento de Excels pesados.
-- **Estilo de Código:** Sigue las convenciones estándar de Next.js para el frontend y PEP 8 para los scripts de Python.
+## Rutas de API Críticas
 
-## Notas de Operación
-- El sistema utiliza un sistema de prioridad de modelos Gemini (`flash-lite`, `flash`, etc.) con mecanismos de enfriamiento (cooldown) para manejar las cuotas de la API gratuita.
-- Existen archivos de caché en `.cache/` para los resultados de la IA, optimizando costos y tiempos de respuesta.
+*   `POST /api/advanced-generate`: Organiza el contenido del Excel y devuelve una estructura de diapositivas sugerida.
+*   `POST /api/generate-pptx`: Genera y descarga el archivo `.pptx` final.
+*   `GET /api/health`: Verifica que Python, los scripts y la plantilla estén disponibles y operativos.
+
+## Comandos de Desarrollo
+
+*   **Instalación:** `npm install`
+*   **Entorno de Desarrollo:** `npm run dev` (disponible en http://localhost:3001)
+*   **Construcción:** `npm run build`
+*   **Linting:** `npm run lint`
+*   **Pruebas:** `npm test`
+
+## Convenciones y Notas de Desarrollo
+
+*   **Runtime:** El backend requiere que `python` esté en el `PATH` y tenga instaladas las dependencias necesarias (`pandas`, `python-pptx`, `matplotlib`, `requests`).
+*   **Gestión de Archivos:** Las APIs utilizan directorios temporales para procesar los archivos subidos y los eliminan al finalizar.
+*   **Validaciones:** Se aplican límites estrictos de tamaño de archivo y timeouts de ejecución para los scripts de Python (configurados en `utils/excel-ai-panel.cjs` y `utils/server-runtime.ts`).
+*   **Plantilla:** La generación depende críticamente de la existencia de `Plantilla_Presentacion_Socya (1) (1).pptx` en la raíz.
+*   **Codificación:** Los scripts de Python están configurados para usar `UTF-8` para evitar errores de caracteres especiales en Windows.
+
+## Estructura de Carpetas
+
+*   `app/api/`: Endpoints de la aplicación.
+*   `components/`: Componentes React (Uploader, Paneles de IA).
+*   `utils/`: Utilidades para manejo de archivos, integridad de presentaciones y validación de runtime.
+*   `scripts/` (en `.agents`, `.claude`, `.trae`): Herramientas adicionales para manipulación de PPTX (limpieza, miniaturas, validación).
+*   `Raíz`: Contiene los scripts principales de Python (`organizer.py`, `generate_template_presentation.py`) y la plantilla base.

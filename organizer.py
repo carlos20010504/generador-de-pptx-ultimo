@@ -40,11 +40,31 @@ OPENROUTER_MODEL_PRIORITY = (
     'nousresearch/hermes-3-llama-3.1-405b:free',
 )
 AI_QUOTA_COOLDOWN_SECONDS = 5 * 60
+AI_REQUEST_TIMEOUT_SECONDS = 90
+AI_MAX_RETRIES = 3
+OPENROUTER_APP_NAME = os.environ.get("OPENROUTER_APP_NAME", "Socya PPTX Generator")
+OPENROUTER_SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "http://localhost")
+AI_WAIT_ON_RATE_LIMIT = os.environ.get("SOCYA_AI_WAIT_ON_RATE_LIMIT", "1").strip().lower() not in {"0", "false", "no"}
+AI_MAX_WAIT_SECONDS = max(0, int(os.environ.get("SOCYA_AI_MAX_WAIT_SECONDS", "360") or 0))
+AI_WAIT_POLL_SECONDS = max(5, int(os.environ.get("SOCYA_AI_WAIT_POLL_SECONDS", "15") or 15))
+AI_EXECUTION_MODE = (os.environ.get("SOCYA_AI_EXECUTION_MODE", "best_effort") or "best_effort").strip().lower()
+AI_HARD_DEADLINE_SECONDS = max(15, int(os.environ.get("SOCYA_AI_HARD_DEADLINE_SECONDS", "35") or 35))
 
 PLACEHOLDER_VALS = {'???', '—', 'n/a', 'na', 'nan', 'none', '', '0', '-',
                     'null', 'sin datos', 'sin información', 'sin dato',
                     'no aplica', 'no disponible', 'nd', 's/d'}
 STRICT_VISUAL_CURATION_MODE = True
+LOCAL_PROMPT_STOPWORDS = {
+    'para', 'sobre', 'desde', 'entre', 'hasta', 'hacia', 'como', 'este', 'esta', 'estos', 'estas',
+    'solo', 'toda', 'todo', 'todos', 'todas', 'datos', 'excel', 'archivo', 'powerpoint', 'ppt',
+    'presentacion', 'presentaciones', 'diapositiva', 'diapositivas', 'grafico', 'grafica', 'graficas',
+    'tabla', 'tablas', 'prompt', 'usuario', 'analisis', 'enfoque', 'enfasis', 'prioriza', 'priorizar',
+    'genera', 'generar', 'muestra', 'mostrar', 'real', 'reales', 'ejecutivo', 'ejecutiva', 'ejecutivas',
+    'detallado', 'detallada', 'profesional', 'coherente', 'visual', 'atractivo', 'atractiva', 'preciso',
+    'precisa', 'significativo', 'significativa', 'inteligente', 'estructurado', 'estructurada',
+    'enfocada', 'enfocado', 'centrada', 'centrado', 'basado', 'basada', 'basados', 'basadas',
+    'prioritario', 'prioritaria', 'prioritarios', 'prioritarias', 'decision', 'decisiones',
+}
 
 SHEET_FAMILY_LABELS = {
     'auditoria': 'auditoria',
@@ -125,6 +145,39 @@ TEXT_ARTIFACT_REPLACEMENTS = {
     '┐': '¿',
     '┬┐': '¿',
     'À': '-',
+}
+
+DEFAULT_PRESENTATION_THEME = {
+    'name': 'Analitica Moderna',
+    'primary_hex': '#0F172A',
+    'accent_hex': '#2563EB',
+    'text_hex': '#E5E7EB',
+    'bg_hex': '#F8FAFC',
+}
+
+THEME_PRESETS = {
+    'analitica-moderna': DEFAULT_PRESENTATION_THEME,
+    'comite-ejecutivo': {
+        'name': 'Comite Ejecutivo',
+        'primary_hex': '#0B1F3A',
+        'accent_hex': '#C0841A',
+        'text_hex': '#E2E8F0',
+        'bg_hex': '#F8FAFC',
+    },
+    'impacto-nocturno': {
+        'name': 'Impacto Nocturno',
+        'primary_hex': '#111827',
+        'accent_hex': '#7C3AED',
+        'text_hex': '#F3F4F6',
+        'bg_hex': '#030712',
+    },
+    'socya-verde': {
+        'name': 'Socya Verde',
+        'primary_hex': '#14532D',
+        'accent_hex': '#16A34A',
+        'text_hex': '#E8F5EC',
+        'bg_hex': '#F7FCF8',
+    },
 }
 
 MOJIBAKE_HINT_CHARS = 'ÃÂ├┤┐╔╗═¾ÝËÐ�'
@@ -515,6 +568,202 @@ def build_default_ai_curation_status():
         'selected_chart_ids': [],
         'selected_table_ids': [],
         'reason': reason,
+        'execution_mode': AI_EXECUTION_MODE,
+        'provider_used': False,
+        'local_fallback_used': False,
+    }
+
+
+def normalize_theme_context(theme_payload):
+    if not isinstance(theme_payload, dict):
+        return dict(DEFAULT_PRESENTATION_THEME)
+
+    theme_key = sanitize_executive_text(theme_payload.get('key'), max_len=40).lower()
+    preset = dict(THEME_PRESETS.get(theme_key) or DEFAULT_PRESENTATION_THEME)
+    normalized = {
+        'name': sanitize_executive_text(theme_payload.get('name') or preset.get('name'), max_len=60) or preset['name'],
+        'primary_hex': sanitize_executive_text(theme_payload.get('primary_hex') or preset.get('primary_hex'), max_len=9) or preset['primary_hex'],
+        'accent_hex': sanitize_executive_text(theme_payload.get('accent_hex') or preset.get('accent_hex'), max_len=9) or preset['accent_hex'],
+        'text_hex': sanitize_executive_text(theme_payload.get('text_hex') or preset.get('text_hex'), max_len=9) or preset['text_hex'],
+        'bg_hex': sanitize_executive_text(theme_payload.get('bg_hex') or preset.get('bg_hex'), max_len=9) or preset['bg_hex'],
+    }
+    return normalized
+
+
+def parse_user_request_context(user_instructions):
+    if isinstance(user_instructions, dict):
+        payload = dict(user_instructions)
+    else:
+        raw = str(user_instructions or '').strip()
+        payload = {}
+        if raw.startswith('{') and raw.endswith('}'):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except Exception:
+                payload = {}
+        if not payload:
+            payload = {'prompt': raw}
+
+    prompt = sanitize_executive_text(payload.get('prompt') or payload.get('userPrompt') or user_instructions, max_len=1200)
+    audience = sanitize_executive_text(payload.get('audience'), max_len=40).lower() or 'ejecutivos'
+    language = sanitize_executive_text(payload.get('language'), max_len=24) or 'Español'
+    current_date = sanitize_executive_text(payload.get('current_date'), max_len=24) or datetime.now().strftime('%d/%m/%Y')
+    theme = normalize_theme_context(payload.get('theme'))
+
+    return {
+        'prompt': prompt,
+        'audience': audience,
+        'language': language,
+        'current_date': current_date,
+        'theme': theme,
+        'raw_payload': payload,
+    }
+
+
+def build_pandas_summary_for_ai(analisis_data):
+    generico = analisis_data.get('resumen_generico') or {}
+    metadatos = analisis_data.get('metadatos') or {}
+    avanzado = analisis_data.get('analisis_avanzado') or {}
+    muestra = analisis_data.get('muestra_tabla') or {}
+    conclusions = unique_non_empty_texts(
+        [sanitize_executive_text(item, max_len=160) for item in (analisis_data.get('conclusiones') or [])],
+        limit=6,
+    )
+    charts = analisis_data.get('graficas_automaticas') or []
+    kpis = analisis_data.get('kpis_automaticos') or []
+
+    summary_lines = [
+        f"Archivo: {sanitize_executive_text(metadatos.get('archivo'), max_len=80)}",
+        f"Hoja principal: {sanitize_executive_text(generico.get('hoja_principal') or metadatos.get('hoja_principal'), max_len=80)}",
+        f"Filas totales: {generico.get('total_filas') or 0}",
+        f"Columnas totales: {generico.get('total_columnas') or 0}",
+        "Columnas detectadas: " + ", ".join(
+            sanitize_executive_text(item, max_len=30) for item in (generico.get('columnas') or [])[:10]
+        ),
+        "Columnas numericas: " + ", ".join(
+            sanitize_executive_text(item, max_len=30) for item in (generico.get('columnas_numericas') or [])[:8]
+        ),
+        "KPIs detectados: " + ", ".join(
+            sanitize_executive_text((item or {}).get('label') or (item or {}).get('valor'), max_len=60)
+            for item in kpis[:5] if isinstance(item, dict)
+        ),
+        "Graficas candidatas: " + ", ".join(
+            sanitize_executive_text((item or {}).get('titulo'), max_len=60)
+            for item in charts[:5] if isinstance(item, dict)
+        ),
+        "Conclusiones base: " + " | ".join(conclusions),
+    ]
+
+    pareto = avanzado.get('pareto') or []
+    for item in pareto[:3]:
+        if isinstance(item, dict):
+            top_item = (item.get('top_valores') or [{}])[0] if item.get('top_valores') else {}
+            summary_lines.append(
+                f"Pareto {sanitize_executive_text(item.get('columna'), max_len=40)}: "
+                f"{sanitize_executive_text(top_item.get('valor'), max_len=40)} "
+                f"({round(top_item.get('pct', 0), 1) if isinstance(top_item.get('pct'), (int, float)) else 'n/a'}%)"
+            )
+
+    trend = avanzado.get('tendencia') or {}
+    if isinstance(trend, dict) and trend:
+        summary_lines.append(
+            "Tendencia temporal: "
+            f"{sanitize_executive_text(trend.get('col_temporal'), max_len=40)} vs "
+            f"{sanitize_executive_text(trend.get('col_valor'), max_len=40)} = "
+            f"{sanitize_executive_text(trend.get('tendencia'), max_len=30)}"
+        )
+
+    headers = [sanitize_executive_text(item, max_len=30) for item in (muestra.get('encabezados') or [])[:6]]
+    rows = []
+    for row in (muestra.get('filas') or [])[:5]:
+        if isinstance(row, (list, tuple)):
+            rows.append([sanitize_executive_text(cell, max_len=30) for cell in row[:6]])
+    if headers:
+        summary_lines.append("Tabla principal encabezados: " + ", ".join(headers))
+    if rows:
+        summary_lines.append("Muestra filas: " + json.dumps(rows, ensure_ascii=False))
+
+    return "\n".join(line for line in summary_lines if line and not line.endswith(": "))
+
+
+def normalize_presentation_design_ai_payload(ai_payload):
+    if not isinstance(ai_payload, dict):
+        return None
+
+    meta = ai_payload.get('presentation_meta') if isinstance(ai_payload.get('presentation_meta'), dict) else {}
+    slides_raw = ai_payload.get('slides') if isinstance(ai_payload.get('slides'), list) else []
+    global_design = ai_payload.get('global_design') if isinstance(ai_payload.get('global_design'), dict) else {}
+    validation = ai_payload.get('validation') if isinstance(ai_payload.get('validation'), dict) else {}
+
+    normalized_slides = []
+    valid_types = {
+        'title_slide', 'executive_summary', 'text_bullets', 'chart_full', 'chart_with_insight',
+        'data_table', 'two_columns', 'section_divider', 'quote_highlight', 'closing_slide',
+    }
+    for index, slide in enumerate(slides_raw[:12], start=1):
+        if not isinstance(slide, dict):
+            continue
+        slide_type = sanitize_executive_text(slide.get('type'), max_len=40)
+        if slide_type not in valid_types:
+            continue
+        normalized_slide = {
+            'slide_number': index,
+            'type': slide_type,
+            'title': sanitize_executive_text(slide.get('title'), max_len=120),
+            'design_notes': sanitize_executive_text(slide.get('design_notes'), max_len=220),
+        }
+        if slide_type == 'title_slide':
+            layout = slide.get('layout') if isinstance(slide.get('layout'), dict) else {}
+            normalized_slide['title_text'] = sanitize_executive_text(((layout.get('title') or {}).get('text') if isinstance(layout.get('title'), dict) else slide.get('title')), max_len=120)
+            normalized_slide['subtitle_text'] = sanitize_executive_text(((layout.get('subtitle') or {}).get('text') if isinstance(layout.get('subtitle'), dict) else meta.get('subtitle')), max_len=140)
+        if slide_type in {'chart_full', 'chart_with_insight'}:
+            chart = slide.get('chart') if isinstance(slide.get('chart'), dict) else {}
+            insight_box = slide.get('insight_box') if isinstance(slide.get('insight_box'), dict) else {}
+            normalized_slide['chart_type'] = sanitize_executive_text(chart.get('chart_type'), max_len=30)
+            normalized_slide['insight_headline'] = sanitize_executive_text(insight_box.get('headline'), max_len=60)
+            normalized_slide['insight_body'] = sanitize_executive_text(insight_box.get('body'), max_len=220)
+        if slide_type == 'data_table':
+            normalized_slide['footnote'] = sanitize_executive_text(slide.get('footnote'), max_len=140)
+        if slide_type == 'executive_summary':
+            normalized_slide['insight_text'] = sanitize_executive_text(slide.get('insight_text'), max_len=220)
+        if slide_type == 'closing_slide':
+            normalized_slide['cta_text'] = sanitize_executive_text(slide.get('cta_text'), max_len=160)
+            normalized_slide['summary_bullets'] = unique_non_empty_texts(
+                [sanitize_executive_text(item, max_len=140) for item in (slide.get('summary_bullets') or [])],
+                limit=5,
+            )
+        normalized_slides.append(normalized_slide)
+
+    if not normalized_slides:
+        return None
+
+    return {
+        'presentation_meta': {
+            'title': sanitize_executive_text(meta.get('title'), max_len=120),
+            'subtitle': sanitize_executive_text(meta.get('subtitle'), max_len=160),
+            'author': sanitize_executive_text(meta.get('author'), max_len=80),
+            'date': sanitize_executive_text(meta.get('date'), max_len=24),
+            'total_slides': min(12, max(1, int(meta.get('total_slides') or len(normalized_slides)))),
+            'narrative_summary': sanitize_executive_text(meta.get('narrative_summary'), max_len=240),
+        },
+        'slides': normalized_slides,
+        'global_design': {
+            'font_primary': sanitize_executive_text(global_design.get('font_primary'), max_len=40),
+            'font_secondary': sanitize_executive_text(global_design.get('font_secondary'), max_len=40),
+            'footer_text': sanitize_executive_text(global_design.get('footer_text'), max_len=100),
+        },
+        'validation': {
+            key: bool(validation.get(key))
+            for key in (
+                'total_slides_matches_array',
+                'all_slides_have_required_fields',
+                'no_slide_exceeds_5_bullets',
+                'no_chart_exceeds_8_series',
+                'json_is_valid',
+            )
+        },
     }
 
 
@@ -998,6 +1247,7 @@ def is_openrouter_rate_limit_message(message):
         or 'high demand for' in normalized
         or 'limit_rpm' in normalized
         or '429' in normalized
+        or 'temporarily rate-limited upstream' in normalized
         or 'provider returned error' in normalized
     )
 
@@ -1029,6 +1279,74 @@ def clear_ai_quota_block():
     state = load_ai_runtime_state()
     if state:
         save_ai_runtime_state({})
+
+
+def is_transient_openrouter_message(message):
+    text = str(message or '')
+    if not text:
+        return False
+    normalized = text.lower()
+    transient_tokens = (
+        'provider returned error',
+        'upstream error',
+        'temporary',
+        'timed out',
+        'timeout',
+        'connection reset',
+        'service unavailable',
+        'overloaded',
+        'internal server error',
+        'bad gateway',
+        'gateway timeout',
+    )
+    return any(token in normalized for token in transient_tokens)
+
+
+def extract_openrouter_error_message(payload):
+    if isinstance(payload, dict):
+        error = payload.get('error')
+        if isinstance(error, dict):
+            pieces = [
+                str(error.get('message') or '').strip(),
+                str(error.get('code') or '').strip(),
+                str(((error.get('metadata') or {}).get('raw')) or '').strip() if isinstance(error.get('metadata'), dict) else '',
+            ]
+            return ' | '.join(part for part in pieces if part)
+        return str(error or '').strip()
+    return str(payload or '').strip()
+
+
+def normalize_ai_json_response_text(text):
+    raw = str(text or '').strip()
+    if not raw:
+        return None
+    json_match = re.search(r'(\{.*\}|\[.*\])', raw.replace('\n', ' '), re.DOTALL)
+    if json_match:
+        return json_match.group(1)
+    return raw.replace("```json", "").replace("```", "").strip()
+
+
+def maybe_wait_for_ai_cooldown(wait_budget_seconds):
+    if not AI_WAIT_ON_RATE_LIMIT:
+        return 0, wait_budget_seconds
+    remaining_budget = max(0, int(wait_budget_seconds or 0))
+    waited = 0
+    while remaining_budget > 0:
+        cooldown_remaining = get_ai_cooldown_remaining()
+        if cooldown_remaining <= 0:
+            clear_ai_quota_block()
+            break
+        sleep_seconds = min(cooldown_remaining, AI_WAIT_POLL_SECONDS, remaining_budget)
+        if sleep_seconds <= 0:
+            break
+        print(
+            f"INFO: Esperando disponibilidad de Hermes/OpenRouter ({cooldown_remaining}s restantes, pausa {sleep_seconds}s)",
+            file=sys.stderr,
+        )
+        time.sleep(sleep_seconds)
+        waited += sleep_seconds
+        remaining_budget -= sleep_seconds
+    return waited, remaining_budget
 
 
 def build_textual_block_cache_key(block):
@@ -1226,6 +1544,266 @@ def build_visual_candidates_for_ai(analisis_data):
     }
 
 
+def extract_prompt_focus_terms(prompt, limit=8):
+    normalized = normalize_semantic_text(prompt)
+    if not normalized:
+        return []
+
+    terms = []
+    seen = set()
+    for token in re.findall(r'[a-z0-9]{4,}', normalized):
+        if token in LOCAL_PROMPT_STOPWORDS or token.isdigit():
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        terms.append(token)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def describe_focus_label(request_context, analisis_data):
+    focus_terms = extract_prompt_focus_terms((request_context or {}).get('prompt'))
+    if focus_terms:
+        return focus_terms[0]
+
+    generico = analisis_data.get('resumen_generico') or {}
+    metadatos = analisis_data.get('metadatos') or {}
+    fallback = generico.get('hoja_principal') or metadatos.get('hoja_principal') or metadatos.get('archivo')
+    return sanitize_executive_text(fallback, max_len=48) or 'los datos priorizados'
+
+
+def score_visual_candidate_for_prompt(candidate, focus_terms):
+    haystack = normalize_semantic_text(" ".join([
+        str(candidate.get('titulo') or ''),
+        " ".join(str(item or '') for item in (candidate.get('labels_top') or [])),
+        " ".join(str(item or '') for item in (candidate.get('encabezados') or [])),
+        str(candidate.get('insight_base') or ''),
+    ]))
+    score = 1
+    for term in focus_terms:
+        if term in haystack:
+            score += 4
+    if candidate.get('insight_base'):
+        score += 2
+    if candidate.get('modo_sugerido') == 'summary':
+        score += 1
+    return score
+
+
+def build_local_storyline(analisis_data, visual_plan=None):
+    chart_messages = [
+        sanitize_executive_text(item.get('mensaje_clave'), max_len=150)
+        for item in ((visual_plan or {}).get('charts') or [])
+        if isinstance(item, dict)
+    ]
+    table_messages = [
+        sanitize_executive_text(item.get('mensaje_clave'), max_len=150)
+        for item in ((visual_plan or {}).get('tables') or [])
+        if isinstance(item, dict) and item.get('modo') != 'omit'
+    ]
+    conclusions = [
+        sanitize_executive_text(item, max_len=160)
+        for item in (analisis_data.get('conclusiones') or [])[:4]
+    ]
+    insights = [
+        sanitize_executive_text(item.get('texto') if isinstance(item, dict) else item, max_len=160)
+        for item in ((analisis_data.get('analisis_avanzado') or {}).get('insights') or [])[:3]
+    ]
+    return unique_non_empty_texts(chart_messages + table_messages + conclusions + insights, limit=3)
+
+
+def build_local_visual_plan(analisis_data):
+    request_context = analisis_data.get('presentation_request') or {}
+    focus_terms = extract_prompt_focus_terms(request_context.get('prompt'))
+    focus_label = describe_focus_label(request_context, analisis_data)
+    prompt_normalized = normalize_semantic_text(request_context.get('prompt'))
+    candidates = build_visual_candidates_for_ai(analisis_data)
+
+    charts_ranked = sorted(
+        (candidates.get('charts') or []),
+        key=lambda item: score_visual_candidate_for_prompt(item, focus_terms),
+        reverse=True,
+    )
+    tables_ranked = sorted(
+        (candidates.get('tables') or []),
+        key=lambda item: score_visual_candidate_for_prompt(item, focus_terms),
+        reverse=True,
+    )
+
+    chart_limit = 2 if charts_ranked else 0
+    table_limit = 2 if tables_ranked else 0
+    if any(token in prompt_normalized for token in ('grafica', 'graficas', 'tendencia', 'comparativa', 'comparativo')):
+        chart_limit = min(3, len(charts_ranked))
+    if any(token in prompt_normalized for token in ('tabla', 'tablas', 'detalle', 'hallazgo', 'hallazgos', 'riesgo', 'riesgos')):
+        table_limit = min(3, len(tables_ranked))
+
+    charts = []
+    for candidate in charts_ranked[:chart_limit]:
+        title = sanitize_executive_text(candidate.get('titulo'), max_len=70) or 'Visual clave'
+        charts.append({
+            'id': candidate.get('id'),
+            'mensaje_clave': sanitize_executive_text(
+                candidate.get('insight_base') or f"{title} concentra la lectura ejecutiva sobre {focus_label}.",
+                max_len=160,
+            ),
+            'por_que_importa': sanitize_executive_text(
+                f"Se prioriza porque conecta el Excel con el foco solicitado sobre {focus_label}.",
+                max_len=160,
+            ),
+        })
+
+    tables = []
+    for candidate in tables_ranked[:table_limit]:
+        detail_requested = any(token in prompt_normalized for token in ('tabla', 'tablas', 'detalle', 'hallazgo', 'hallazgos', 'riesgo', 'riesgos'))
+        mode = 'detail' if detail_requested or (candidate.get('total_filas') or 0) > 12 else 'summary'
+        headers = ", ".join((candidate.get('encabezados') or [])[:3])
+        tables.append({
+            'id': candidate.get('id'),
+            'modo': mode,
+            'mensaje_clave': sanitize_executive_text(
+                f"La tabla resume evidencia puntual de {focus_label}" + (f" con columnas {headers}." if headers else "."),
+                max_len=160,
+            ),
+            'por_que_importa': sanitize_executive_text(
+                "Sirve como soporte verificable para la narrativa priorizada del archivo.",
+                max_len=160,
+            ),
+        })
+
+    storyline = build_local_storyline(analisis_data, {'charts': charts, 'tables': tables})
+    return normalize_visual_plan_ai_payload({
+        'charts': charts,
+        'tables': tables,
+        'storyline': storyline,
+    })
+
+
+def build_local_recommendation_text(request_context, focus_label):
+    prompt_normalized = normalize_semantic_text((request_context or {}).get('prompt'))
+    if any(token in prompt_normalized for token in ('riesgo', 'riesgos', 'hallazgo', 'hallazgos', 'control')):
+        return sanitize_executive_text(
+            f"Priorizar acciones de control y seguimiento sobre {focus_label} con evidencia trazable del Excel.",
+            max_len=160,
+        )
+    if any(token in prompt_normalized for token in ('costo', 'costos', 'gasto', 'gastos', 'presupuesto', 'monto', 'montos')):
+        return sanitize_executive_text(
+            f"Concentrar la decision en los montos y concentraciones que explican la mayor parte del comportamiento de {focus_label}.",
+            max_len=160,
+        )
+    return sanitize_executive_text(
+        f"Usar la evidencia priorizada para decidir los siguientes pasos sobre {focus_label}.",
+        max_len=160,
+    )
+
+
+def chart_index_from_visual_id(visual_id):
+    match = re.search(r'chart:auto:(\d+)', str(visual_id or ''))
+    return int(match.group(1)) if match else None
+
+
+def build_local_executive_summary(analisis_data, visual_plan):
+    request_context = analisis_data.get('presentation_request') or {}
+    focus_label = describe_focus_label(request_context, analisis_data)
+    storyline = build_local_storyline(analisis_data, visual_plan)
+    conclusions = [
+        sanitize_executive_text(item, max_len=160)
+        for item in (analisis_data.get('conclusiones') or [])[:4]
+    ]
+    table_message = next((
+        sanitize_executive_text(item.get('mensaje_clave'), max_len=160)
+        for item in ((visual_plan or {}).get('tables') or [])
+        if isinstance(item, dict) and item.get('modo') != 'omit'
+    ), '')
+
+    insights_graficas = []
+    for item in ((visual_plan or {}).get('charts') or [])[:3]:
+        idx = chart_index_from_visual_id(item.get('id'))
+        if idx is None:
+            continue
+        insight = sanitize_executive_text(item.get('mensaje_clave'), max_len=160)
+        if insight:
+            insights_graficas.append({'id': idx, 'insight': insight})
+
+    return {
+        'vision_general': storyline[0] if storyline else (
+            conclusions[0] if conclusions else sanitize_executive_text(
+                f"Lectura ejecutiva construida desde datos reales del Excel sobre {focus_label}.",
+                max_len=160,
+            )
+        ),
+        'alerta_principal': storyline[1] if len(storyline) > 1 else (
+            conclusions[1] if len(conclusions) > 1 else sanitize_executive_text(
+                f"El archivo requiere priorizacion para evitar una lectura dispersa de {focus_label}.",
+                max_len=160,
+            )
+        ),
+        'recomendacion': build_local_recommendation_text(request_context, focus_label),
+        'insight_tabla': table_message or sanitize_executive_text(
+            f"La tabla principal sirve como base verificable para profundizar en {focus_label}.",
+            max_len=160,
+        ),
+        'insights_graficas': insights_graficas,
+    }
+
+
+def build_local_briefing_payload(analisis_data, visual_plan):
+    request_context = analisis_data.get('presentation_request') or {}
+    generico = analisis_data.get('resumen_generico') or {}
+    metadatos = analisis_data.get('metadatos') or {}
+    focus_label = describe_focus_label(request_context, analisis_data)
+    columns = [
+        sanitize_executive_text(item, max_len=36)
+        for item in (generico.get('columnas') or [])[:4]
+    ]
+    storyline = build_local_storyline(analisis_data, visual_plan)
+    payload = {
+        'de_que_trata': sanitize_executive_text(
+            f"Lectura ejecutiva de {metadatos.get('archivo') or 'Excel'} con foco en {focus_label}.",
+            max_len=160,
+        ),
+        'datos_tecnicos': unique_non_empty_texts([
+            sanitize_executive_text(f"Hoja principal: {generico.get('hoja_principal') or metadatos.get('hoja_principal')}", max_len=120),
+            sanitize_executive_text(f"Volumen analizado: {generico.get('total_filas') or 0} filas y {generico.get('total_columnas') or 0} columnas.", max_len=120),
+            sanitize_executive_text(f"Columnas priorizadas: {', '.join(columns)}", max_len=120) if columns else '',
+        ], limit=3),
+        'planeamiento': unique_non_empty_texts([
+            sanitize_executive_text(f"Abrir con el foco ejecutivo en {focus_label}.", max_len=120),
+            sanitize_executive_text("Presentar solo evidencia con trazabilidad a hojas y columnas reales.", max_len=120),
+            sanitize_executive_text("Cerrar con una decision o accion concreta sustentada en los hallazgos.", max_len=120),
+        ], limit=3),
+        'puntos_a_tratar': unique_non_empty_texts(storyline or [
+            sanitize_executive_text(f"Priorizar la lectura mas util sobre {focus_label}.", max_len=120),
+        ], limit=3),
+        'breve_resumen': unique_non_empty_texts((analisis_data.get('conclusiones') or [])[:3], limit=3),
+        'objetivos': unique_non_empty_texts([
+            sanitize_executive_text(f"Responder el foco solicitado sobre {focus_label}.", max_len=120),
+            sanitize_executive_text(f"Traducir el Excel en una narrativa clara para {request_context.get('audience') or 'ejecutivos'}.", max_len=120),
+        ], limit=3),
+        'elementos_prioritarios': unique_non_empty_texts([
+            sanitize_executive_text(item.get('mensaje_clave'), max_len=120)
+            for item in ((visual_plan or {}).get('charts') or [])[:2]
+        ] + [
+            sanitize_executive_text(item.get('mensaje_clave'), max_len=120)
+            for item in ((visual_plan or {}).get('tables') or [])[:2]
+            if isinstance(item, dict) and item.get('modo') != 'omit'
+        ], limit=4),
+    }
+    return normalize_executive_briefing_ai_payload(payload)
+
+
+def build_local_ai_curation_bundle(analisis_data):
+    visual_plan = build_local_visual_plan(analisis_data)
+    if not visual_plan:
+        return None
+    return {
+        'resumen_ejecutivo_ia': build_local_executive_summary(analisis_data, visual_plan),
+        'briefing_ejecutivo_ia': build_local_briefing_payload(analisis_data, visual_plan),
+        'visual_plan_ia': visual_plan,
+    }
+
+
 def enrich_textual_blocks_with_ai(blocks):
     if not blocks:
         return []
@@ -1341,88 +1919,108 @@ def enrich_textual_blocks_with_ai(blocks):
 
 def call_ai_api(prompt, response_mime_type="application/json"):
     api_key = get_openrouter_api_key()
-    if not api_key: return None
-    if is_ai_temporarily_blocked():
+    if not api_key:
         return None
-    
-    try:
-        # Prompt user format implementation
-        # Enforcing JSON formatting manually within the system prompt if mime_type is json
-        system_msg = "You must output strictly valid JSON." if response_mime_type == "application/json" else "You are a helpful assistant."
-        
-        from openrouter import OpenRouter
-        with OpenRouter(
-          api_key=api_key,
-        ) as client:
-          response = client.chat.send(
-            model=OPENROUTER_MODEL_PRIORITY[0],
-            messages=[
-              {
-                "role": "system",
-                "content": system_msg
-              },
-              {
-                "role": "user",
-                "content": prompt
-              }
-            ]
-          )
-          
-          if hasattr(response, 'choices') and len(response.choices) > 0:
-              message = response.choices[0].message
-              clear_ai_quota_block()
-              if hasattr(message, 'content'):
-                  return message.content
-              elif isinstance(message, dict):
-                  return message.get('content')
-          return None
-    except ImportError:
-        print("INFO: OpenRouter no está instalado. Instalalo usando 'pip install openrouter'", file=sys.stderr)
-        # Fallback to requests if openrouter sdk is not available
-        import requests
+    best_effort_mode = AI_EXECUTION_MODE != "blocking"
+    wait_budget_seconds = 0 if best_effort_mode else AI_MAX_WAIT_SECONDS
+    request_timeout_seconds = max(10, min(AI_REQUEST_TIMEOUT_SECONDS, AI_HARD_DEADLINE_SECONDS)) if best_effort_mode else AI_REQUEST_TIMEOUT_SECONDS
+    max_retries = 1 if best_effort_mode else AI_MAX_RETRIES
+    if is_ai_temporarily_blocked():
+        if best_effort_mode:
+            return None
+        waited, wait_budget_seconds = maybe_wait_for_ai_cooldown(wait_budget_seconds)
+        if waited <= 0 and is_ai_temporarily_blocked():
+            return None
+
+    import requests
+    system_msg = "You must output strictly valid JSON." if response_mime_type == "application/json" else "You are a helpful assistant."
+    payload = {
+        "model": OPENROUTER_MODEL_PRIORITY[0],
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2 if response_mime_type == "application/json" else 0.4,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": OPENROUTER_SITE_URL,
+        "X-Title": OPENROUTER_APP_NAME,
+    }
+
+    last_error = None
+    for attempt in range(1, max_retries + 1):
         try:
             resp = requests.post(
                 url="https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                },
-                json={
-                    "model": OPENROUTER_MODEL_PRIORITY[0],
-                    "messages": [
-                        {"role": "system", "content": "You must output strictly valid JSON." if response_mime_type == "application/json" else "You are a helpful assistant."},
-                        {"role": "user", "content": prompt}
-                    ]
-                }
+                headers=headers,
+                json=payload,
+                timeout=request_timeout_seconds,
             )
+            response_text = resp.text or ""
+
             if resp.status_code == 429:
-                mark_ai_quota_blocked(resp.text)
+                mark_ai_quota_blocked(response_text)
+                if best_effort_mode:
+                    return None
+                waited, wait_budget_seconds = maybe_wait_for_ai_cooldown(wait_budget_seconds)
+                if waited > 0 and attempt < max_retries:
+                    continue
                 return None
-            data = resp.json()
-            if 'choices' in data and len(data['choices']) > 0:
-                clear_ai_quota_block()
-                return data['choices'][0]['message']['content']
-            if isinstance(data, dict):
-                error_payload = data.get('error')
-                error_message = (
-                    error_payload.get('message')
-                    if isinstance(error_payload, dict)
-                    else str(error_payload or '')
+
+            if not resp.ok:
+                error_message = extract_openrouter_error_message(
+                    resp.json() if "application/json" in str(resp.headers.get("content-type", "")).lower() else response_text
                 )
                 if is_openrouter_rate_limit_message(error_message):
                     mark_ai_quota_blocked(error_message)
+                    if best_effort_mode:
+                        return None
+                    waited, wait_budget_seconds = maybe_wait_for_ai_cooldown(wait_budget_seconds)
+                    if waited > 0 and attempt < max_retries:
+                        continue
                     return None
-        except Exception as fallback_exc:
-            if is_openrouter_rate_limit_message(fallback_exc):
-                mark_ai_quota_blocked(fallback_exc)
+                if is_transient_openrouter_message(error_message) and attempt < max_retries:
+                    time.sleep(min(2 ** (attempt - 1), 6))
+                    continue
+                print(f"INFO: Error HTTP OpenRouter ({resp.status_code}): {error_message}", file=sys.stderr)
                 return None
-            print(f"INFO: Error en fallback de OpenRouter (requests): {fallback_exc}", file=sys.stderr)
-        return None
-    except Exception as exc:
-        if is_openrouter_rate_limit_message(exc):
-            mark_ai_quota_blocked(exc)
-            return None
-        print(f"INFO: Error cargando OpenRouter: {exc}", file=sys.stderr)
-        return None
+
+            data = resp.json()
+            if isinstance(data, dict) and 'choices' in data and len(data['choices']) > 0:
+                content = ((data['choices'][0] or {}).get('message') or {}).get('content')
+                normalized = normalize_ai_json_response_text(content) if response_mime_type == "application/json" else content
+                if normalized:
+                    clear_ai_quota_block()
+                    return normalized
+                last_error = "respuesta sin contenido util"
+            else:
+                error_message = extract_openrouter_error_message(data)
+                if is_openrouter_rate_limit_message(error_message):
+                    mark_ai_quota_blocked(error_message)
+                    return None
+                last_error = error_message or "respuesta OpenRouter sin choices"
+        except Exception as exc:
+            if is_openrouter_rate_limit_message(exc):
+                mark_ai_quota_blocked(exc)
+                if best_effort_mode:
+                    return None
+                waited, wait_budget_seconds = maybe_wait_for_ai_cooldown(wait_budget_seconds)
+                if waited > 0 and attempt < max_retries:
+                    continue
+                return None
+            last_error = str(exc)
+            if is_transient_openrouter_message(exc) and attempt < max_retries:
+                time.sleep(min(2 ** (attempt - 1), 6))
+                continue
+            if attempt < max_retries:
+                time.sleep(min(2 ** (attempt - 1), 6))
+                continue
+
+    if last_error:
+        print(f"INFO: Error cargando OpenRouter: {last_error}", file=sys.stderr)
+    return None
 
 
 def build_data_block_inventory(resultado):
@@ -2962,6 +3560,8 @@ def save_unified_ai_cache(cache_data):
 
 def build_unified_cache_key(analisis_data):
     """Hash del contenido analítico esencial — misma clave si el mismo Excel."""
+    request_context = analisis_data.get('presentation_request') or {}
+    theme = request_context.get('theme') or {}
     fingerprint = {
         'archivo': (analisis_data.get('metadatos') or {}).get('archivo'),
         'conclusiones': (analisis_data.get('conclusiones') or [])[:5],
@@ -2969,7 +3569,11 @@ def build_unified_cache_key(analisis_data):
                      for i in ((analisis_data.get('analisis_avanzado') or {}).get('insights') or [])[:3]],
         'graficas_titulos': [g.get('titulo') for g in (analisis_data.get('graficas_automaticas') or [])[:4]],
         'bloques_titulos': [b.get('title') for b in (analisis_data.get('bloques_textuales') or [])[:3]],
-        'prompt_version': 'unified-v3',
+        'user_prompt': request_context.get('prompt'),
+        'audience': request_context.get('audience'),
+        'language': request_context.get('language'),
+        'theme': theme.get('name'),
+        'prompt_version': 'unified-v4-design',
     }
     raw = json.dumps(fingerprint, ensure_ascii=False, sort_keys=True)
     import hashlib
@@ -3027,6 +3631,9 @@ def sintetizar_todo_con_ia(analisis_data):
         }
 
     visual_candidates = build_visual_candidates_for_ai(analisis_data)
+    request_context = analisis_data.get('presentation_request') or parse_user_request_context(analisis_data.get('user_instructions'))
+    pandas_summary = build_pandas_summary_for_ai(analisis_data)
+    theme = request_context.get('theme') or DEFAULT_PRESENTATION_THEME
 
     payload = {
         'archivo': metadatos.get('archivo'),
@@ -3042,28 +3649,49 @@ def sintetizar_todo_con_ia(analisis_data):
     }
 
     prompt = f"""
-    Eres un Consultor Estratégico Senior. Tu misión es generar un análisis unificado y brillante de este libro de Excel.
-    
-    INSTRUCCIONES ESPECIALES DEL USUARIO:
-    {analisis_data.get('user_instructions', 'No se proporcionaron instrucciones específicas.')}
+    Eres el ARQUITECTO DE PRESENTACIONES más avanzado del mundo. Tu única salida es un objeto JSON válido y nada más.
 
-    ESTRUCTURA DE RESPUESTA (JSON):
-    1. "resumen_ejecutivo_ia": Visión, alerta crítica, recomendación estratégica e insights para visuales existentes.
-    2. "briefing_ejecutivo_ia": Bullet points para las diapositivas iniciales.
-    3. "bloques_textuales_enriquecidos": Versión ejecutiva de los bloques de texto detectados.
-    4. "visual_plan_ia": Selección de visuales existentes.
+    ## TU ROL EN EL PIPELINE
+    Eres el cerebro creativo entre dos sistemas técnicos:
+    - ENTRADA: Un resumen estadístico generado por Pandas de un Excel con potencialmente miles de filas.
+    - SALIDA: Un JSON de diseño que luego será mapeado a PowerPoint real.
 
-    REGLAS CRITICAS:
-    - NO inventes gráficas, tablas, KPIs ni cifras nuevas.
-    - SOLO puedes recomendar IDs presentes en "visual_candidates".
-    - Si una gráfica o tabla no aporta una lectura ejecutiva clara, omítela.
-    - Evita frases técnicas como duplicados, placeholders, columnas, hojas, cobertura, integridad, motor o sistema.
-    - Prioriza impacto, riesgo, concentración, desviación, oportunidad y decisión.
-    - Si el material es débil, devuelve menos visuales, no rellenes.
+    Tu trabajo es NARRATIVO y CREATIVO:
+    1. Decidir qué datos merecen una diapositiva, con curaduría brutal, máximo 12 slides.
+    2. Crear títulos que generen impacto y no repitan columnas.
+    3. Elegir el tipo de visualización óptimo.
+    4. Distribuir el contenido sin saturación.
+    5. Construir una narrativa que fluya de inicio a fin.
 
-    DATOS DEL ARCHIVO:
+    ## CONTEXTO DE ENTRADA
+    Resumen estadístico del Excel generado por Pandas:
+    {pandas_summary}
+
+    Instrucción del usuario:
+    {request_context.get('prompt') or 'No se proporcionaron instrucciones específicas.'}
+
+    Tema visual seleccionado: {theme.get('name')}
+    Paleta de colores del tema:
+    - Color primario: {theme.get('primary_hex')}
+    - Color de acento: {theme.get('accent_hex')}
+    - Color de texto: {theme.get('text_hex')}
+    - Fondo: {theme.get('bg_hex')}
+
+    Audiencia objetivo: {request_context.get('audience')} 
+    Idioma de la presentación: {request_context.get('language')}
+    Fecha actual: {request_context.get('current_date')}
+
+    ## RESTRICCIONES DE DATOS
+    - NO inventes cifras ni datasets.
+    - SOLO puedes usar IDs existentes en visual_candidates para cualquier chart o table.
+    - Si un visual no aporta lectura ejecutiva clara, omítelo.
+    - Si el material es débil, devuelve menos slides y menos visuales.
+    - Evita lenguaje técnico de sistema.
+
+    ## DATOS ESTRUCTURADOS DEL ARCHIVO
     {json.dumps(payload, ensure_ascii=False)}
 
+    ## ESTRUCTURA DE RESPUESTA
     Responde ESTRICTAMENTE con un solo objeto JSON que contenga estas llaves:
     {{
       "resumen_ejecutivo_ia": {{
@@ -3093,9 +3721,43 @@ def sintetizar_todo_con_ia(analisis_data):
           {{"id": "table:main", "modo": "summary|detail|omit", "mensaje_clave": "texto", "por_que_importa": "texto"}}
         ],
         "storyline": ["texto", "texto", "texto"]
+      }},
+      "presentation_design_ia": {{
+        "presentation_meta": {{
+          "title": "texto",
+          "subtitle": "texto",
+          "author": "Generado con Excel → PowerPoint Pro",
+          "date": "{request_context.get('current_date')}",
+          "total_slides": 0,
+          "narrative_summary": "texto"
+        }},
+        "slides": [
+          {{
+            "slide_number": 1,
+            "type": "title_slide",
+            "layout": {{
+              "title": {{"text": "texto"}},
+              "subtitle": {{"text": "texto"}},
+              "date": {{"text": "{request_context.get('current_date')}"}}
+            }},
+            "design_notes": "texto"
+          }}
+        ],
+        "global_design": {{
+          "font_primary": "Calibri",
+          "font_secondary": "Calibri Light",
+          "footer_text": "Confidencial - {request_context.get('current_date')}"
+        }},
+        "validation": {{
+          "total_slides_matches_array": true,
+          "all_slides_have_required_fields": true,
+          "no_slide_exceeds_5_bullets": true,
+          "no_chart_exceeds_8_series": true,
+          "json_is_valid": true
+        }}
       }}
     }}
-    No uses markdown. Sé profesional, sobrio y accionable.
+    No uses markdown. JSON puro. Se brutal con la curaduría y enfócate en decisiones.
     """
 
     response_text = call_ai_api(prompt)
@@ -3123,6 +3785,9 @@ def sintetizar_todo_con_ia(analisis_data):
             visual_plan = normalize_visual_plan_ai_payload(parsed.get('visual_plan_ia'))
             if visual_plan:
                 result['visual_plan_ia'] = visual_plan
+            presentation_design = normalize_presentation_design_ai_payload(parsed.get('presentation_design_ia'))
+            if presentation_design:
+                result['presentation_design_ia'] = presentation_design
             
             if result:
                 cache[cache_key] = result
@@ -3251,7 +3916,9 @@ def preparar_datos_para_slides(excel_path, user_instructions=None):
         return {"error": str(e)}
 
     resultado = {}
-    resultado['user_instructions'] = user_instructions
+    request_context = parse_user_request_context(user_instructions)
+    resultado['user_instructions'] = request_context.get('prompt')
+    resultado['presentation_request'] = request_context
     resultado['ai_curation_status'] = build_default_ai_curation_status()
     resultado['metadatos'] = {
         'hojas_encontradas': list(sheets.keys()),
@@ -3516,6 +4183,7 @@ def preparar_datos_para_slides(excel_path, user_instructions=None):
 
     if ia_todo:
         ai_status['unified_call_succeeded'] = True
+        ai_status['provider_used'] = True
         # Resumen ejecutivo
         ia_resumen = ia_todo.get('resumen_ejecutivo_ia')
         if isinstance(ia_resumen, dict):
@@ -3609,22 +4277,144 @@ def preparar_datos_para_slides(excel_path, user_instructions=None):
             resultado['bloques_textuales'] = bloques_actuales
         if not ai_status.get('visual_plan_received'):
             ai_status['reason'] = 'unified_ai_without_visual_plan'
+            local_bundle = build_local_ai_curation_bundle(resultado)
+            if local_bundle and isinstance(local_bundle.get('visual_plan_ia'), dict):
+                visual_plan = local_bundle['visual_plan_ia']
+                resultado['visual_plan_ia'] = visual_plan
+                ai_status['visual_plan_received'] = True
+                ai_status['visual_curation_ready'] = True
+                ai_status['local_fallback_used'] = True
+                ai_status['selected_chart_ids'] = [
+                    item.get('id') for item in (visual_plan.get('charts') or [])
+                    if isinstance(item, dict) and item.get('id')
+                ]
+                ai_status['selected_table_ids'] = [
+                    item.get('id') for item in (visual_plan.get('tables') or [])
+                    if isinstance(item, dict) and item.get('id') and item.get('modo') != 'omit'
+                ]
+                ai_status['reason'] = 'local_visual_plan_generated'
+
+                chart_lookup = {
+                    chart.get('_visual_ai_id'): chart
+                    for chart in (resultado.get('graficas_automaticas') or [])
+                    if isinstance(chart, dict) and chart.get('_visual_ai_id')
+                }
+                for chart_item in visual_plan.get('charts') or []:
+                    if not isinstance(chart_item, dict):
+                        continue
+                    chart = chart_lookup.get(chart_item.get('id'))
+                    if not chart:
+                        continue
+                    if chart_item.get('mensaje_clave'):
+                        chart['insight_auto'] = sanitize_executive_text(chart_item.get('mensaje_clave'), max_len=180)
+                    chart['_visual_ai_selected'] = True
+                    chart['_visual_ai_rationale'] = sanitize_executive_text(chart_item.get('por_que_importa'), max_len=180)
+
+                table_candidates = []
+                if isinstance(resultado.get('muestra_tabla'), dict):
+                    table_candidates.append(resultado['muestra_tabla'])
+                table_candidates.extend(
+                    table for table in (resultado.get('otras_tablas') or {}).values()
+                    if isinstance(table, dict)
+                )
+                table_candidates.extend(
+                    table for table in (resultado.get('genericas') or {}).values()
+                    if isinstance(table, dict)
+                )
+                table_lookup = {
+                    table.get('_visual_ai_id'): table
+                    for table in table_candidates
+                    if table.get('_visual_ai_id')
+                }
+                for table_item in visual_plan.get('tables') or []:
+                    if not isinstance(table_item, dict):
+                        continue
+                    table = table_lookup.get(table_item.get('id'))
+                    if not table:
+                        continue
+                    table['_visual_ai_mode'] = table_item.get('modo')
+                    table['_visual_ai_selected'] = table_item.get('modo') != 'omit'
+                    table['_visual_ai_message'] = sanitize_executive_text(table_item.get('mensaje_clave'), max_len=180)
+                    table['_visual_ai_rationale'] = sanitize_executive_text(table_item.get('por_que_importa'), max_len=180)
     else:
-        # Fallback: llamadas individuales si la unificada falla
         ai_status['reason'] = 'unified_ai_unavailable'
-        ia_resumen = sintetizar_resumen_ia(resultado)
-        if isinstance(ia_resumen, dict):
-            resultado['resumen_ejecutivo_ia'] = ia_resumen
-            graficas = resultado.get('graficas_automaticas', [])
-            for item in ia_resumen.get('insights_graficas', []):
-                if not isinstance(item, dict): continue
-                idx = item.get('id')
-                if isinstance(idx, int) and 0 <= idx < len(graficas):
-                    graficas[idx]['insight_auto'] = item.get('insight', graficas[idx].get('insight_auto'))
-        briefing_ia = sintetizar_briefing_ejecutivo_ia(resultado)
-        if briefing_ia:
-            resultado['briefing_ejecutivo_ia'] = briefing_ia
-            ai_status['briefing_received'] = True
+        local_bundle = build_local_ai_curation_bundle(resultado)
+        if local_bundle:
+            ai_status['local_fallback_used'] = True
+
+            ia_resumen = local_bundle.get('resumen_ejecutivo_ia')
+            if isinstance(ia_resumen, dict):
+                resultado['resumen_ejecutivo_ia'] = ia_resumen
+                graficas = resultado.get('graficas_automaticas', [])
+                for item in ia_resumen.get('insights_graficas', []):
+                    if not isinstance(item, dict):
+                        continue
+                    idx = item.get('id')
+                    if isinstance(idx, int) and 0 <= idx < len(graficas):
+                        graficas[idx]['insight_auto'] = item.get('insight', graficas[idx].get('insight_auto'))
+
+            briefing_ia = local_bundle.get('briefing_ejecutivo_ia')
+            if isinstance(briefing_ia, dict):
+                resultado['briefing_ejecutivo_ia'] = briefing_ia
+                ai_status['briefing_received'] = True
+
+            visual_plan = local_bundle.get('visual_plan_ia')
+            if isinstance(visual_plan, dict):
+                resultado['visual_plan_ia'] = visual_plan
+                ai_status['visual_plan_received'] = True
+                ai_status['visual_curation_ready'] = True
+                ai_status['selected_chart_ids'] = [
+                    item.get('id') for item in (visual_plan.get('charts') or [])
+                    if isinstance(item, dict) and item.get('id')
+                ]
+                ai_status['selected_table_ids'] = [
+                    item.get('id') for item in (visual_plan.get('tables') or [])
+                    if isinstance(item, dict) and item.get('id') and item.get('modo') != 'omit'
+                ]
+                ai_status['reason'] = 'local_visual_plan_generated'
+
+                chart_lookup = {
+                    chart.get('_visual_ai_id'): chart
+                    for chart in (resultado.get('graficas_automaticas') or [])
+                    if isinstance(chart, dict) and chart.get('_visual_ai_id')
+                }
+                for chart_item in visual_plan.get('charts') or []:
+                    if not isinstance(chart_item, dict):
+                        continue
+                    chart = chart_lookup.get(chart_item.get('id'))
+                    if not chart:
+                        continue
+                    if chart_item.get('mensaje_clave'):
+                        chart['insight_auto'] = sanitize_executive_text(chart_item.get('mensaje_clave'), max_len=180)
+                    chart['_visual_ai_selected'] = True
+                    chart['_visual_ai_rationale'] = sanitize_executive_text(chart_item.get('por_que_importa'), max_len=180)
+
+                table_candidates = []
+                if isinstance(resultado.get('muestra_tabla'), dict):
+                    table_candidates.append(resultado['muestra_tabla'])
+                table_candidates.extend(
+                    table for table in (resultado.get('otras_tablas') or {}).values()
+                    if isinstance(table, dict)
+                )
+                table_candidates.extend(
+                    table for table in (resultado.get('genericas') or {}).values()
+                    if isinstance(table, dict)
+                )
+                table_lookup = {
+                    table.get('_visual_ai_id'): table
+                    for table in table_candidates
+                    if table.get('_visual_ai_id')
+                }
+                for table_item in visual_plan.get('tables') or []:
+                    if not isinstance(table_item, dict):
+                        continue
+                    table = table_lookup.get(table_item.get('id'))
+                    if not table:
+                        continue
+                    table['_visual_ai_mode'] = table_item.get('modo')
+                    table['_visual_ai_selected'] = table_item.get('modo') != 'omit'
+                    table['_visual_ai_message'] = sanitize_executive_text(table_item.get('mensaje_clave'), max_len=180)
+                    table['_visual_ai_rationale'] = sanitize_executive_text(table_item.get('por_que_importa'), max_len=180)
 
     resultado['ai_curation_status'] = ai_status
 

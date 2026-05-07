@@ -27,6 +27,19 @@ interface BackendHealth {
   message: string;
 }
 
+interface PresentationContext {
+  audience: string;
+  language: string;
+  theme: {
+    key: string;
+    name: string;
+    primary_hex: string;
+    accent_hex: string;
+    text_hex: string;
+    bg_hex: string;
+  };
+}
+
 interface PreviewSlide {
   type?: string;
   title?: string;
@@ -132,6 +145,7 @@ function validateSelectedFile(file: File): string | null {
 
 export default function ExcelUploader() {
   const [file, setFile] = useState<File | null>(null);
+  const [originalFileName, setOriginalFileName] = useState<string | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
   const [status, setStatus] = useState<Status>('idle');
   const [errorMessage, setErrorMessage] = useState('');
@@ -145,6 +159,18 @@ export default function ExcelUploader() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [justAutoAdvanced, setJustAutoAdvanced] = useState(false);
   const [userPrompt, setUserPrompt] = useState('');
+  const [presentationContext, setPresentationContext] = useState<PresentationContext>({
+    audience: 'ejecutivos',
+    language: 'Español',
+    theme: {
+      key: 'analitica-moderna',
+      name: 'Analitica Moderna',
+      primary_hex: '#0F172A',
+      accent_hex: '#2563EB',
+      text_hex: '#E5E7EB',
+      bg_hex: '#F8FAFC',
+    },
+  });
   const [viewportHeight, setViewportHeight] = useState(960);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -206,6 +232,7 @@ export default function ExcelUploader() {
       }
       
       setFile(f);
+      setOriginalFileName(f.name);
       setStatus('idle');
       setErrorMessage('');
       setStats(null);
@@ -245,7 +272,7 @@ export default function ExcelUploader() {
     setStats(null);
     const start = performance.now();
     try {
-      await generatePowerPointFromExcel(file, orgMode, userPrompt);
+      await generatePowerPointFromExcel(file, orgMode, userPrompt, presentationContext);
       const duration = ((performance.now() - start) / 1000);
       setStats({ duration, mode: orgMode, fileName: file.name });
       setStatus('success');
@@ -275,6 +302,9 @@ export default function ExcelUploader() {
       if (userPrompt.trim()) {
         formData.append('userPrompt', userPrompt.trim());
       }
+      formData.append('audience', presentationContext.audience);
+      formData.append('language', presentationContext.language);
+      formData.append('theme', JSON.stringify(presentationContext.theme));
 
       const response = await fetch('/api/advanced-generate', {
         method: 'POST',
@@ -314,6 +344,7 @@ export default function ExcelUploader() {
         { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
       );
       setFile(organizedFile);
+      setOriginalFileName(file.name);
       setActiveTab('generate');
       setJustAutoAdvanced(true);
       setStatus('organized');
@@ -670,6 +701,7 @@ export default function ExcelUploader() {
                   onClick={(e) => {
                     e.stopPropagation();
                     setFile(null);
+                    setOriginalFileName(null);
                     resetMessages();
                   }}
                   style={{
@@ -1137,8 +1169,11 @@ export default function ExcelUploader() {
       {/* Sidebar AIControlPanel */}
       <AIControlPanel
         file={file}
+        isOrganizedFile={Boolean(file?.name?.startsWith('ORGANIZADO_'))}
+        originalFileName={originalFileName}
         onPromptChange={setUserPrompt}
         onFocusChange={(f) => setOrgMode(f === 'text' ? 'mixed' : f)}
+        onContextChange={setPresentationContext}
       />
     </div>
   );

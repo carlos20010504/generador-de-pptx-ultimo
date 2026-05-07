@@ -19,7 +19,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN, MSO_AUTO_SIZE
 from pptx.util import Inches, Pt
 
-from organizer import preparar_datos_para_slides
+from organizer import preparar_datos_para_slides, parse_user_request_context, DEFAULT_PRESENTATION_THEME
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -123,6 +123,20 @@ DEFAULT_PROMPT_PREFERENCES = {
     "max_boardroom_blocks": 4,
     "max_total_content_blocks": MAX_CONTENT_BLOCKS,
     "priority_tokens": [],
+    "focus_terms": [],
+}
+
+PROMPT_STOPWORDS = {
+    "de", "la", "el", "los", "las", "un", "una", "unos", "unas", "para", "con", "sin", "por",
+    "del", "al", "y", "o", "u", "que", "se", "en", "sobre", "desde", "hacia", "como", "quiero",
+    "muestre", "mostrar", "presentacion", "presentación", "powerpoint", "ppt", "slide", "slides",
+    "datos", "dato", "excel", "archivo", "base", "solo", "real", "reales", "tipo", "tema",
+    "colores", "tono", "narrativa", "grafica", "grafico", "graficas", "graficos", "tabla", "tablas",
+    "kpi", "kpis", "muy", "mas", "más", "del", "las", "los", "una", "uno", "quiera", "necesito",
+    "enfocada", "enfocado", "centrada", "centrado", "decision", "decisiones", "solicitado", "solicitada",
+    "financieras", "financiera", "acciones", "control", "mayor", "mayores", "altos", "altas",
+    "genera", "generar", "basado", "basada", "basados", "basadas", "prioritario", "prioritaria",
+    "prioritarios", "prioritarias", "ejecutiva", "ejecutivo", "ejecutivos", "enfasis", "foco",
 }
 STRICT_VISUAL_CURATION_MODE = True
 
@@ -226,6 +240,32 @@ def clean_text(value, max_len=None):
     return text
 
 
+def get_request_context_from_value(user_instructions):
+    return parse_user_request_context(user_instructions)
+
+
+def get_request_context(data):
+    context = data.get("presentation_request")
+    if isinstance(context, dict):
+        return context
+    return parse_user_request_context(data.get("user_instructions"))
+
+
+def get_theme_context(data):
+    context = get_request_context(data)
+    theme = context.get("theme")
+    if isinstance(theme, dict):
+        return theme
+    return dict(DEFAULT_PRESENTATION_THEME)
+
+
+def get_presentation_design_plan(data):
+    plan = data.get("presentation_design_ia")
+    if not isinstance(plan, dict):
+        plan = data.get("prompt_fallback_design_plan")
+    return plan if isinstance(plan, dict) else {}
+
+
 def get_ai_curation_status(data):
     status = data.get("ai_curation_status")
     if isinstance(status, dict):
@@ -262,7 +302,8 @@ def count_request_near_keywords(normalized_prompt, keywords):
 
 
 def parse_prompt_preferences(user_instructions):
-    raw_prompt = clean_text(user_instructions)
+    request_context = get_request_context_from_value(user_instructions)
+    raw_prompt = clean_text(request_context.get("prompt"))
     if not raw_prompt:
         return dict(DEFAULT_PROMPT_PREFERENCES)
 
@@ -283,6 +324,7 @@ def parse_prompt_preferences(user_instructions):
     for token, aliases in topic_aliases.items():
         if any(alias in normalized for alias in aliases):
             priority_tokens.append(token)
+    focus_terms = extract_prompt_focus_terms(raw_prompt)
 
     explicit_structure = any(value > 0 for value in (chart_slides, table_slides, kpi_slides, conclusion_slides))
     max_total_content_blocks = MAX_CONTENT_BLOCKS
@@ -295,6 +337,7 @@ def parse_prompt_preferences(user_instructions):
     return {
         "raw": raw_prompt,
         "normalized": normalized,
+        "request_context": request_context,
         "chart_slides": chart_slides,
         "table_slides": table_slides,
         "kpi_slides": kpi_slides,
@@ -310,6 +353,7 @@ def parse_prompt_preferences(user_instructions):
         "max_boardroom_blocks": max_boardroom_blocks,
         "max_total_content_blocks": max_total_content_blocks,
         "priority_tokens": priority_tokens,
+        "focus_terms": focus_terms,
     }
 
 
@@ -318,6 +362,13 @@ def apply_prompt_palette(preferences):
     COLOR_BLUE = DEFAULT_COLOR_BLUE
     COLOR_ORANGE = DEFAULT_COLOR_ORANGE
     COLOR_GREEN = DEFAULT_COLOR_GREEN
+    theme = (preferences.get("request_context") or {}).get("theme") or {}
+    primary_hex = clean_text(theme.get("primary_hex"))
+    accent_hex = clean_text(theme.get("accent_hex"))
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", primary_hex or ""):
+        COLOR_BLUE = RGBColor.from_string(primary_hex[1:])
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", accent_hex or ""):
+        COLOR_ORANGE = RGBColor.from_string(accent_hex[1:])
     if preferences.get("prefer_dark_blue_green_palette"):
         COLOR_BLUE = RGBColor(15, 23, 42)
         COLOR_ORANGE = RGBColor(14, 165, 140)
@@ -339,6 +390,59 @@ def is_noise_text(value):
 
 def basename_label(excel_path):
     return clean_text(Path(excel_path).stem.replace("_", " ").replace("-", " "), 80)
+
+
+def extract_prompt_focus_terms(raw_prompt, limit=8):
+    prompt = clean_text(raw_prompt, 240)
+    if not prompt:
+        return []
+    normalized = normalize_header_key(prompt)
+    candidates = re.findall(r"[a-z0-9]{4,}", normalized)
+    terms = []
+    seen = set()
+    for token in candidates:
+        if token in PROMPT_STOPWORDS:
+            continue
+        if token.isdigit():
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        terms.append(token)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def build_prompt_focus_phrase(data, excel_path, max_len=72):
+    request_context = get_request_context(data)
+    raw_prompt = clean_text(request_context.get("prompt"), 220)
+    topic = compact_line(infer_excel_topic(data, excel_path), 42)
+    preferences = parse_prompt_preferences(raw_prompt)
+    tokens = preferences.get("priority_tokens") or []
+    focus_terms = preferences.get("focus_terms") or []
+
+    base = ""
+    if ("hallazgos" in tokens or "riesgos" in tokens) and ("costos" in tokens or "estado" in tokens):
+        base = "Hallazgos y concentraciones clave"
+    elif "hallazgos" in tokens or "riesgos" in tokens:
+        base = "Hallazgos y decisiones prioritarias"
+    elif "costos" in tokens or "estado" in tokens:
+        base = "Concentraciones y decisiones prioritarias"
+    elif len(focus_terms) >= 2:
+        base = compact_line(f"{focus_terms[0]} y {focus_terms[1]}", 54)
+    elif focus_terms:
+        base = compact_line(f"Decision ejecutiva sobre {focus_terms[0]}", 54)
+    else:
+        base = compact_line(raw_prompt, 54)
+
+    if base:
+        normalized_base = normalize_header_key(base)
+        normalized_topic = normalize_header_key(topic)
+        if topic and normalized_topic and normalized_topic not in normalized_base and len(base) + len(topic) + 3 <= max_len:
+            return compact_line(f"{base} · {topic}", max_len)
+        return compact_line(base, max_len)
+    return topic or basename_label(excel_path) or "datos reales del Excel"
 
 
 def safe_list(values):
@@ -2041,12 +2145,13 @@ def build_top5_alerts_payload(data):
 def build_boardroom_blocks(data, excel_path):
     blocks = []
     topic = infer_excel_topic(data, excel_path)
+    focus_phrase = build_prompt_focus_phrase(data, excel_path, max_len=66)
     summary_lines = build_management_highlights(data, excel_path, limit=4)
     if summary_lines:
         blocks.append({
             "type": "text",
-            "title": "Vision Ejecutiva",
-            "subtitle": f"Panorama gerencial: {topic}",
+            "title": compact_line(f"Panorama para decidir: {focus_phrase}", 78),
+            "subtitle": compact_line(f"Lectura gerencial sobre {topic}", 84) if topic else "Lectura gerencial basada en datos reales",
             "lines": summary_lines,
         })
 
@@ -2653,8 +2758,9 @@ def build_slide_2_cards(data, excel_path):
     visual_plan = data.get("visual_plan_ia") or {}
     visual_curation_ready = is_visual_curation_ready(data)
     topic = compact_line(infer_excel_topic(data, excel_path), 44)
+    focus_phrase = build_prompt_focus_phrase(data, excel_path, max_len=44)
     mode_label = "Boardroom" if IS_BOARDROOM_MODE else "Ejecutivo"
-    fallback_topic = f"Analisis ejecutivo de {topic}." if topic else "Analisis ejecutivo con datos reales del Excel."
+    fallback_topic = f"{focus_phrase}." if focus_phrase else (f"Analisis ejecutivo de {topic}." if topic else "Analisis ejecutivo con datos reales del Excel.")
     fallback_importance = [
         (data.get("resumen_ejecutivo_ia") or {}).get("alerta_principal") or (summary[1] if len(summary) > 1 else ""),
         (data.get("resumen_ejecutivo_ia") or {}).get("recomendacion") or (topics[0] if topics else ""),
@@ -2841,13 +2947,14 @@ def build_text_blocks(data):
     if blocks:
         expanded = expanded[:5]
     chunk_size = 5
+    focus_phrase = build_prompt_focus_phrase(data, data.get("metadatos", {}).get("archivo") or "archivo", max_len=58)
     for index in range(0, len(expanded), chunk_size):
         chunk_num = index // chunk_size + 1
         blocks.append({
             "type": "text",
             "origin": "conclusions",
-            "title": "Conclusiones del Analisis",
-            "subtitle": f"Hallazgos clave · Seccion {chunk_num}" if chunk_num > 1 else "Hallazgos y recomendaciones clave",
+            "title": compact_line(f"Conclusiones sobre {focus_phrase}", 72) if focus_phrase else "Conclusiones del Analisis",
+            "subtitle": f"Mensajes clave · Seccion {chunk_num}" if chunk_num > 1 else "Hallazgos y recomendaciones alineadas al prompt",
             "lines": expanded[index:index + chunk_size],
         })
     return blocks
@@ -3236,6 +3343,11 @@ def score_block_against_prompt(block, preferences):
             score += 6
         elif token == "riesgos" and any(keyword in haystack for keyword in ("riesgo", "alerta", "anomalia", "anomal", "outlier")):
             score += 5
+    for term in preferences.get("focus_terms") or []:
+        if len(term) < 4:
+            continue
+        if term in haystack:
+            score += 4
     if preferences.get("prefer_short_tables") and block.get("type") == "table":
         row_count = len(block.get("rows") or [])
         if row_count <= 8:
@@ -3288,8 +3400,280 @@ def append_unique_blocks(target, blocks, seen_signatures, limit=None):
             break
 
 
+def apply_design_slide_to_block(block, design_slide):
+    current = dict(block)
+    if not isinstance(design_slide, dict):
+        return current
+    title = clean_text(design_slide.get("title"), 120)
+    notes = clean_text(design_slide.get("design_notes"), 180)
+    if title:
+        current["title"] = title
+    if notes:
+        current["subtitle"] = notes
+    if current.get("type") == "chart":
+        insight_parts = [
+            clean_text(design_slide.get("insight_headline"), 80),
+            clean_text(design_slide.get("insight_body"), 220),
+        ]
+        insight_text = " ".join(part for part in insight_parts if part).strip()
+        if insight_text:
+            current["insight"] = insight_text
+    elif current.get("type") in {"table", "table_summary", "kpi_dashboard"}:
+        footnote = clean_text(design_slide.get("footnote"), 160)
+        insight_text = clean_text(design_slide.get("insight_text"), 200)
+        if footnote:
+            current["subtitle"] = footnote
+        elif insight_text:
+            current["subtitle"] = insight_text
+    elif current.get("type") == "text" and design_slide.get("summary_bullets"):
+        bullets = safe_list(design_slide.get("summary_bullets"))
+        if bullets:
+            current["lines"] = [clean_text(item, 140) for item in bullets[:5] if clean_text(item, 140)]
+    cta_text = clean_text(design_slide.get("cta_text"), 160)
+    if cta_text and current.get("type") == "text":
+        lines = [clean_text(item, 140) for item in safe_list(current.get("lines")) if clean_text(item, 140)]
+        if cta_text not in lines:
+            lines.append(cta_text)
+        current["lines"] = lines[:5]
+    current["design_notes"] = notes
+    return current
+
+
+def build_prompt_fallback_design_plan(data, prompt_preferences, excel_path):
+    request_context = get_request_context(data)
+    raw_prompt = clean_text((request_context or {}).get("prompt"), 180)
+    if not raw_prompt:
+        return {}
+
+    focus_phrase = build_prompt_focus_phrase(data, excel_path, max_len=58)
+    theme = get_theme_context(data)
+    prompt_tokens = prompt_preferences.get("priority_tokens") or []
+    focus_terms = prompt_preferences.get("focus_terms") or []
+    narrative_lines = unique_texts(data.get("conclusiones"), limit=6, min_len=18)
+    summary_lines = build_management_highlights(data, excel_path, limit=4)
+    storyline = safe_list((data.get("visual_plan_ia") or {}).get("storyline"))[:3]
+    chart_requested = (prompt_preferences.get("chart_slides") or 0) > 0 or any(token in prompt_tokens for token in ("costos", "estado"))
+    table_requested = (prompt_preferences.get("table_slides") or 0) > 0 or "hallazgos" in prompt_tokens
+    visual_ready = is_visual_curation_ready(data)
+    chart_available = visual_ready and bool(safe_list(data.get("graficas_automaticas")))
+    table_available = visual_ready and bool(data.get("muestra_tabla") or data.get("otras_tablas") or data.get("genericas"))
+
+    focus_label = focus_terms[0] if focus_terms else (prompt_tokens[0] if prompt_tokens else compact_line(infer_excel_topic(data, excel_path), 40))
+    if "hallazgos" in prompt_tokens or "riesgos" in prompt_tokens:
+        if focus_label in {"hallazgos", "riesgos"}:
+            mid_title = "Riesgos y hallazgos clave"
+            close_title = "Acciones de control prioritarias"
+        else:
+            mid_title = f"Riesgos y hallazgos sobre {focus_label}"
+            close_title = f"Acciones de control para {focus_label}"
+    elif "costos" in prompt_tokens or "estado" in prompt_tokens:
+        if focus_label in {"costos", "estado"}:
+            mid_title = "Concentraciones y montos clave"
+            close_title = "Decisiones financieras prioritarias"
+        else:
+            mid_title = f"Concentraciones y montos en {focus_label}"
+            close_title = f"Decisiones financieras sobre {focus_label}"
+    else:
+        mid_title = f"Lectura priorizada de {focus_label}"
+        close_title = f"Decision siguiente sobre {focus_label}"
+
+    summary_bullets = storyline or narrative_lines[:3] or summary_lines[:3] or [focus_phrase]
+    slides = [
+        {
+            "slide_number": 1,
+            "type": "title_slide",
+            "title": compact_line(f"Decision ejecutiva: {focus_phrase}", 110),
+            "title_text": compact_line(f"Decision ejecutiva: {focus_phrase}", 110),
+            "subtitle_text": compact_line(f"Analisis ejecutivo de {basename_label(excel_path)}", 130),
+            "design_notes": "La apertura se ancla al prompt del usuario para evitar una portada generica.",
+        },
+        {
+            "slide_number": 2,
+            "type": "text_bullets",
+            "title": "Contexto y foco ejecutivo",
+            "design_notes": "Esta slide traduce el prompt a una lectura ejecutiva concreta antes de mostrar evidencia.",
+            "summary_bullets": (summary_lines or narrative_lines or [focus_phrase])[:4],
+        },
+        {
+            "slide_number": 3,
+            "type": "text_bullets",
+            "title": compact_line(mid_title, 110),
+            "design_notes": "La narrativa intermedia cambia segun los terminos clave del prompt y los hallazgos del Excel.",
+            "summary_bullets": (narrative_lines or summary_lines or storyline or [focus_phrase])[:4],
+        },
+    ]
+
+    if chart_requested and chart_available:
+        slides.append({
+            "slide_number": len(slides) + 1,
+            "type": "chart_with_insight",
+            "title": compact_line(f"Visual clave para {focus_phrase}", 110),
+            "insight_headline": compact_line(summary_bullets[0], 60),
+            "insight_body": compact_line((summary_lines or narrative_lines or [focus_phrase])[0], 220),
+            "design_notes": "Se reserva una visual solo si el prompt la pide y la curaduria visual esta realmente disponible.",
+        })
+
+    if table_requested and table_available:
+        slides.append({
+            "slide_number": len(slides) + 1,
+            "type": "data_table",
+            "title": compact_line(f"Detalle puntual para {focus_phrase}", 110),
+            "footnote": "Tabla incluida solo cuando el prompt exige detalle y existe soporte valido en el Excel.",
+            "design_notes": "La tabla deja de ser automatica y se usa solo como soporte del foco pedido.",
+        })
+
+    slides.append({
+        "slide_number": len(slides) + 1,
+        "type": "closing_slide",
+        "title": compact_line(close_title, 110),
+        "cta_text": compact_line(f"Profundizar la decision sobre {focus_phrase} con base en la evidencia priorizada.", 150),
+        "summary_bullets": summary_bullets[:4],
+        "design_notes": "El cierre retoma el pedido del usuario y lo convierte en accion concreta.",
+    })
+
+    return {
+        "source": "prompt_fallback",
+        "presentation_meta": {
+            "title": compact_line(f"Decision ejecutiva: {focus_phrase}", 110),
+            "subtitle": compact_line(f"Analisis ejecutivo de {basename_label(excel_path)}", 150),
+            "author": "Generado con Excel -> PowerPoint Pro",
+            "date": clean_text(request_context.get("current_date"), 24),
+            "total_slides": len(slides),
+            "narrative_summary": compact_line(f"La presentacion prioriza {focus_phrase} con evidencia real del Excel.", 220),
+        },
+        "slides": slides[:12],
+        "global_design": {
+            "font_primary": "Calibri",
+            "font_secondary": "Calibri Light",
+            "footer_text": clean_text(f"{theme.get('name', 'Analitica Moderna')} - {request_context.get('current_date', '')}", 100),
+        },
+        "validation": {
+            "total_slides_matches_array": True,
+            "all_slides_have_required_fields": True,
+            "no_slide_exceeds_5_bullets": True,
+            "no_chart_exceeds_8_series": True,
+            "json_is_valid": True,
+        },
+    }
+
+
+def build_blocks_from_design_plan(design_plan, pools):
+    slides = safe_list((design_plan or {}).get("slides"))
+    if not slides:
+        return []
+    plan_source = clean_text((design_plan or {}).get("source"), 40)
+
+    queue_map = {
+        "chart": list(pools.get("chart", [])),
+        "kpi_dashboard": list(pools.get("kpi_dashboard", [])),
+        "table_summary": list(pools.get("table_summary", [])),
+        "table": list(pools.get("table", [])),
+        "text": list(pools.get("text", [])),
+    }
+    selected = []
+    seen = set()
+
+    def pick(queue_name):
+        queue = queue_map.get(queue_name) or []
+        while queue:
+            candidate = queue.pop(0)
+            signature = (
+                candidate.get("type"),
+                clean_text(candidate.get("title"), 90).casefold(),
+                clean_text(candidate.get("subtitle"), 90).casefold(),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            return candidate
+        return None
+
+    def build_text_candidate(slide):
+        slide_type = clean_text(slide.get("type"), 40)
+        title = clean_text(slide.get("title"), 120) or "Narrativa ejecutiva"
+        notes = clean_text(slide.get("design_notes"), 180)
+        insight_text = clean_text(slide.get("insight_text"), 220)
+        insight_headline = clean_text(slide.get("insight_headline"), 80)
+        insight_body = clean_text(slide.get("insight_body"), 220)
+        cta_text = clean_text(slide.get("cta_text"), 160)
+        summary_bullets = [clean_text(item, 140) for item in safe_list(slide.get("summary_bullets")) if clean_text(item, 140)]
+
+        lines = []
+        if slide_type == "quote_highlight":
+            lines = [insight_headline or title]
+            if insight_body:
+                lines.append(insight_body)
+        elif slide_type == "section_divider":
+            lines = [title]
+            if notes:
+                lines.append(notes)
+        elif slide_type == "closing_slide":
+            lines = summary_bullets[:4]
+            if cta_text:
+                lines.append(cta_text)
+        else:
+            lines = summary_bullets[:5]
+            if insight_text:
+                lines.insert(0, insight_text)
+            if insight_headline and insight_headline not in lines:
+                lines.insert(0, insight_headline)
+            if insight_body and insight_body not in lines:
+                lines.append(insight_body)
+            if notes and notes not in lines:
+                lines.append(notes)
+
+        lines = [clean_text(item, 140) for item in lines if clean_text(item, 140)]
+        if not lines:
+            lines = [title]
+
+        candidate = {
+            "type": "text",
+            "origin": "ai_design",
+            "design_slide_type": slide_type,
+            "title": title,
+            "subtitle": notes or (
+                "Narrativa guiada por prompt"
+                if plan_source == "prompt_fallback" and slide_type != "closing_slide"
+                else "Cierre guiado por prompt"
+                if plan_source == "prompt_fallback"
+                else "Narrativa guiada por Hermes"
+                if slide_type != "closing_slide"
+                else "Cierre guiado por Hermes"
+            ),
+            "lines": lines[:5],
+            "design_notes": notes,
+        }
+        if cta_text:
+            candidate["cta_text"] = cta_text
+        return candidate
+
+    for slide in slides:
+        if not isinstance(slide, dict):
+            continue
+        slide_type = clean_text(slide.get("type"), 40)
+        if slide_type in {"title_slide", "closing_slide"}:
+            continue
+        candidate = None
+        if slide_type in {"chart_full", "chart_with_insight"}:
+            candidate = pick("chart")
+        elif slide_type == "executive_summary":
+            candidate = pick("kpi_dashboard") or pick("text")
+        elif slide_type == "data_table":
+            candidate = pick("table") or pick("table_summary")
+        elif slide_type in {"text_bullets", "two_columns"}:
+            candidate = pick("text") or build_text_candidate(slide)
+        elif slide_type in {"quote_highlight", "section_divider"}:
+            candidate = build_text_candidate(slide)
+        if candidate:
+            selected.append(apply_design_slide_to_block(candidate, slide))
+
+    return selected
+
+
 def build_content_blocks(data, prompt_preferences=None):
     blocks = []
+    design_plan = get_presentation_design_plan(data)
+    design_slides = safe_list((design_plan or {}).get("slides"))
     chart_blocks = enforce_chart_preferences(build_chart_blocks(data), prompt_preferences)
     text_blocks = build_text_blocks(data)
     boardroom_blocks = build_boardroom_blocks(data, data.get("metadatos", {}).get("archivo") or "archivo")
@@ -3376,7 +3760,22 @@ def build_content_blocks(data, prompt_preferences=None):
             and table_plan[clean_text(block.get("visual_id"), 80)]["mode"] == "detail"
         ] or detail_blocks
 
-    if prompt_preferences and prompt_preferences.get("explicit_structure"):
+    use_strict_design_plan = bool(design_slides)
+
+    if use_strict_design_plan:
+        design_guided_blocks = build_blocks_from_design_plan(
+            design_plan,
+            {
+                "chart": preferred_chart_blocks or chart_blocks,
+                "kpi_dashboard": preferred_kpi_blocks or kpi_blocks,
+                "table_summary": preferred_summary_blocks or summary_blocks,
+                "table": preferred_detail_blocks or detail_blocks,
+                "text": narrative_blocks + sheet_text_blocks,
+            },
+        )
+        if design_guided_blocks:
+            return design_guided_blocks[: min(MAX_CONTENT_BLOCKS, len(design_slides))]
+    elif prompt_preferences and prompt_preferences.get("explicit_structure"):
         boardroom_blocks = order_blocks_by_prompt(boardroom_blocks, prompt_preferences)
         kpi_blocks = order_blocks_by_prompt(kpi_blocks, prompt_preferences)
         summary_blocks = order_blocks_by_prompt(summary_blocks, prompt_preferences)
@@ -3460,6 +3859,24 @@ def build_content_blocks(data, prompt_preferences=None):
             seen_signatures.add(signature)
             deduped_blocks.append(block)
         blocks = deduped_blocks
+
+    if design_plan and not use_strict_design_plan:
+        design_guided_blocks = build_blocks_from_design_plan(
+            design_plan,
+            {
+                "chart": preferred_chart_blocks or chart_blocks,
+                "kpi_dashboard": preferred_kpi_blocks or kpi_blocks,
+                "table_summary": preferred_summary_blocks or summary_blocks,
+                "table": preferred_detail_blocks or detail_blocks,
+                "text": narrative_blocks + sheet_text_blocks,
+            },
+        )
+        if design_guided_blocks:
+            seen_signatures = set()
+            final_blocks = []
+            append_unique_blocks(final_blocks, design_guided_blocks, seen_signatures)
+            append_unique_blocks(final_blocks, blocks, seen_signatures, limit=prompt_preferences.get("max_total_content_blocks", MAX_CONTENT_BLOCKS) if prompt_preferences else MAX_CONTENT_BLOCKS)
+            blocks = final_blocks
 
     if not blocks:
         blocks.append({
@@ -3550,9 +3967,13 @@ def style_text_frame(text_frame, font_size=16, color=COLOR_TEXT, bold=False, ali
             run.font.color.rgb = color
 
 
-def fill_cover(slide, excel_path):
-    title = clean_text(Path(excel_path).stem.replace("_", " ").replace("-", " "), 60) or "Reporte Ejecutivo"
-    today = datetime.now().strftime("%d/%m/%Y")
+def fill_cover(slide, excel_path, data=None):
+    plan = get_presentation_design_plan(data or {})
+    meta = (plan.get("presentation_meta") or {}) if isinstance(plan, dict) else {}
+    title_slide = next((item for item in safe_list(plan.get("slides")) if item.get("type") == "title_slide"), {}) if isinstance(plan, dict) else {}
+    title = clean_text(title_slide.get("title_text") or meta.get("title"), 90) or clean_text(Path(excel_path).stem.replace("_", " ").replace("-", " "), 60) or "Reporte Ejecutivo"
+    subtitle = clean_text(title_slide.get("subtitle_text") or meta.get("subtitle"), 120)
+    today = clean_text(meta.get("date"), 24) or datetime.now().strftime("%d/%m/%Y")
     placeholders = list(slide.placeholders)
     if len(placeholders) >= 1:
         placeholders[0].text = title
@@ -3560,6 +3981,41 @@ def fill_cover(slide, excel_path):
     if len(placeholders) >= 2:
         placeholders[1].text = today
         style_text_frame(placeholders[1].text_frame, font_size=12, color=COLOR_WHITE, bold=False, align=PP_ALIGN.RIGHT)
+    if subtitle:
+        subtitle_box = slide.shapes.add_textbox(Inches(1.15), Inches(4.15), Inches(10.8), Inches(0.7))
+        subtitle_box.text_frame.text = subtitle
+        style_text_frame(subtitle_box.text_frame, font_size=16, color=COLOR_WHITE, bold=False, align=PP_ALIGN.CENTER)
+
+
+def fill_closing_slide(slide, data):
+    plan = get_presentation_design_plan(data)
+    slides = safe_list((plan or {}).get("slides"))
+    closing = next((item for item in slides if item.get("type") == "closing_slide"), {})
+    title = "Gracias"
+    farewell = "Gracias por su atencion."
+    secondary_line = clean_text(closing.get("title"), 100)
+    if not secondary_line or normalize_header_key(secondary_line) in {"gracias", "cierre ejecutivo"}:
+        secondary_line = "Quedo a disposicion para profundizar en la evidencia presentada."
+
+    overlay = slide.shapes.add_shape(1, Inches(0.9), Inches(1.1), Inches(11.5), Inches(4.95))
+    overlay.fill.solid()
+    overlay.fill.fore_color.rgb = COLOR_WHITE
+    overlay.line.color.rgb = COLOR_LINE
+    overlay.line.width = Pt(0.6)
+
+    title_box = slide.shapes.add_textbox(Inches(1.2), Inches(1.45), Inches(10.6), Inches(0.5))
+    title_box.text_frame.text = title
+    style_text_frame(title_box.text_frame, font_size=22, color=COLOR_BLUE, bold=True, align=PP_ALIGN.LEFT)
+
+    summary_box = slide.shapes.add_textbox(Inches(1.25), Inches(2.2), Inches(10.2), Inches(0.9))
+    summary_box.text_frame.word_wrap = True
+    summary_box.text_frame.text = compact_line(farewell, 200)
+    style_text_frame(summary_box.text_frame, font_size=18, color=COLOR_TEXT, bold=False, align=PP_ALIGN.CENTER)
+
+    secondary_box = slide.shapes.add_textbox(Inches(1.45), Inches(3.35), Inches(9.8), Inches(0.6))
+    secondary_box.text_frame.word_wrap = True
+    secondary_box.text_frame.text = compact_line(secondary_line, 140)
+    style_text_frame(secondary_box.text_frame, font_size=12, color=COLOR_BLUE, bold=False, align=PP_ALIGN.CENTER)
 
 
 def fill_description_slide(slide, data, excel_path):
@@ -4608,6 +5064,13 @@ def build_audit_record(excel_path, output_path, data, content_blocks, quality_is
             "issues": safe_list(quality_issues),
         },
         "aiCurationStatus": get_ai_curation_status(data),
+        "presentationRequest": get_request_context(data),
+        "designPlanStatus": {
+            "available": bool(get_presentation_design_plan(data)),
+            "slideCount": len(safe_list((get_presentation_design_plan(data) or {}).get("slides"))),
+            "metaTitle": clean_text(((get_presentation_design_plan(data) or {}).get("presentation_meta") or {}).get("title"), 120),
+            "source": clean_text((get_presentation_design_plan(data) or {}).get("source"), 40) or ("ai" if data.get("presentation_design_ia") else "none"),
+        },
         "contentAudit": [
             {
                 "type": item.get("type"),
@@ -4627,11 +5090,13 @@ def generate_presentation(excel_path, output_path, user_instructions=None):
     prompt_preferences = parse_prompt_preferences(user_instructions)
     apply_prompt_palette(prompt_preferences)
     data = preparar_datos_para_slides(excel_path, user_instructions)
+    if not isinstance(data.get("presentation_design_ia"), dict) and clean_text((get_request_context(data) or {}).get("prompt")):
+        data["prompt_fallback_design_plan"] = build_prompt_fallback_design_plan(data, prompt_preferences, excel_path)
     prs = Presentation(str(TEMPLATE_PATH))
     if len(prs.slides) < 5:
         raise RuntimeError("La plantilla no contiene las 5 diapositivas base requeridas.")
 
-    fill_cover(prs.slides[0], excel_path)
+    fill_cover(prs.slides[0], excel_path, data)
     fill_description_slide(prs.slides[1], data, excel_path)
     fill_priority_slide(prs.slides[2], data, excel_path)
 
@@ -4645,6 +5110,7 @@ def generate_presentation(excel_path, output_path, user_instructions=None):
             slide = prs.slides.add_slide(content_layout)
         render_content_block(slide, block, excel_path, index, len(content_blocks))
 
+    fill_closing_slide(prs.slides[4], data)
     move_slide_to_end(prs, 4)
     prs.save(output_path)
 
