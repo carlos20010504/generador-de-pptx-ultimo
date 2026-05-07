@@ -1,5 +1,6 @@
 """OpenRouter call layer with 4-model fallback chain and profile-aware retry."""
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,7 +21,7 @@ SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "http://localhost")
 
 class AIProfile(str, Enum):
     FAST = "fast"      # 25s timeout, 1 model only, raise if it fails
-    PATIENT = "patient"  # up to 4 min, full chain, multiple cycles
+    PATIENT = "patient"  # full chain, multiple cycles, up to ~16 min worst-case (slow models + retries)
 
 PROFILE_SETTINGS = {
     AIProfile.FAST: {
@@ -154,7 +155,6 @@ def _parse_retry_after(headers, body_lower: str) -> int:
             return int(float(h))
         except (TypeError, ValueError):
             pass
-    import re
     m = re.search(r"retry in\s+([0-9]+(?:\.[0-9]+)?)\s*s", body_lower)
     if m:
         return int(float(m.group(1)))
