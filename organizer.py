@@ -3505,6 +3505,24 @@ def build_unified_cache_key(analisis_data):
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
+def build_content_hash_cache_key(file_path, user_prompt, audience, language,
+                                   planner_version="v1"):
+    """Returns sha256 cache key for the new planner.
+
+    Used by Phase 2 planner integration. Reads file bytes once and combines
+    with the prompt context. Returns None if file cannot be read.
+    """
+    from socya_pipeline.ai_cache import compute_cache_key
+    try:
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+    except OSError:
+        return None
+    return compute_cache_key(file_bytes, user_prompt or "",
+                              audience or "ejecutivos",
+                              language or "es", planner_version)
+
+
 def sintetizar_todo_con_ia(analisis_data):
     """
     UNA sola llamada a la IA que produce:
