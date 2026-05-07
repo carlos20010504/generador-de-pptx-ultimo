@@ -47,6 +47,7 @@ next-env.d.ts
 *.json
 *.pdf
 *.txt
+!requirements-dev.txt
 *.csv
 *.audit.json
 *.md
