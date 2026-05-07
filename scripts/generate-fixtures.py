@@ -11,12 +11,12 @@ random.seed(42)
 np.random.seed(42)
 
 def ventas_simple():
-    months = pd.date_range("2024-01-01", periods=100, freq="D")
+    dates = pd.date_range("2024-01-01", periods=100, freq="D")
     cities = np.random.choice(["Bogotá", "Medellín", "Cali", "Cartagena", "Barranquilla"],
                                size=100, p=[0.5, 0.25, 0.15, 0.07, 0.03])
     totals = np.random.randint(50_000, 900_000, size=100)
     df = pd.DataFrame({
-        "Mes": months,
+        "Fecha": dates,
         "Total": totals,
         "Ciudad": cities,
         "Vendedor": np.random.choice(["Ana","Luis","Marta","Pedro"], 100),
