@@ -379,6 +379,20 @@ export async function POST(req: NextRequest) {
         current_date: new Date().toLocaleDateString(),
         theme,
       });
+      const useNewPipeline = process.env.SOCYA_USE_NEW_PIPELINE === '1';
+      if (useNewPipeline) {
+        const newArgs = ['-X', 'utf8', '-m', 'socya_pipeline', 'plan',
+          '--input', filePath, '--request', presentationRequest];
+        const { stdout: newStdout, stderr: newStderr } = await execFileAsync('python', newArgs, {
+          encoding: 'utf8', timeout: pythonTimeoutMs, maxBuffer: 20 * 1024 * 1024,
+          windowsHide: true,
+          env: { ...process.env, PYTHONUTF8: '1', SOCYA_AI_PROFILE: 'patient' },
+        });
+        if (newStderr?.trim() && !newStdout?.trim()) throw new Error(newStderr.trim());
+        return NextResponse.json(JSON.parse(newStdout), { headers: { 'Cache-Control': 'no-store' } });
+      }
+      // else: existing behavior continues unchanged below
+
       const args = ['-X', 'utf8', ORGANIZER_SCRIPT_NAME, filePath, presentationRequest];
 
       const { stdout, stderr } = await execFileAsync('python', args, {
