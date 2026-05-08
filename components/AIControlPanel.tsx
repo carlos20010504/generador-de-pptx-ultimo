@@ -5,6 +5,7 @@ import {
   Sparkles, Lightbulb, LayoutDashboard, Table2, BarChart2,
   FileText, Loader2, Send, ChevronRight, RefreshCw, Wand2, Check, Brain, TrendingUp,
 } from 'lucide-react';
+import { aiStatusBadge, AIStatus } from '@/utils/ai-status';
 
 interface AIControlPanelProps {
   onPromptChange: (prompt: string) => void;
@@ -80,6 +81,8 @@ interface IntelligenceResponse {
   powerPointPlan?: {
     recommendedSlides?: RecommendedSlide[];
   };
+  ai_status?: { model?: string; cache_hit?: boolean; fallback_steps?: { from: string; reason: string }[] };
+  audit?: { slides_planned: number; slides_validated: number; slides_dropped: unknown[]; bullets_dropped: number };
 }
 
 function compactNumber(value?: number): string {
@@ -117,6 +120,7 @@ export default function AIControlPanel({
   const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
   const [promptSent, setPromptSent] = useState(false);
   const [lastFile, setLastFile] = useState<File | null>(null);
+  const [aiStatus, setAiStatus] = useState<AIStatus | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -141,6 +145,7 @@ export default function AIControlPanel({
       setHealthSignals([]);
       setProcessingMessage('');
       setLastFile(null);
+      setAiStatus(null);
       return;
     }
     if (file === lastFile) return;
@@ -170,9 +175,10 @@ export default function AIControlPanel({
       if (Array.isArray(data.suggestions) && data.suggestions.length > 0) {
         setSuggestions(data.suggestions);
       } else {
-        setSuggestions(PLACEHOLDER_SUGGESTIONS);
+        setSuggestions([]);
       }
 
+      setAiStatus(data.ai_status ?? null);
       setFindings(Array.isArray(data.keyFindings) ? data.keyFindings.slice(0, 4) : []);
       setTrends(Array.isArray(data.trends) ? data.trends.slice(0, 3) : []);
       setPromptHints(Array.isArray(data.promptHints) ? data.promptHints.slice(0, 3) : []);
@@ -191,7 +197,8 @@ export default function AIControlPanel({
         setProcessingMessage('');
       }
     } catch {
-      setSuggestions(PLACEHOLDER_SUGGESTIONS);
+      setSuggestions([]);
+      setAiStatus(null);
       setFindings([]);
       setTrends([]);
       setPromptHints([]);
@@ -306,8 +313,15 @@ export default function AIControlPanel({
             <p style={{ color: 'white', fontSize: '0.82rem', fontWeight: 800, margin: 0, lineHeight: 1.2 }}>
               Asistente IA
             </p>
-            <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.62rem', margin: 0 }}>
-              Hermes 3 · OpenRouter
+            <p style={{
+              color: aiStatus
+                ? (aiStatusBadge(aiStatus).tone === 'cache' ? '#86EFAC'
+                   : aiStatusBadge(aiStatus).tone === 'warn' ? '#FCD34D'
+                   : '#A78BFA')
+                : 'rgba(255,255,255,0.35)',
+              fontSize: '0.62rem', margin: 0,
+            }}>
+              {aiStatus ? `✦ ${aiStatusBadge(aiStatus).label}` : 'Hermes 3 · OpenRouter'}
             </p>
           </div>
         </div>
@@ -575,7 +589,7 @@ export default function AIControlPanel({
           <div style={{ padding: '0.5rem 0', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
             <Lightbulb size={12} color="rgba(255,255,255,0.2)" />
             <span style={{ color: 'rgba(255,255,255,0.25)', fontSize: '0.68rem' }}>
-              {hasFile ? 'No se cargaron sugerencias.' : 'Sube un Excel para ver sugerencias.'}
+              {hasFile ? 'Sin sugerencias IA por ahora — escribe tu propio prompt.' : 'Sube un Excel para ver sugerencias.'}
             </span>
           </div>
         )}
