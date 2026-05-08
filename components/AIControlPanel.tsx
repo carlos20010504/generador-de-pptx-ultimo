@@ -34,12 +34,6 @@ const FOCUS_OPTIONS = [
   { id: 'text' as const, label: 'Texto', icon: FileText, color: '#F9A8D4' },
 ];
 
-const PLACEHOLDER_SUGGESTIONS = [
-  'Resalta los 3 KPIs más críticos en la portada',
-  'Enfócate en la comparación de períodos mensuales',
-  'Genera una diapositiva ejecutiva con conclusiones',
-];
-
 const THEME_OPTIONS = [
   { key: 'analitica-moderna', name: 'Analitica Moderna', primary_hex: '#0F172A', accent_hex: '#2563EB', text_hex: '#E5E7EB', bg_hex: '#F8FAFC' },
   { key: 'comite-ejecutivo', name: 'Comite Ejecutivo', primary_hex: '#0B1F3A', accent_hex: '#C0841A', text_hex: '#E2E8F0', bg_hex: '#F8FAFC' },
