@@ -13,8 +13,8 @@ def test_extracts_table_with_clean_cells(ventas_simple_path):
                          "columns_subset": [c for c in table_block.provenance.columns[:3]],
                          "max_rows": 5}]}
     outcome = validate_plan(plan, inv, wb)
-    rendered = extract_for_render(outcome.slides, inv, wb,
-                                    file_path=ventas_simple_path)
+    rendered, _dropped = extract_for_render(outcome.slides, inv, wb,
+                                              file_path=ventas_simple_path)
     assert len(rendered) == 1
     table_slide = rendered[0]
     assert "rows" in table_slide["data"]
@@ -32,7 +32,7 @@ def test_kpi_extraction(ventas_simple_path):
             "slides": [{"type": "kpi_row", "title": "k",
                          "block_refs": [kpi_block.id]}]}
     outcome = validate_plan(plan, inv, wb)
-    rendered = extract_for_render(outcome.slides, inv, wb,
-                                    file_path=ventas_simple_path)
+    rendered, _dropped = extract_for_render(outcome.slides, inv, wb,
+                                              file_path=ventas_simple_path)
     assert rendered[0]["data"]["kpis"][0]["label"]
     assert rendered[0]["data"]["kpis"][0]["value"]

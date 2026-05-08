@@ -91,8 +91,11 @@ def build_inventory(wb: WorkbookData) -> List[Block]:
                 ))
 
         # 4. Time series candidates (date column + numeric column pair)
+        # Skip ID-like numerics (no sense in plotting "Id Comisión over time").
         date_cols = [c for c in sheet.columns if c.dtype == "date"]
-        num_cols = [c for c in sheet.columns if c.dtype in ("numeric", "currency")]
+        num_cols = [c for c in sheet.columns
+                    if c.dtype in ("numeric", "currency")
+                    and not _is_id_like(c, sheet.shape[0])]
         for d in date_cols[:1]:
             for n in num_cols[:2]:
                 counter["S"] += 1

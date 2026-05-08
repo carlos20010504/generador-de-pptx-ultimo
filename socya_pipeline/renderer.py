@@ -425,7 +425,9 @@ def _add_footer(slide, tagline: str, page: int, total: int) -> None:
 def _build_chart_png(data: dict, width_in: float = 7.5,
                        height_in: float = 4.0) -> io.BytesIO:
     chart_type = data.get("chart_type", "bar")
-    labels = [str(l) for l in data.get("labels", [])]
+    raw_labels = [str(l) for l in data.get("labels", [])]
+    # Truncate long labels so they don't blow up the layout
+    labels = [(l if len(l) <= 22 else l[:20] + "…") for l in raw_labels]
     values = list(data.get("values", []))
     name = data.get("name", "")
 
@@ -437,15 +439,20 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
     colors = (CHART_PALETTE * ((n // len(CHART_PALETTE)) + 1))[:n]
 
     if chart_type == "pie":
-        wedges, texts, autotexts = ax.pie(
-            values, labels=labels, autopct="%1.1f%%",
+        # Donut style + legend on the side keeps labels readable
+        wedges, _texts = ax.pie(
+            values, labels=None,
             colors=colors, startangle=90, counterclock=False,
-            wedgeprops={"linewidth": 2, "edgecolor": "#FAFAF5"},
-            textprops={"fontsize": 10, "fontfamily": "Calibri", "color": "#333333"},
+            wedgeprops={"linewidth": 2, "edgecolor": "#FAFAF5", "width": 0.45},
         )
-        for at in autotexts:
-            at.set_color("white")
-            at.set_fontweight("bold")
+        total = sum(values) or 1
+        legend_labels = [f"{lbl} — {int(v)} ({v/total*100:.0f}%)"
+                          for lbl, v in zip(labels, values)]
+        ax.legend(wedges, legend_labels, loc="center left",
+                  bbox_to_anchor=(1.0, 0.5), frameon=False,
+                  fontsize=10, prop={"family": "Calibri"})
+        ax.set_title(name, fontsize=13, fontfamily="Georgia",
+                     color="#1B3B2F", pad=12, loc="center", fontweight="bold")
     elif chart_type == "line":
         ax.plot(labels, values, marker="o", color=CHART_PALETTE[0],
                  linewidth=2.5, markersize=7, markerfacecolor=CHART_PALETTE[2],
@@ -477,7 +484,10 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
                      ha="center", va="bottom", fontsize=9,
                      fontfamily="Calibri", color="#333333", fontweight="bold")
 
-    plt.tight_layout()
+    try:
+        plt.tight_layout()
+    except Exception:
+        pass
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight",
                  facecolor=fig.get_facecolor())

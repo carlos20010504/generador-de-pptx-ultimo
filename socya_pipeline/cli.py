@@ -9,7 +9,7 @@ from socya_pipeline.parser import parse_workbook
 from socya_pipeline.inventory import build_inventory
 from socya_pipeline.planner import plan_presentation
 from socya_pipeline.validator import validate_plan
-from socya_pipeline.extractor import extract_for_render
+from socya_pipeline.extractor import extract_for_render, auto_complete_slides
 from socya_pipeline.ai_chain import AIProfile
 
 def _emit_error(err: PipelineError):
@@ -50,7 +50,11 @@ def cmd_plan(args):
                 f"descartados: {len(outcome.dropped)}.",
                 user_action="improve_excel_or_change_prompt",
             )
-        rendered = extract_for_render(outcome.slides, inv, wb, args.input)
+        rendered, extraction_dropped = extract_for_render(
+            outcome.slides, inv, wb, args.input)
+        before_complete = len(rendered)
+        rendered = auto_complete_slides(rendered, inv, wb, args.input,
+                                          target_count=7)
         result = {
             "presentation_meta": plan.get("presentation_meta", {}),
             "slides": rendered,
@@ -60,6 +64,9 @@ def cmd_plan(args):
                 "slides_planned": len(plan.get("slides", [])),
                 "slides_validated": len(outcome.slides),
                 "slides_dropped": outcome.dropped,
+                "extraction_dropped": extraction_dropped,
+                "slides_auto_added": len(rendered) - before_complete,
+                "slides_final": len(rendered),
                 "bullets_dropped": outcome.bullets_dropped,
             },
         }
@@ -95,7 +102,11 @@ def cmd_generate(args):
                 details=f"Descartados: {len(outcome.dropped)}.",
                 user_action="improve_excel_or_change_prompt",
             )
-        rendered = extract_for_render(outcome.slides, inv, wb, args.input)
+        rendered, extraction_dropped = extract_for_render(
+            outcome.slides, inv, wb, args.input)
+        before_complete = len(rendered)
+        rendered = auto_complete_slides(rendered, inv, wb, args.input,
+                                          target_count=7)
 
         from socya_pipeline.renderer import render_pptx
         template = Path(args.template)
@@ -110,6 +121,9 @@ def cmd_generate(args):
             "slides_planned": len(plan.get("slides", [])),
             "slides_validated": len(outcome.slides),
             "slides_dropped": outcome.dropped,
+            "extraction_dropped": extraction_dropped,
+            "slides_auto_added": len(rendered) - before_complete,
+            "slides_final": len(rendered),
             "bullets_dropped": outcome.bullets_dropped,
             "provenance_per_slide": [s.get("provenance") for s in rendered],
         }

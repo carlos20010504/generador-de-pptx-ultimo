@@ -62,6 +62,11 @@ def parse_workbook(path) -> WorkbookData:
     return WorkbookData(filename=p.name, sheets=sheets)
 
 
+def promote_real_headers(xls, sheet_name: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Public wrapper — see _promote_real_headers."""
+    return _promote_real_headers(xls, sheet_name, df)
+
+
 def _promote_real_headers(xls, sheet_name: str, df: pd.DataFrame) -> pd.DataFrame:
     """If pandas inferred 'Unnamed: N' headers (common when row 0 is a title or the
     sheet has merged-cell title rows), scan the first 10 rows for the first row
