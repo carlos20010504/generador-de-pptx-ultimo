@@ -9,9 +9,11 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { ACCEPTED_EXCEL_EXTENSIONS, MAX_EXCEL_UPLOAD_BYTES, shouldSkipClientContentValidation, validateExcelUpload, validateExcelContents } from '@/utils/excel-file';
-import { generatePowerPointFromExcel } from '@/utils/pptx-helper';
 import { autoOrganizeExcel, OrganizerMode } from '@/utils/excel-organizer';
 import AIControlPanel from './AIControlPanel';
+import GenerationProgress from './GenerationProgress';
+import AuditModal from './AuditModal';
+import { formatErrorForUser, isPipelineError, PipelineErrorPayload } from '@/utils/error-codes';
 
 type Tab = 'generate' | 'organize';
 type Status = 'idle' | 'processing' | 'success' | 'organized' | 'previewed' | 'error';
@@ -174,6 +176,13 @@ export default function ExcelUploader() {
   const [viewportHeight, setViewportHeight] = useState(960);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  type ProgressPhase = 'parsing' | 'inventory' | 'planning' | 'validating' | 'rendering' | 'done' | 'error';
+  const [progressPhase, setProgressPhase] = useState<ProgressPhase | null>(null);
+  const [progressMessage, setProgressMessage] = useState<string>('');
+  const [audit, setAudit] = useState<unknown>(null);
+  const [showAudit, setShowAudit] = useState(false);
+  const [retryError, setRetryError] = useState<PipelineErrorPayload | null>(null);
+
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     const syncViewportHeight = () => setViewportHeight(window.innerHeight || 960);
@@ -267,25 +276,109 @@ export default function ExcelUploader() {
 
   const handleGenerate = async () => {
     if (!file) return;
+    setRetryError(null);
+    setProgressPhase('parsing');
+    setProgressMessage('');
     setStatus('processing');
     setErrorMessage('');
     setStats(null);
-    const start = performance.now();
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('visualMode', orgMode === 'auto' ? 'mixed' : orgMode);
+    if (userPrompt.trim()) formData.append('userPrompt', userPrompt.trim());
+    formData.append('audience', presentationContext.audience);
+    formData.append('language', presentationContext.language);
+    formData.append('theme', JSON.stringify(presentationContext.theme));
+
     try {
-      await generatePowerPointFromExcel(file, orgMode, userPrompt, presentationContext);
-      const duration = ((performance.now() - start) / 1000);
-      setStats({ duration, mode: orgMode, fileName: file.name });
-      setStatus('success');
-    } catch (err: unknown) {
-      console.error('Error generating PPTX:', err);
-      setStatus('error');
-      
-      const errorStr = String(err).toLowerCase();
-      if (errorStr.includes('429') || errorStr.includes('quota') || errorStr.includes('cuota')) {
-        setErrorMessage('La cuota gratuita de la IA se ha agotado temporalmente. Por favor, espera 1 minuto antes de volver a intentarlo para permitir que el sistema se libere.');
-      } else {
-        setErrorMessage(getErrorMessage(err, 'Error al generar la presentación. Revisa la consola.'));
+      const res = await fetch('/api/generate-pptx', { method: 'POST', body: formData });
+      if (!res.ok || !res.body) {
+        // Backwards-compat for non-streaming responses (validation errors)
+        let errPayload: PipelineErrorPayload | null = null;
+        try {
+          const j = await res.json();
+          if (j?.error && isPipelineError(j.error)) errPayload = j.error;
+        } catch { /* ignore */ }
+        setRetryError(errPayload ?? {
+          code: 'PYTHON_RUNTIME_ERROR' as const,
+          message: 'Error inesperado al iniciar la generación.',
+          user_action: 'retry' as const,
+        });
+        setProgressPhase(null);
+        setStatus('error');
+        return;
       }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        for (const ev of events) {
+          const m = /^data: (.+)$/m.exec(ev.trim());
+          if (!m) continue;
+          let payload: { phase: ProgressPhase; message?: string; data?: unknown };
+          try {
+            payload = JSON.parse(m[1]);
+          } catch {
+            continue;
+          }
+          setProgressPhase(payload.phase);
+          if (payload.message) setProgressMessage(payload.message);
+
+          if (payload.phase === 'done') {
+            const data = payload.data as { downloadToken?: string; filename?: string; audit?: unknown } | undefined;
+            if (data?.downloadToken) {
+              const dlRes = await fetch(`/api/generate-pptx?token=${encodeURIComponent(data.downloadToken)}`);
+              if (dlRes.ok) {
+                const blob = await dlRes.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = data.filename || 'presentacion.pptx';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+              }
+            }
+            if (data?.audit) setAudit(data.audit);
+            setStatus('success');
+            setStats({ duration: 0, mode: orgMode, fileName: file.name });
+            setTimeout(() => setProgressPhase(null), 800);
+            return;
+          }
+
+          if (payload.phase === 'error') {
+            const errData = payload.data as PipelineErrorPayload | undefined;
+            setRetryError(
+              errData && isPipelineError(errData)
+                ? errData
+                : {
+                    code: 'PYTHON_RUNTIME_ERROR' as const,
+                    message: payload.message || 'Algo salió mal.',
+                    user_action: 'retry' as const,
+                  }
+            );
+            setProgressPhase(null);
+            setStatus('error');
+            return;
+          }
+        }
+      }
+    } catch {
+      setRetryError({
+        code: 'PYTHON_RUNTIME_ERROR' as const,
+        message: 'Algo salió mal en el navegador.',
+        user_action: 'retry' as const,
+      });
+      setProgressPhase(null);
+      setStatus('error');
     }
   };
 
@@ -539,7 +632,7 @@ export default function ExcelUploader() {
           </div>
         </div>
 
-        {isLoading && (
+        {isLoading && !progressPhase && (
           <div style={{ marginBottom: '1rem' }} className="animate-fade-in">
             <div
               style={{
@@ -602,6 +695,18 @@ export default function ExcelUploader() {
                 />
               </div>
             </div>
+          </div>
+        )}
+
+        {progressPhase && (
+          <div style={{
+            background: 'rgba(255,255,255,0.04)',
+            border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: '12px',
+            padding: '1rem',
+            marginBottom: '1rem',
+          }} className="animate-fade-in">
+            <GenerationProgress currentPhase={progressPhase} message={progressMessage} />
           </div>
         )}
 
@@ -887,7 +992,7 @@ export default function ExcelUploader() {
           </div>
         )}
 
-        {status === 'error' && (
+        {status === 'error' && !retryError && (
           <div
             style={{
               marginTop: '0.875rem',
@@ -909,6 +1014,55 @@ export default function ExcelUploader() {
               <p style={{ color: 'rgba(252,165,165,0.74)', fontSize: '0.75rem', margin: 0, lineHeight: 1.45 }}>
                 {errorMessage}
               </p>
+            </div>
+          </div>
+        )}
+
+        {retryError && (
+          <div
+            style={{
+              background: 'rgba(220,38,38,0.08)',
+              border: '1px solid rgba(220,38,38,0.3)',
+              borderRadius: '12px',
+              padding: '1rem',
+              marginTop: '1rem',
+              color: '#FCA5A5',
+            }}
+            className="animate-fade-in-up"
+          >
+            <p style={{ fontWeight: 700, margin: '0 0 0.3rem', fontSize: '0.85rem' }}>
+              {formatErrorForUser(retryError).title}
+            </p>
+            <p style={{ fontSize: '0.78rem', opacity: 0.8, margin: '0 0 0.6rem' }}>
+              {formatErrorForUser(retryError).action}
+            </p>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                type="button"
+                onClick={() => { setRetryError(null); handleGenerate(); }}
+                style={{
+                  padding: '0.4rem 0.8rem',
+                  background: 'rgba(124,58,237,0.2)',
+                  border: '1px solid rgba(124,58,237,0.4)',
+                  borderRadius: '8px', color: '#C4B5FD', cursor: 'pointer',
+                  fontSize: '0.78rem', fontWeight: 700,
+                }}
+              >
+                Reintentar
+              </button>
+              <button
+                type="button"
+                onClick={() => setRetryError(null)}
+                style={{
+                  padding: '0.4rem 0.8rem',
+                  background: 'transparent',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  borderRadius: '8px', color: 'rgba(255,255,255,0.6)',
+                  cursor: 'pointer', fontSize: '0.78rem',
+                }}
+              >
+                Cancelar
+              </button>
             </div>
           </div>
         )}
@@ -968,32 +1122,57 @@ export default function ExcelUploader() {
                 </div>
               ))}
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                setStatus('idle');
-                setStats(null);
-              }}
-              style={{
-                marginTop: '0.7rem',
-                padding: '0.45rem 0.78rem',
-                background: 'rgba(74,222,128,0.1)',
-                border: '1px solid rgba(74,222,128,0.2)',
-                borderRadius: '8px',
-                color: '#86EFAC',
-                cursor: 'pointer',
-                fontSize: '0.75rem',
-                fontWeight: 700,
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.3rem',
-              }}
-            >
-              <RefreshCw size={12} />
-              Generar otra presentación
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginTop: '0.7rem', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setStatus('idle');
+                  setStats(null);
+                  setAudit(null);
+                }}
+                style={{
+                  padding: '0.45rem 0.78rem',
+                  background: 'rgba(74,222,128,0.1)',
+                  border: '1px solid rgba(74,222,128,0.2)',
+                  borderRadius: '8px',
+                  color: '#86EFAC',
+                  cursor: 'pointer',
+                  fontSize: '0.75rem',
+                  fontWeight: 700,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.3rem',
+                }}
+              >
+                <RefreshCw size={12} />
+                Generar otra presentación
+              </button>
+              {audit ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAudit(true)}
+                  style={{
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: '8px',
+                    padding: '0.4rem 0.7rem',
+                    color: 'rgba(255,255,255,0.65)',
+                    cursor: 'pointer', fontSize: '0.72rem',
+                  }}
+                >
+                  Ver detalles de la generación
+                </button>
+              ) : null}
+            </div>
           </div>
         )}
+
+        {showAudit && audit ? (
+          <AuditModal
+            audit={audit as Parameters<typeof AuditModal>[0]['audit']}
+            onClose={() => setShowAudit(false)}
+          />
+        ) : null}
 
         {status === 'previewed' && previewSlides.length > 0 && (
           <div
