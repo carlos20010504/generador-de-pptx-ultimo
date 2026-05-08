@@ -11,7 +11,7 @@ from socya_pipeline.errors import PipelineError, ErrorCode
 MODEL_CHAIN = [
     "nousresearch/hermes-3-llama-3.1-405b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemma-2-9b-it:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
     "qwen/qwen-2.5-72b-instruct:free",
 ]
 
@@ -136,7 +136,10 @@ class AIChain:
                 raise _Retryable("rate_limited", text[:200])
             if any(t in lower for t in TRANSIENT_TOKENS):
                 raise _Retryable("transient", text[:200])
-            raise _Fatal(f"http_{resp.status_code}: {text[:200]}")
+            # Any other non-OK HTTP (404 retired model, 401 bad auth, 400 bad request,
+            # 5xx server error not in transient list) → try next model in the chain
+            # rather than aborting. Only malformed JSON in a 200 response is truly fatal.
+            raise _Retryable(f"http_{resp.status_code}", text[:200])
 
         try:
             data = resp.json()

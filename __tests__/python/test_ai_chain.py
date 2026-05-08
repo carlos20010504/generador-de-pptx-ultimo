@@ -54,3 +54,16 @@ def test_no_api_key_raises():
     with pytest.raises(PipelineError) as exc:
         chain.call("prompt")
     assert exc.value.code == ErrorCode.AI_SATURATED
+
+def test_falls_back_on_404(patient_chain):
+    """A retired/missing model (404) should not abort the chain — try next model."""
+    not_found = _mock_response(404, {"error": {"message": "Model not found"}})
+    happy = _mock_response(200, {"choices":[{"message":{"content":"ok"}}]})
+    with patch("socya_pipeline.ai_chain.requests.post",
+               side_effect=[not_found, happy]), \
+         patch("socya_pipeline.ai_chain.time.sleep"):
+        result = patient_chain.call("prompt")
+    assert result.model == MODEL_CHAIN[1]
+    assert len(result.fallback_steps) == 1
+    assert result.fallback_steps[0]["from"] == MODEL_CHAIN[0]
+    assert "404" in result.fallback_steps[0]["reason"] or "http_404" in result.fallback_steps[0]["reason"]
