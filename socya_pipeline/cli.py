@@ -71,6 +71,60 @@ def cmd_plan(args):
                                     "Error inesperado en el planificador.",
                                     details=str(e)[:300]))
 
+def cmd_generate(args):
+    request = _load_request(args.request)
+    api_key = _resolve_api_key()
+    profile = AIProfile.PATIENT
+    try:
+        wb = parse_workbook(args.input)
+        inv = build_inventory(wb)
+        plan = plan_presentation(
+            wb, inv,
+            user_prompt=request.get("prompt", ""),
+            audience=request.get("audience", "ejecutivos"),
+            language=request.get("language", "es"),
+            api_key=api_key,
+            profile=profile,
+            file_path=Path(args.input),
+        )
+        outcome = validate_plan(plan, inv, wb)
+        if not outcome.slides:
+            raise PipelineError(
+                ErrorCode.EXCEL_INSUFFICIENT_DATA,
+                f"El Excel '{wb.filename}' no produjo slides validados.",
+                details=f"Descartados: {len(outcome.dropped)}.",
+                user_action="improve_excel_or_change_prompt",
+            )
+        rendered = extract_for_render(outcome.slides, inv, wb, args.input)
+
+        from socya_pipeline.renderer import render_pptx
+        template = Path(args.template)
+        render_pptx(rendered, plan.get("presentation_meta", {}),
+                     template_path=template, output_path=Path(args.output))
+
+        # Write audit JSON next to output
+        audit = {
+            "model_used": plan.get("_meta", {}).get("model"),
+            "cache_hit": plan.get("_meta", {}).get("cache_hit", False),
+            "fallback_chain_steps": plan.get("_meta", {}).get("fallback_steps", []),
+            "slides_planned": len(plan.get("slides", [])),
+            "slides_validated": len(outcome.slides),
+            "slides_dropped": outcome.dropped,
+            "bullets_dropped": outcome.bullets_dropped,
+            "provenance_per_slide": [s.get("provenance") for s in rendered],
+        }
+        audit_path = Path(args.output).with_suffix(".audit.json")
+        audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+
+        sys.stdout.write(json.dumps({"ok": True, "audit": audit}, ensure_ascii=False))
+    except PipelineError as e:
+        _emit_error(e)
+    except Exception as e:
+        _emit_error(PipelineError(ErrorCode.PYTHON_RUNTIME_ERROR,
+                                    "Error inesperado en la generación.",
+                                    details=str(e)[:300]))
+
 def _resolve_api_key() -> str:
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if key:
@@ -90,6 +144,12 @@ def main():
     plan_p.add_argument("--input", required=True)
     plan_p.add_argument("--request", default="{}")
     plan_p.set_defaults(func=cmd_plan)
+    gen_p = sub.add_parser("generate")
+    gen_p.add_argument("--input", required=True)
+    gen_p.add_argument("--output", required=True)
+    gen_p.add_argument("--template", required=True)
+    gen_p.add_argument("--request", default="{}")
+    gen_p.set_defaults(func=cmd_generate)
     args = p.parse_args()
     args.func(args)
 
