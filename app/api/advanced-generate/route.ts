@@ -383,13 +383,27 @@ export async function POST(req: NextRequest) {
       if (useNewPipeline) {
         const newArgs = ['-X', 'utf8', '-m', 'socya_pipeline', 'plan',
           '--input', filePath, '--request', presentationRequest];
-        const { stdout: newStdout, stderr: newStderr } = await execFileAsync('python', newArgs, {
-          encoding: 'utf8', timeout: pythonTimeoutMs, maxBuffer: 20 * 1024 * 1024,
-          windowsHide: true,
-          env: { ...process.env, PYTHONUTF8: '1', SOCYA_AI_PROFILE: 'patient' },
-        });
-        if (newStderr?.trim() && !newStdout?.trim()) throw new Error(newStderr.trim());
-        return NextResponse.json(JSON.parse(newStdout), { headers: { 'Cache-Control': 'no-store' } });
+        type ExecWithStdout = Error & { stdout?: string; stderr?: string };
+        let newStdout = '';
+        try {
+          const result = await execFileAsync('python', newArgs, {
+            encoding: 'utf8', timeout: pythonTimeoutMs, maxBuffer: 20 * 1024 * 1024,
+            windowsHide: true,
+            env: { ...process.env, PYTHONUTF8: '1', SOCYA_AI_PROFILE: 'patient' },
+          });
+          newStdout = result.stdout ?? '';
+        } catch (pipelineErr: unknown) {
+          // CLI exits with code 2 for structured PipelineErrors — stdout still has valid JSON
+          const execErr = pipelineErr as ExecWithStdout;
+          if (execErr?.stdout?.trim()) {
+            newStdout = execErr.stdout;
+          } else {
+            throw pipelineErr;
+          }
+        }
+        const parsed = JSON.parse(newStdout);
+        const httpStatus = parsed?.error ? 422 : 200;
+        return NextResponse.json(parsed, { status: httpStatus, headers: { 'Cache-Control': 'no-store' } });
       }
       // else: existing behavior continues unchanged below
 
