@@ -9,10 +9,11 @@ import requests
 from socya_pipeline.errors import PipelineError, ErrorCode
 
 MODEL_CHAIN = [
-    "nousresearch/hermes-3-llama-3.1-405b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free",
+    "openai/gpt-oss-120b:free",
+    "google/gemma-4-31b-it:free",
+    "z-ai/glm-4.5-air:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "openai/gpt-oss-20b:free",
 ]
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
