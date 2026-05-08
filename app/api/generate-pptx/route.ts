@@ -146,6 +146,47 @@ export async function POST(req: NextRequest) {
       current_date: new Date().toLocaleDateString(),
       theme,
     });
+
+    const useNewPipeline = process.env.SOCYA_USE_NEW_PIPELINE === '1';
+    if (useNewPipeline) {
+      const templatePath = path.join(process.cwd(), 'Plantilla_Presentacion_Socya (1) (1).pptx');
+      const newArgs = ['-X', 'utf8', '-m', 'socya_pipeline', 'generate',
+        '--input', inputPath, '--output', outputPath,
+        '--template', templatePath, '--request', presentationRequest];
+      try {
+        await execFileAsync('python', newArgs, {
+          encoding: 'utf8', timeout: pythonTimeoutMs, maxBuffer: 20 * 1024 * 1024,
+          windowsHide: true,
+          env: { ...process.env, PYTHONUTF8: '1', SOCYA_AI_PROFILE: 'patient' },
+        });
+      } catch (err: unknown) {
+        // The CLI exits with code 2 on PipelineError, writing JSON to stdout.
+        // execFileAsync rejects on non-zero exit. Read stdout if it has structured JSON.
+        const errObj = err as { code?: string | number; stdout?: string };
+        if (errObj?.stdout && errObj.stdout.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(errObj.stdout);
+            if (parsed?.error) {
+              return NextResponse.json(parsed, { status: 422 });
+            }
+          } catch { /* fall through */ }
+        }
+        throw err;
+      }
+
+      await fs.access(outputPath);
+      const pptxBuffer = await fs.readFile(outputPath);
+      return new NextResponse(pptxBuffer, {
+        status: 200,
+        headers: {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          'Content-Disposition': `attachment; filename="${path.basename(outputPath)}"`,
+        },
+      });
+    }
+    // else: existing legacy behavior continues unchanged below
+
     const args = ['-X', 'utf8', GENERATOR_SCRIPT_NAME, inputPath, outputPath, presentationRequest];
 
     const { stderr } = await execFileAsync('python', args, {
