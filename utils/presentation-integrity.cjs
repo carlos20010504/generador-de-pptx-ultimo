@@ -23,7 +23,6 @@ function createProcessingContext(cliInput, rootDir) {
   const auditLogFile = path.join(path.dirname(inputFile), `Presentacion_Ejecutiva_Socya_${safeBaseName}.audit.json`);
   const allowedSupportFiles = [
     path.join(rootDir, 'organizer.py'),
-    path.join(rootDir, 'generate_template_presentation.py'),
   ];
 
   return {

@@ -6,7 +6,7 @@ const execFileAsync = promisify(execFile);
 const RUNTIME_STATUS_TTL_MS = 30 * 1000;
 
 export const ORGANIZER_SCRIPT_NAME = 'organizer.py';
-export const GENERATOR_SCRIPT_NAME = 'generate_template_presentation.py';
+export const PIPELINE_MODULE = 'socya_pipeline';
 export const PPTX_ANALYZER_SCRIPT_NAME = 'analyze_presentation.py';
 export const TEMPLATE_PRESENTATION_NAME = 'Plantilla_Presentacion_Socya (1) (1).pptx';
 export type RuntimeCapability = 'analysis' | 'generation';
@@ -25,7 +25,7 @@ export interface RuntimeDependencyStatus {
   };
   scripts: {
     organizer: boolean;
-    generator: boolean;
+    pipeline: boolean;
     analyzer: boolean;
     template: boolean;
   };
@@ -41,6 +41,24 @@ function nowIso(): string {
 async function fileExists(filePath: string): Promise<boolean> {
   try {
     await fs.access(/* turbopackIgnore: true */ filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function detectPipeline(): Promise<boolean> {
+  try {
+    await execFileAsync(
+      'python',
+      ['-c', 'import socya_pipeline; from socya_pipeline import cli, parser, planner, renderer; print("ok")'],
+      {
+        encoding: 'utf8',
+        timeout: 15 * 1000,
+        windowsHide: true,
+        env: { ...process.env, PYTHONUTF8: '1' },
+      }
+    );
     return true;
   } catch {
     return false;
@@ -76,16 +94,16 @@ export async function getRuntimeDependencyStatus(forceRefresh = false): Promise<
     return cachedRuntimeStatus;
   }
 
-  const [python, organizerExists, generatorExists, analyzerExists, templateExists] = await Promise.all([
+  const [python, organizerExists, pipelineOk, analyzerExists, templateExists] = await Promise.all([
     detectPython(),
     fileExists(ORGANIZER_SCRIPT_NAME),
-    fileExists(GENERATOR_SCRIPT_NAME),
+    detectPipeline(),
     fileExists(PPTX_ANALYZER_SCRIPT_NAME),
     fileExists(TEMPLATE_PRESENTATION_NAME),
   ]);
 
   const analysisReady = python.ok && organizerExists;
-  const generationReady = analysisReady && generatorExists && templateExists;
+  const generationReady = analysisReady && pipelineOk && templateExists;
 
   const status: RuntimeDependencyStatus = {
     ok: generationReady,
@@ -97,7 +115,7 @@ export async function getRuntimeDependencyStatus(forceRefresh = false): Promise<
     python,
     scripts: {
       organizer: organizerExists,
-      generator: generatorExists,
+      pipeline: pipelineOk,
       analyzer: analyzerExists,
       template: templateExists,
     },
@@ -124,8 +142,8 @@ export function getRuntimeFailureMessage(
     return 'El backend no tiene todas sus dependencias de analisis operativas disponibles.';
   }
 
-  if (!status.scripts.generator) {
-    return 'No se encontro el script generate_template_presentation.py requerido por el backend.';
+  if (!status.scripts.pipeline) {
+    return 'El modulo socya_pipeline no esta disponible en el entorno Python del backend.';
   }
 
   if (!status.scripts.template) {
