@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { MAX_EXCEL_UPLOAD_BYTES, getMaxExcelUploadSizeMb, validateExcelUpload } from '@/utils/excel-file';
 import { getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
 import panelUtils from '../../../utils/excel-ai-panel.cjs';
+import { makeSSEStream, sseHeaders } from '@/utils/sse-stream';
 
 const execFileAsync = promisify(execFile);
 const { buildProcessingProfile } = panelUtils as {
@@ -16,9 +18,24 @@ const { buildProcessingProfile } = panelUtils as {
 export const runtime = 'nodejs';
 export const maxDuration = 1800;
 
-type ExecFileError = Error & { code?: string; killed?: boolean; stderr?: string };
-
 const MAX_MULTIPART_SIZE_BYTES = MAX_EXCEL_UPLOAD_BYTES + 1024 * 1024;
+
+type PendingEntry = {
+  outputPath: string;
+  tempDir: string;
+  filename: string;
+  expires: number;
+};
+
+// In-memory pending downloads (token → file paths + expiry).
+// Stored on globalThis so it survives HMR reloads in dev.
+const PENDING: Map<string, PendingEntry> = (() => {
+  const g = globalThis as Record<string, unknown>;
+  if (!g.__SOCYA_PENDING__) {
+    g.__SOCYA_PENDING__ = new Map<string, PendingEntry>();
+  }
+  return g.__SOCYA_PENDING__ as Map<string, PendingEntry>;
+})();
 
 function sanitizeUploadName(fileName: string): string {
   const parsed = path.parse(fileName);
@@ -30,32 +47,13 @@ function sanitizeUploadName(fileName: string): string {
 function buildOutputPath(inputPath: string): string {
   const ext = path.extname(inputPath);
   const base = path.basename(inputPath, ext).replace(/[^a-zA-Z0-9_-]+/g, '_');
-  const outputName = `Presentacion_Ejecutiva_Socya_${base}.pptx`;
-  return path.join(path.dirname(inputPath), outputName);
+  return path.join(path.dirname(inputPath), `Presentacion_Ejecutiva_Socya_${base}.pptx`);
 }
 
-function isTimedOut(error: unknown): error is ExecFileError {
-  return Boolean(
-    error &&
-    typeof error === 'object' &&
-    ('code' in error || 'killed' in error) &&
-    (((error as ExecFileError).code === 'ETIMEDOUT') || Boolean((error as ExecFileError).killed))
-  );
-}
-
-function getExecErrorMessage(error: unknown): string {
-  if (!error || typeof error !== 'object') {
-    return 'Error generando la presentación premium.';
-  }
-
-  const execError = error as ExecFileError;
-  const stderrMessage = String(execError.stderr || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .pop();
-
-  return stderrMessage || execError.message || 'Error generando la presentación premium.';
+function buildExtendedTimeoutMs(baseTimeoutMs: number): number {
+  const aiWaitBufferMs = 12 * 60 * 1000;
+  const routeBudgetMs = 28 * 60 * 1000;
+  return Math.max(baseTimeoutMs, Math.min(baseTimeoutMs + aiWaitBufferMs, routeBudgetMs));
 }
 
 function parseTheme(value: FormDataEntryValue | null) {
@@ -69,125 +67,214 @@ function parseTheme(value: FormDataEntryValue | null) {
   }
 }
 
-function buildExtendedTimeoutMs(baseTimeoutMs: number): number {
-  const aiWaitBufferMs = 12 * 60 * 1000;
-  const routeBudgetMs = 28 * 60 * 1000;
-  return Math.max(baseTimeoutMs, Math.min(baseTimeoutMs + aiWaitBufferMs, routeBudgetMs));
-}
-
 export async function POST(req: NextRequest) {
-  let tempDir = '';
-  let inputPath = '';
-  let outputPath = '';
+  const depStatus = await getRuntimeDependencyStatus(false);
+  if (!depStatus.capabilities.generation) {
+    return NextResponse.json(
+      {
+        error: {
+          code: 'PYTHON_RUNTIME_ERROR',
+          message: getRuntimeFailureMessage(depStatus, 'generation'),
+          user_action: 'report_bug',
+        },
+      },
+      { status: 503 }
+    );
+  }
 
-  try {
-    const depStatus = await getRuntimeDependencyStatus(false);
-    if (!depStatus.capabilities.generation) {
-      return NextResponse.json({ error: getRuntimeFailureMessage(depStatus, 'generation') }, { status: 503 });
-    }
+  const contentLength = Number(req.headers.get('content-length') ?? 0);
+  if (contentLength > MAX_MULTIPART_SIZE_BYTES) {
+    return NextResponse.json(
+      {
+        error: {
+          code: 'EXCEL_INVALID',
+          message: `La solicitud excede ${getMaxExcelUploadSizeMb()} MB.`,
+          user_action: 'upload_smaller',
+        },
+      },
+      { status: 413 }
+    );
+  }
 
-    const contentLength = Number(req.headers.get('content-length') ?? 0);
-    if (contentLength > MAX_MULTIPART_SIZE_BYTES) {
-      return NextResponse.json(
-        { error: `La solicitud excede el limite permitido de ${getMaxExcelUploadSizeMb()} MB.` },
-        { status: 413 }
-      );
-    }
+  const formData = await req.formData();
+  const file = formData.get('file');
+  const userPrompt = String(formData.get('userPrompt') ?? '').trim();
+  const audience = String(formData.get('audience') ?? 'ejecutivos').trim();
+  const language = String(formData.get('language') ?? 'Español').trim();
+  const theme = parseTheme(formData.get('theme'));
 
-    const formData = await req.formData();
-    const file = formData.get('file');
-    const userPrompt = String(formData.get('userPrompt') ?? '').trim();
-    const audience = String(formData.get('audience') ?? 'ejecutivos').trim();
-    const language = String(formData.get('language') ?? 'Español').trim();
-    const theme = parseTheme(formData.get('theme'));
+  if (!(file instanceof File)) {
+    return NextResponse.json(
+      {
+        error: {
+          code: 'EXCEL_INVALID',
+          message: 'No se subió ningún archivo Excel válido.',
+          user_action: 'upload_again',
+        },
+      },
+      { status: 400 }
+    );
+  }
 
-    if (!(file instanceof File)) {
-      return NextResponse.json({ error: 'No se subió ningún archivo Excel válido.' }, { status: 400 });
-    }
+  const validationError = validateExcelUpload(file);
+  if (validationError) {
+    return NextResponse.json(
+      { error: { code: 'EXCEL_INVALID', message: validationError, user_action: 'upload_again' } },
+      { status: 400 }
+    );
+  }
 
-    const validationError = validateExcelUpload(file);
-    if (validationError) {
-      return NextResponse.json({ error: validationError }, { status: 400 });
-    }
+  const processingProfile = buildProcessingProfile({ fileSizeBytes: file.size, userPrompt });
+  const pythonTimeoutMs = buildExtendedTimeoutMs(processingProfile.timeoutMs);
 
-    const processingProfile = buildProcessingProfile({
-      fileSizeBytes: file.size,
-      userPrompt,
-    });
-    const pythonTimeoutMs = buildExtendedTimeoutMs(processingProfile.timeoutMs);
+  // Read file bytes before handing off to background — the File object may not be
+  // accessible once the async boundary is crossed.
+  const fileBytes = await file.arrayBuffer();
+  const fileName = file.name;
 
-    tempDir = await fs.mkdtemp(path.join(/* turbopackIgnore: true */ os.tmpdir(), 'socya-pptx-'));
-    inputPath = path.join(tempDir, sanitizeUploadName(file.name));
-    outputPath = buildOutputPath(inputPath);
+  const { stream, send, close } = makeSSEStream();
 
-    const bytes = await file.arrayBuffer();
-    await fs.writeFile(/* turbopackIgnore: true */ inputPath, Buffer.from(bytes));
-
-    const presentationRequest = JSON.stringify({
-      prompt: userPrompt,
-      audience,
-      language,
-      current_date: new Date().toLocaleDateString(),
-      theme,
-    });
-
-    const templatePath = path.join(process.cwd(), 'Plantilla_Presentacion_Socya (1) (1).pptx');
-    const newArgs = ['-X', 'utf8', '-m', 'socya_pipeline', 'generate',
-      '--input', inputPath, '--output', outputPath,
-      '--template', templatePath, '--request', presentationRequest];
+  // Run generation in background — fire and forget relative to the SSE Response.
+  void (async () => {
+    let tempDir = '';
+    let inputPath = '';
+    let outputPath = '';
     try {
-      await execFileAsync('python', newArgs, {
-        encoding: 'utf8', timeout: pythonTimeoutMs, maxBuffer: 20 * 1024 * 1024,
-        windowsHide: true,
-        env: { ...process.env, PYTHONUTF8: '1', SOCYA_AI_PROFILE: 'patient' },
+      send({ phase: 'parsing', step: '1/5', message: 'Leyendo Excel…' });
+
+      tempDir = await fs.mkdtemp(path.join(/* turbopackIgnore: true */ os.tmpdir(), 'socya-pptx-'));
+      inputPath = path.join(tempDir, sanitizeUploadName(fileName));
+      outputPath = buildOutputPath(inputPath);
+      await fs.writeFile(/* turbopackIgnore: true */ inputPath, Buffer.from(fileBytes));
+
+      send({ phase: 'inventory', step: '2/5', message: 'Construyendo inventario…' });
+      send({ phase: 'planning', step: '3/5', message: 'Consultando IA…' });
+
+      const presentationRequest = JSON.stringify({
+        prompt: userPrompt,
+        audience,
+        language,
+        current_date: new Date().toLocaleDateString(),
+        theme,
+      });
+
+      const templatePath = path.join(process.cwd(), 'Plantilla_Presentacion_Socya (1) (1).pptx');
+      const args = [
+        '-X', 'utf8', '-m', 'socya_pipeline', 'generate',
+        '--input', inputPath, '--output', outputPath,
+        '--template', templatePath, '--request', presentationRequest,
+      ];
+
+      try {
+        await execFileAsync('python', args, {
+          encoding: 'utf8',
+          timeout: pythonTimeoutMs,
+          maxBuffer: 20 * 1024 * 1024,
+          windowsHide: true,
+          env: { ...process.env, PYTHONUTF8: '1', SOCYA_AI_PROFILE: 'patient' },
+        });
+      } catch (err: unknown) {
+        // The CLI exits with code 2 on PipelineError, writing JSON to stdout.
+        const errObj = err as { stdout?: string };
+        if (errObj?.stdout && errObj.stdout.trim().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(errObj.stdout) as { error?: { message?: string } };
+            if (parsed?.error) {
+              send({
+                phase: 'error',
+                message: parsed.error.message ?? 'Error en el pipeline',
+                data: parsed.error,
+              });
+              return;
+            }
+          } catch { /* fall through */ }
+        }
+        throw err;
+      }
+
+      send({ phase: 'validating', step: '4/5', message: 'Validando datos…' });
+      send({ phase: 'rendering', step: '5/5', message: 'Renderizando PPTX…' });
+
+      // Read audit JSON written by the CLI alongside the pptx (best-effort).
+      const auditPath = outputPath.replace(/\.pptx$/i, '.audit.json');
+      let audit: unknown = null;
+      try {
+        const auditText = await fs.readFile(/* turbopackIgnore: true */ auditPath, 'utf-8');
+        audit = JSON.parse(auditText);
+      } catch { /* audit is best-effort */ }
+
+      const token = randomUUID();
+      PENDING.set(token, {
+        outputPath,
+        tempDir,
+        filename: path.basename(outputPath),
+        expires: Date.now() + 5 * 60_000,
+      });
+
+      send({
+        phase: 'done',
+        message: 'Listo.',
+        data: {
+          downloadToken: token,
+          filename: path.basename(outputPath),
+          audit,
+        },
       });
     } catch (err: unknown) {
-      // The CLI exits with code 2 on PipelineError, writing JSON to stdout.
-      // execFileAsync rejects on non-zero exit. Read stdout if it has structured JSON.
-      const errObj = err as { code?: string | number; stdout?: string };
-      if (errObj?.stdout && errObj.stdout.trim().startsWith('{')) {
-        try {
-          const parsed = JSON.parse(errObj.stdout);
-          if (parsed?.error) {
-            return NextResponse.json(parsed, { status: 422 });
-          }
-        } catch { /* fall through */ }
+      const message = err instanceof Error ? err.message : 'Error inesperado';
+      send({
+        phase: 'error',
+        message,
+        data: { code: 'PYTHON_RUNTIME_ERROR', message, user_action: 'report_bug' },
+      });
+      // Clean up on error — tempDir cleanup is safe here since no GET will follow.
+      if (tempDir) {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
       }
-      throw err;
+    } finally {
+      close();
     }
+  })();
 
-    await fs.access(outputPath);
-    const pptxBuffer = await fs.readFile(outputPath);
-    return new NextResponse(pptxBuffer, {
+  return new Response(stream, { headers: sseHeaders() });
+}
+
+export async function GET(req: NextRequest) {
+  const token = new URL(req.url).searchParams.get('token');
+  const entry = token ? PENDING.get(token) : null;
+
+  if (!entry || entry.expires < Date.now()) {
+    return NextResponse.json(
+      { error: { code: 'TIMEOUT', message: 'Token expirado o desconocido.', user_action: 'retry' } },
+      { status: 404 }
+    );
+  }
+
+  PENDING.delete(token!);
+
+  try {
+    const buffer = await fs.readFile(/* turbopackIgnore: true */ entry.outputPath);
+    // Cleanup tempDir asynchronously — after the response is sent.
+    void fs.rm(entry.tempDir, { recursive: true, force: true }).catch(() => {});
+    return new NextResponse(buffer as unknown as BodyInit, {
       status: 200,
       headers: {
         'Cache-Control': 'no-store',
-        'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        'Content-Disposition': `attachment; filename="${path.basename(outputPath)}"`,
+        'Content-Type':
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'Content-Disposition': `attachment; filename="${entry.filename}"`,
       },
     });
-  } catch (error: unknown) {
-    console.error('[generate-pptx] Error:', error);
-    if (isTimedOut(error)) {
-      return NextResponse.json(
-        { error: 'La generacion del PowerPoint excedio el tiempo permitido. Intenta de nuevo o usa un Excel mas pequeno si el archivo es especialmente pesado.' },
-        { status: 504 }
-      );
-    }
-    const message = getExecErrorMessage(error);
-    const status = /solo de gráficas|solo gráficas|solo de tablas|solo tablas|datos tabulares válidos|datos válidos|no se puede organizar/i.test(message) ? 422 : 500;
+  } catch {
     return NextResponse.json(
-      { error: message },
-      { status }
+      {
+        error: {
+          code: 'PYTHON_RUNTIME_ERROR',
+          message: 'Archivo no disponible.',
+          user_action: 'retry',
+        },
+      },
+      { status: 404 }
     );
-  } finally {
-    await Promise.all([
-      outputPath ? fs.unlink(/* turbopackIgnore: true */ outputPath).catch(() => {}) : Promise.resolve(),
-      inputPath ? fs.unlink(/* turbopackIgnore: true */ inputPath).catch(() => {}) : Promise.resolve(),
-    ]);
-
-    if (tempDir) {
-      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
-    }
   }
 }
