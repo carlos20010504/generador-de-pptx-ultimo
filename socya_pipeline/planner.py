@@ -9,7 +9,7 @@ from socya_pipeline.errors import PipelineError, ErrorCode
 from socya_pipeline.inventory import Block
 from socya_pipeline.parser import WorkbookData
 
-PLANNER_VERSION = "p1"  # bump when prompt template changes — invalidates cache
+PLANNER_VERSION = "p2"  # bump when prompt template changes — invalidates cache
 
 MAX_PAYLOAD_CHARS = 24_000  # rough 6K-token budget (~4 chars/token)
 MAX_SAMPLES_PER_COL = 8
@@ -74,28 +74,58 @@ def _block_payload(b: Block) -> dict:
             **{k: v for k, v in b.extra.items() if k != "raw"}}
 
 
-PROMPT_TEMPLATE = """Eres un planificador de presentaciones ejecutivas que genera slides a partir de datos reales de Excel.
+PROMPT_TEMPLATE = """Eres un director de arte que diseña presentaciones ejecutivas tipo McKinsey/BCG a partir de datos reales de Excel. Tu trabajo es producir un deck **rico, completo y narrativamente coherente**.
 
-Reglas estrictas:
-1. Cada slide DEBE referenciar bloques existentes por su `id` (campo `block_ref` o `block_refs`).
-2. NO inventes números, nombres ni hechos. Si necesitas un dato, viene del bloque referenciado.
-3. Si el prompt del usuario pide algo que los bloques no soportan, omite ese slide.
-4. Bullets deben ser específicos (con cifras o nombres del bloque). No bullets genéricos como "los datos muestran variabilidad".
-5. Devuelve EXCLUSIVAMENTE un JSON válido con esta forma exacta:
+REGLAS CRÍTICAS:
+
+1. **Volumen**: produce entre 7 y 11 slides en total. Una sola portada + 6-10 slides de contenido. NO pocos slides.
+
+2. **Procedencia obligatoria**: cada slide DEBE referenciar bloques existentes por su `id` (`block_ref`, `block_refs`, o `supports_block`). NUNCA inventes IDs.
+
+3. **CERO alucinaciones**: ningún número, nombre, fecha, porcentaje en el JSON puede ser inventado. Si va en un `narrative` o `bullets`, debe existir en el bloque referenciado (`samples`, `top_values`, `min/max/mean/sum`, o `first_rows`).
+
+4. **Bullets específicos**: cada bullet DEBE contener al menos una cifra concreta o un nombre propio del bloque. PROHIBIDO bullets genéricos como "los datos muestran variabilidad", "se observa una tendencia positiva", "es importante revisar".
+
+5. **Narrativas con cifras**: en cada `chart`, la `narrative` debe nombrar al menos 2 categorías con sus valores exactos. Ej: "Bogotá lidera con 53 ventas, seguido de Medellín con 23".
+
+6. **Estructura recomendada** (ordenada para máximo impacto):
+   - 1 slide `title` (portada)
+   - 1 slide `kpi_row` con 2-4 KPIs principales (preferir bloques `K*` numéricos no-ID, sobre todo currency)
+   - 2-3 slides `chart` con distintos cortes (diferentes `block_refs` C* o S*)
+   - 1-2 slides `table` con cortes detallados (T*) — usa `columns_subset` para mostrar solo las 4-6 columnas más relevantes, no todas
+   - 1-2 slides `text_bullets` con hallazgos accionables (`supports_block` = T*, bullets con cifras)
+
+7. **Variedad visual**: si tienes ≥2 distribuciones categóricas, usa una `bar` y una `pie`. Si hay serie temporal, hazle un `line`.
+
+8. **Calidad de KPIs**: prefiere bloques `K*` cuyo nombre **no** contenga "id", "código", "número", "folio", "consecutivo". Esos son identificadores, no KPIs.
+
+9. **Títulos editorial**: títulos atractivos en español ("Tendencia mensual de ingresos", no "Gráfica de Datos"). Subtítulos opcionales con contexto adicional.
+
+10. **JSON estricto y único**: devuelve EXCLUSIVAMENTE un JSON válido (sin markdown, sin texto adicional) con esta forma exacta:
 
 {{
-  "presentation_meta": {{ "title": "...", "subtitle": "..." }},
+  "presentation_meta": {{ "title": "Título atractivo del deck", "subtitle": "Subtítulo con contexto" }},
   "slides": [
-    {{ "type": "title", "title": "...", "subtitle": "..." }},
-    {{ "type": "kpi_row", "title": "...", "block_refs": ["K1", "K2"] }},
-    {{ "type": "chart", "chart_type": "bar|line|pie", "title": "...",
-       "block_ref": "C1", "narrative": "una frase basada en el bloque" }},
-    {{ "type": "table", "title": "...", "block_ref": "T1",
-       "columns_subset": ["..."], "max_rows": 12 }},
-    {{ "type": "text_bullets", "title": "...", "supports_block": "T1",
-       "bullets": ["bullet con cifra", "bullet con nombre"] }}
+    {{ "type": "title", "data": {{ "title": "Título portada", "subtitle": "Bajada" }} }},
+    {{ "type": "kpi_row", "title": "Indicadores Clave", "block_refs": ["K1","K2","K3"] }},
+    {{ "type": "chart", "chart_type": "bar", "title": "Distribución por Ciudad",
+       "block_ref": "C1", "narrative": "Bogotá concentra 53 registros (53%), seguida por Medellín (23%) y Cali (15%)." }},
+    {{ "type": "chart", "chart_type": "pie", "title": "Composición por Estado",
+       "block_ref": "C2", "narrative": "El 75% está en estado CONTABILIZADO, mientras 13% está RECHAZADO." }},
+    {{ "type": "table", "title": "Detalle Operativo", "block_ref": "T1",
+       "columns_subset": ["Mes","Total","Ciudad","Estado"], "max_rows": 10 }},
+    {{ "type": "text_bullets", "title": "Hallazgos Accionables", "supports_block": "T1",
+       "bullets": [
+         "El monto máximo individual asciende a $1.000.000 en ANTIOQUIA - EL BAGRE.",
+         "Existen 192 comisiones en estado RECHAZADO que requieren revisión.",
+         "La concentración geográfica se ubica en MEDELLÍN con el mayor número de registros."
+       ] }}
   ],
-  "prompt_suggestions": ["sugerencia 1", "sugerencia 2", "sugerencia 3"]
+  "prompt_suggestions": [
+    "Detalla el análisis por trimestre",
+    "Compara montos por centro de costos",
+    "Resalta los 5 solicitantes con mayor monto"
+  ]
 }}
 
 Datos disponibles:

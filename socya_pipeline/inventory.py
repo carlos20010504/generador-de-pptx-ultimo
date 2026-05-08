@@ -41,21 +41,33 @@ def build_inventory(wb: WorkbookData) -> List[Block]:
             extra={"shape": list(sheet.shape), "fill_ratio": sheet.fill_ratio},
         ))
 
-        # 2. KPI candidates (numeric/currency aggregations)
+        # 2. KPI candidates (numeric/currency aggregations) — skip ID-like columns
         for col in sheet.columns:
             if col.dtype in ("numeric", "currency") and col.fill_ratio >= 0.5:
+                if _is_id_like(col, sheet.shape[0]):
+                    continue
                 counter["K"] += 1
                 bid = f"K{counter['K']}"
                 flags = set()
                 if col.sum is not None and col.sum == 0:
                     flags.add("all_zero")
+                # Currency cols → sum aggregation. Other numerics → mean (more
+                # meaningful than sum for things like "days", "ages", "scores").
+                if col.dtype == "currency":
+                    label = f"Total de {col.name.strip()}"
+                    value = col.sum
+                    agg = "sum"
+                else:
+                    label = f"Promedio de {col.name.strip()}"
+                    value = col.mean
+                    agg = "mean"
                 blocks.append(Block(
                     id=bid, kind="kpi_candidate",
-                    label=f"Suma de {col.name}",
+                    label=label,
                     provenance=Provenance(sheet=sheet.name, columns=[col.name],
                                           rows=(0, sheet.shape[0] - 1)),
                     quality_flags=flags,
-                    extra={"agg": "sum", "value": col.sum,
+                    extra={"agg": agg, "value": value,
                             "min": col.min, "max": col.max, "mean": col.mean},
                 ))
 
@@ -94,3 +106,23 @@ def build_inventory(wb: WorkbookData) -> List[Block]:
                 ))
 
     return blocks
+
+
+_ID_NAME_TOKENS = ("id", "código", "codigo", "número", "numero", "n°", "no.",
+                    "folio", "consecutivo", "uuid", "key")
+
+def _is_id_like(col, n_rows: int) -> bool:
+    """A column is 'ID-like' (and a bad KPI candidate) when its name signals an
+    identifier (id, código, número, folio, consecutivo). Currency columns are
+    NEVER IDs — currency uniqueness reflects per-row value, not identifier."""
+    if col.dtype == "currency":
+        return False
+    name = (col.name or "").strip().lower()
+    for token in _ID_NAME_TOKENS:
+        if (name == token
+                or name.startswith(token + " ")
+                or name.endswith(" " + token)
+                or f"_{token}" in name
+                or f" {token} " in f" {name} "):
+            return True
+    return False

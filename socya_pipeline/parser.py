@@ -49,6 +49,7 @@ def parse_workbook(path) -> WorkbookData:
             df = xls.parse(sheet_name)
         except Exception:
             continue
+        df = _promote_real_headers(xls, sheet_name, df)
         sheets.append(_summarize_sheet(sheet_name, df))
 
     if not sheets:
@@ -59,6 +60,46 @@ def parse_workbook(path) -> WorkbookData:
         )
 
     return WorkbookData(filename=p.name, sheets=sheets)
+
+
+def _promote_real_headers(xls, sheet_name: str, df: pd.DataFrame) -> pd.DataFrame:
+    """If pandas inferred 'Unnamed: N' headers (common when row 0 is a title or the
+    sheet has merged-cell title rows), scan the first 10 rows for the first row
+    where >=50% cells are non-numeric strings — that is the real header row.
+    Re-read with header=that row.
+    """
+    cols = [str(c) for c in df.columns]
+    unnamed_ratio = sum(1 for c in cols if c.startswith("Unnamed:")) / max(1, len(cols))
+    if unnamed_ratio < 0.3:
+        return df  # headers look fine
+
+    # Scan first 10 rows for a likely header row
+    scan_rows = min(10, len(df))
+    for i in range(scan_rows):
+        row = df.iloc[i]
+        non_null = [v for v in row if pd.notna(v)]
+        if len(non_null) < max(2, len(cols) * 0.5):
+            continue
+        # A header row has mostly strings, not numbers
+        string_cells = sum(1 for v in non_null
+                           if isinstance(v, str) and not _looks_numeric(v))
+        if string_cells / len(non_null) >= 0.7:
+            try:
+                # df.iloc[i] is row (i+1) in the source file because pandas
+                # consumed row 0 as the default header.
+                return xls.parse(sheet_name, header=i + 1)
+            except Exception:
+                return df
+    return df
+
+
+def _looks_numeric(s: str) -> bool:
+    s = s.strip().replace(",", ".").replace("$", "").replace("%", "")
+    try:
+        float(s)
+        return True
+    except (ValueError, AttributeError):
+        return False
 
 
 def _summarize_sheet(name: str, df: pd.DataFrame) -> SheetData:

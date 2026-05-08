@@ -17,9 +17,10 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
     for slide in validated_slides:
         stype = slide.get("type")
         if stype == "title":
+            existing = slide.get("data") or {}
             rendered.append({**slide, "data": {
-                "title": slide.get("title", ""),
-                "subtitle": slide.get("subtitle", ""),
+                "title": existing.get("title") or slide.get("title", ""),
+                "subtitle": existing.get("subtitle") or slide.get("subtitle", ""),
             }})
             continue
 
@@ -43,7 +44,17 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
                 value = b.extra.get("value")
                 if value is None:
                     continue
-                kpis.append({"label": b.label, "value": _format_kpi_value(value)})
+                # Build a contextual description: range or mean
+                description = ""
+                agg = b.extra.get("agg")
+                if agg == "sum":
+                    description = "Acumulado total"
+                elif agg == "mean" and b.extra.get("min") is not None:
+                    description = (f"Rango: {_format_kpi_value(b.extra.get('min'))} – "
+                                    f"{_format_kpi_value(b.extra.get('max'))}")
+                kpis.append({"label": b.label,
+                              "value": _format_kpi_value(value),
+                              "description": description})
             if kpis:
                 rendered.append({**slide, "data": {"kpis": kpis}})
 
@@ -55,15 +66,27 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
         elif stype == "table":
             cols = slide.get("columns_subset") or block.provenance.columns
             cols = [c for c in cols if c in df.columns]
-            sub = df[cols].copy()
-            sub = _clean_dataframe(sub)
-            max_rows = int(slide.get("max_rows") or 12)
-            if sub.empty or len(sub.columns) < 2:
+            # Fallback: if AI's columns_subset doesn't match the sheet, take
+            # the first non-ugly columns from the block's provenance.
+            if not cols:
+                cols = [c for c in block.provenance.columns if c in df.columns][:6]
+            if not cols:
                 continue
-            sub = sub.head(max_rows)
+            sub = df[cols].copy()
+            cleaned = _clean_dataframe(sub)
+            # If cleanup wiped almost everything, fall back to the lightly-cleaned
+            # version (still no ugly literals, just no fill-ratio drops).
+            if cleaned.empty or len(cleaned.columns) < 2:
+                cleaned = sub.copy()
+                cleaned = cleaned.applymap(_simple_clean) if hasattr(cleaned, 'applymap') \
+                    else cleaned.map(_simple_clean)
+            if cleaned.empty or len(cleaned.columns) < 1:
+                continue
+            max_rows = int(slide.get("max_rows") or 12)
+            cleaned = cleaned.head(max_rows)
             rendered.append({**slide, "data": {
-                "headers": list(sub.columns),
-                "rows": sub.values.tolist(),
+                "headers": list(cleaned.columns),
+                "rows": cleaned.values.tolist(),
             }})
 
         elif stype == "text_bullets":
@@ -72,6 +95,18 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
                 rendered.append({**slide, "data": {"bullets": bullets}})
 
     return rendered
+
+
+def _simple_clean(v):
+    """Strip ugly literals only — no row/column dropping."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and math.isnan(v):
+        return ""
+    s = str(v).strip()
+    if s.lower() in UGLY_LITERALS_LOWER:
+        return ""
+    return s
 
 
 def _format_kpi_value(value):
