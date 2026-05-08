@@ -5,7 +5,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { MAX_EXCEL_UPLOAD_BYTES, getMaxExcelUploadSizeMb, validateExcelUpload } from '@/utils/excel-file';
-import { GENERATOR_SCRIPT_NAME, getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
+import { getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
 import panelUtils from '../../../utils/excel-ai-panel.cjs';
 
 const execFileAsync = promisify(execFile);
@@ -16,15 +16,9 @@ const { buildProcessingProfile } = panelUtils as {
 export const runtime = 'nodejs';
 export const maxDuration = 1800;
 
-type VisualMode = 'charts' | 'tables' | 'mixed' | 'boardroom';
 type ExecFileError = Error & { code?: string; killed?: boolean; stderr?: string };
 
 const MAX_MULTIPART_SIZE_BYTES = MAX_EXCEL_UPLOAD_BYTES + 1024 * 1024;
-function normalizeVisualMode(value: FormDataEntryValue | null): VisualMode {
-  const raw = String(value ?? '').trim().toLowerCase();
-  if (raw === 'charts' || raw === 'tables' || raw === 'mixed' || raw === 'boardroom') return raw;
-  return 'boardroom';
-}
 
 function sanitizeUploadName(fileName: string): string {
   const parsed = path.parse(fileName);
@@ -62,15 +56,6 @@ function getExecErrorMessage(error: unknown): string {
     .pop();
 
   return stderrMessage || execError.message || 'Error generando la presentación premium.';
-}
-
-function getRelevantPythonWarnings(stderr: string): string[] {
-  return stderr
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => !/^INFO:\s+Error cargando OpenRouter:/i.test(line))
-    .filter((line) => !/^INFO:\s+Error en fallback de OpenRouter/i.test(line));
 }
 
 function parseTheme(value: FormDataEntryValue | null) {
@@ -111,7 +96,6 @@ export async function POST(req: NextRequest) {
 
     const formData = await req.formData();
     const file = formData.get('file');
-    const visualMode = normalizeVisualMode(formData.get('visualMode'));
     const userPrompt = String(formData.get('userPrompt') ?? '').trim();
     const audience = String(formData.get('audience') ?? 'ejecutivos').trim();
     const language = String(formData.get('language') ?? 'Español').trim();
@@ -147,76 +131,39 @@ export async function POST(req: NextRequest) {
       theme,
     });
 
-    const useNewPipeline = process.env.SOCYA_USE_NEW_PIPELINE === '1';
-    if (useNewPipeline) {
-      const templatePath = path.join(process.cwd(), 'Plantilla_Presentacion_Socya (1) (1).pptx');
-      const newArgs = ['-X', 'utf8', '-m', 'socya_pipeline', 'generate',
-        '--input', inputPath, '--output', outputPath,
-        '--template', templatePath, '--request', presentationRequest];
-      try {
-        await execFileAsync('python', newArgs, {
-          encoding: 'utf8', timeout: pythonTimeoutMs, maxBuffer: 20 * 1024 * 1024,
-          windowsHide: true,
-          env: { ...process.env, PYTHONUTF8: '1', SOCYA_AI_PROFILE: 'patient' },
-        });
-      } catch (err: unknown) {
-        // The CLI exits with code 2 on PipelineError, writing JSON to stdout.
-        // execFileAsync rejects on non-zero exit. Read stdout if it has structured JSON.
-        const errObj = err as { code?: string | number; stdout?: string };
-        if (errObj?.stdout && errObj.stdout.trim().startsWith('{')) {
-          try {
-            const parsed = JSON.parse(errObj.stdout);
-            if (parsed?.error) {
-              return NextResponse.json(parsed, { status: 422 });
-            }
-          } catch { /* fall through */ }
-        }
-        throw err;
-      }
-
-      await fs.access(outputPath);
-      const pptxBuffer = await fs.readFile(outputPath);
-      return new NextResponse(pptxBuffer, {
-        status: 200,
-        headers: {
-          'Cache-Control': 'no-store',
-          'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-          'Content-Disposition': `attachment; filename="${path.basename(outputPath)}"`,
-        },
+    const templatePath = path.join(process.cwd(), 'Plantilla_Presentacion_Socya (1) (1).pptx');
+    const newArgs = ['-X', 'utf8', '-m', 'socya_pipeline', 'generate',
+      '--input', inputPath, '--output', outputPath,
+      '--template', templatePath, '--request', presentationRequest];
+    try {
+      await execFileAsync('python', newArgs, {
+        encoding: 'utf8', timeout: pythonTimeoutMs, maxBuffer: 20 * 1024 * 1024,
+        windowsHide: true,
+        env: { ...process.env, PYTHONUTF8: '1', SOCYA_AI_PROFILE: 'patient' },
       });
-    }
-    // else: existing legacy behavior continues unchanged below
-
-    const args = ['-X', 'utf8', GENERATOR_SCRIPT_NAME, inputPath, outputPath, presentationRequest];
-
-    const { stderr } = await execFileAsync('python', args, {
-      encoding: 'utf8',
-      maxBuffer: 20 * 1024 * 1024,
-      timeout: pythonTimeoutMs,
-      windowsHide: true,
-      env: {
-        ...process.env,
-        PYTHONUTF8: '1',
-        SOCYA_AI_PROFILE: 'patient',
-        SOCYA_PRESENTATION_MODE: visualMode,
-      },
-    });
-
-    const relevantWarnings = stderr?.trim() ? getRelevantPythonWarnings(stderr) : [];
-    if (relevantWarnings.length > 0) {
-      console.warn('[generate-pptx] stderr:', relevantWarnings.join('\n'));
+    } catch (err: unknown) {
+      // The CLI exits with code 2 on PipelineError, writing JSON to stdout.
+      // execFileAsync rejects on non-zero exit. Read stdout if it has structured JSON.
+      const errObj = err as { code?: string | number; stdout?: string };
+      if (errObj?.stdout && errObj.stdout.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(errObj.stdout);
+          if (parsed?.error) {
+            return NextResponse.json(parsed, { status: 422 });
+          }
+        } catch { /* fall through */ }
+      }
+      throw err;
     }
 
-    await fs.access(/* turbopackIgnore: true */ outputPath);
-    const pptxBuffer = await fs.readFile(/* turbopackIgnore: true */ outputPath);
-    const downloadName = path.basename(outputPath);
-
+    await fs.access(outputPath);
+    const pptxBuffer = await fs.readFile(outputPath);
     return new NextResponse(pptxBuffer, {
       status: 200,
       headers: {
         'Cache-Control': 'no-store',
         'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        'Content-Disposition': `attachment; filename="${downloadName}"`,
+        'Content-Disposition': `attachment; filename="${path.basename(outputPath)}"`,
       },
     });
   } catch (error: unknown) {

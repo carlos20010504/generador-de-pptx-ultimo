@@ -5,12 +5,11 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { MAX_EXCEL_UPLOAD_BYTES, getMaxExcelUploadSizeMb, validateExcelUpload } from '@/utils/excel-file';
-import { ORGANIZER_SCRIPT_NAME, getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
+import { getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/server-runtime';
 import panelUtils from '../../../utils/excel-ai-panel.cjs';
 
 const execFileAsync = promisify(execFile);
-const { buildExcelIntelligenceReport, buildProcessingProfile } = panelUtils as {
-  buildExcelIntelligenceReport: (payload: Record<string, unknown>) => Record<string, unknown>;
+const { buildProcessingProfile } = panelUtils as {
   buildProcessingProfile: (payload: Record<string, unknown>) => { timeoutMs: number };
 };
 
@@ -122,49 +121,84 @@ export async function POST(req: NextRequest) {
       current_date: new Date().toLocaleDateString(),
       theme,
     });
-    const args = ['-X', 'utf8', ORGANIZER_SCRIPT_NAME, '--panel-report', inputPath, presentationRequest];
 
-    const { stdout, stderr } = await execFileAsync('python', args, {
-      encoding: 'utf8',
-      timeout: pythonTimeoutMs,
-      maxBuffer: 30 * 1024 * 1024,
-      windowsHide: true,
-      env: {
-        ...process.env,
-        PYTHONUTF8: '1',
-        SOCYA_AI_PROFILE: 'fast',
-      },
-    });
+    const args = ['-X', 'utf8', '-m', 'socya_pipeline', 'plan',
+      '--input', inputPath, '--request', presentationRequest];
 
-    if (stderr?.trim() && !stdout?.trim()) {
-      throw new Error(stderr.trim());
+    type ExecWithStdout = Error & { stdout?: string; stderr?: string };
+    let pipelineStdout = '';
+    try {
+      const result = await execFileAsync('python', args, {
+        encoding: 'utf8',
+        timeout: pythonTimeoutMs,
+        maxBuffer: 30 * 1024 * 1024,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          PYTHONUTF8: '1',
+          SOCYA_AI_PROFILE: 'fast',
+        },
+      });
+      pipelineStdout = result.stdout ?? '';
+    } catch (pipelineErr: unknown) {
+      // CLI exits with code 2 for structured PipelineErrors — stdout still has valid JSON
+      const execErr = pipelineErr as ExecWithStdout;
+      if (execErr?.stdout?.trim()) {
+        pipelineStdout = execErr.stdout;
+      } else {
+        throw pipelineErr;
+      }
     }
 
-    const payload = JSON.parse(stdout) as {
-      error?: string;
-      analysis?: Record<string, unknown>;
-      suggestions?: string[];
-      model?: string;
+    const parsedJson = JSON.parse(pipelineStdout);
+
+    // Structured error from pipeline (exit 2): return 422
+    if (parsedJson?.error) {
+      return NextResponse.json({ error: parsedJson.error }, { status: 422, headers: { 'Cache-Control': 'no-store' } });
+    }
+
+    // Adapter: translate new pipeline shape → existing AIControlPanel.tsx shape
+    // (UI gets updated in Phase 4; this keeps the panel working until then)
+    const adapter = {
+      model: parsedJson.ai_status?.model,
+      ai_status: parsedJson.ai_status,
+      dataset: {
+        fileName: file.name,
+        sizeMb: Number((file.size / (1024 * 1024)).toFixed(1)),
+        primarySheet: parsedJson.audit?.provenance_per_slide?.[0]?.sheet || null,
+        sheetCount: 1,    // unknown without re-parsing; UI will show this in Phase 4
+        totalRows: 0,
+        totalColumns: 0,
+      },
+      semanticSummary: {
+        topic: parsedJson.presentation_meta?.title || '',
+        informationType: '',
+        aboutText: parsedJson.presentation_meta?.subtitle || '',
+        emphasis: [],
+      },
+      executiveSummary: parsedJson.presentation_meta?.subtitle || '',
+      suggestions: parsedJson.prompt_suggestions || [],
+      promptHints: [],
+      keyFindings: [],
+      trends: [],
+      patterns: [],
+      powerPointPlan: {
+        recommendedSlides: (parsedJson.slides || []).slice(0, 3).map((s: { type?: string; title?: string; narrative?: string; subtitle?: string }) => ({
+          type: s.type, title: s.title, reason: s.narrative || s.subtitle || ''
+        })),
+        preferredCharts: [],
+        preferredTables: [],
+        palette: { name: 'Analitica Moderna', colors: [] },
+        preferredNarrative: [],
+        kpiLabels: [],
+      },
+      processing: { timeoutMinutes: 16, tier: 'standard' },
+      healthSignals: parsedJson.audit?.slides_dropped?.length
+        ? [`${parsedJson.audit.slides_dropped.length} slides descartados por baja calidad`]
+        : [],
     };
 
-    if (payload?.error) {
-      throw new Error(payload.error);
-    }
-
-    const report = buildExcelIntelligenceReport({
-      analysis: payload.analysis,
-      suggestions: payload.suggestions,
-      fileName: file.name,
-      fileSizeBytes: file.size,
-      userPrompt,
-      model: payload.model,
-    });
-
-    return NextResponse.json(report, {
-      headers: {
-        'Cache-Control': 'no-store',
-      },
-    });
+    return NextResponse.json(adapter, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error: unknown) {
     console.error('[excel-intelligence] Error:', error);
     if (isTimedOut(error)) {

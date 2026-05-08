@@ -551,6 +551,7 @@ def repair_text_artifacts(value):
     return re.sub(r'\s+', ' ', cleaned).strip()
 
 
+# TODO: remove in F5 — superseded by socya_pipeline.{planner,validator,extractor}
 def build_default_ai_curation_status():
     has_api_key = bool(get_openrouter_api_key())
     temporarily_blocked = is_ai_temporarily_blocked() if has_api_key else False
@@ -1703,6 +1704,7 @@ def chart_index_from_visual_id(visual_id):
     return int(match.group(1)) if match else None
 
 
+# TODO: remove in F5 — superseded by socya_pipeline.{planner,validator,extractor}
 def build_local_executive_summary(analisis_data, visual_plan):
     request_context = analisis_data.get('presentation_request') or {}
     focus_label = describe_focus_label(request_context, analisis_data)
@@ -1748,6 +1750,7 @@ def build_local_executive_summary(analisis_data, visual_plan):
     }
 
 
+# TODO: remove in F5 — superseded by socya_pipeline.{planner,validator,extractor}
 def build_local_briefing_payload(analisis_data, visual_plan):
     request_context = analisis_data.get('presentation_request') or {}
     generico = analisis_data.get('resumen_generico') or {}
@@ -1804,6 +1807,7 @@ def build_local_ai_curation_bundle(analisis_data):
     }
 
 
+# TODO: remove in F5 — superseded by socya_pipeline.{planner,validator,extractor}
 def enrich_textual_blocks_with_ai(blocks):
     if not blocks:
         return []
@@ -3523,6 +3527,7 @@ def build_content_hash_cache_key(file_path, user_prompt, audience, language,
                               language or "es", planner_version)
 
 
+# TODO: remove in F5 — superseded by socya_pipeline.{planner,validator,extractor}
 def sintetizar_todo_con_ia(analisis_data):
     """
     UNA sola llamada a la IA que produce:
