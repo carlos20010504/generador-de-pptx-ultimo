@@ -3,20 +3,20 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   UploadCloud, FileSpreadsheet, CheckCircle2, AlertCircle,
-  Loader2, Settings2, BarChart2, Table2, LayoutDashboard,
-  Sparkles, Download, RefreshCw, ChevronRight, Shield, Layers,
-  TrendingUp, PieChart, Wand2, Eye,
+  Loader2, Sparkles, Download, RefreshCw, Shield, Layers,
+  TrendingUp, PieChart, Wand2, ChevronDown, ChevronRight,
+  Settings2,
 } from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
 import { ACCEPTED_EXCEL_EXTENSIONS, MAX_EXCEL_UPLOAD_BYTES, shouldSkipClientContentValidation, validateExcelUpload, validateExcelContents } from '@/utils/excel-file';
 import { autoOrganizeExcel, OrganizerMode } from '@/utils/excel-organizer';
 import AIControlPanel from './AIControlPanel';
 import GenerationProgress from './GenerationProgress';
 import AuditModal from './AuditModal';
+import PreparePanel from './PreparePanel';
+import AdvancedDrawer from './AdvancedDrawer';
 import { formatErrorForUser, isPipelineError, PipelineErrorPayload } from '@/utils/error-codes';
 
-type Tab = 'generate' | 'organize';
-type Status = 'idle' | 'processing' | 'success' | 'organized' | 'previewed' | 'error';
+type Status = 'idle' | 'processing' | 'success' | 'organized' | 'error';
 
 interface GenerationStats {
   duration: number;
@@ -42,23 +42,6 @@ interface PresentationContext {
   };
 }
 
-interface PreviewSlide {
-  type?: string;
-  title?: string;
-  subtitle?: string;
-  content?: unknown;
-}
-
-interface ModeOption {
-  id: OrganizerMode;
-  label: string;
-  desc: string;
-  Icon: LucideIcon;
-  color: string;
-  glow: string;
-  recommended?: boolean;
-}
-
 const STEPS = [
   { label: 'Analizando estructura del Excel', icon: Layers, pct: 20 },
   { label: 'Detectando tipos de datos y columnas', icon: TrendingUp, pct: 40 },
@@ -67,56 +50,12 @@ const STEPS = [
   { label: 'Generando archivo y descargando', icon: Download, pct: 100 },
 ];
 
-const PRIMARY_MODE_OPTIONS: ModeOption[] = [
-  {
-    id: 'mixed', label: 'Mixto',
-    desc: 'La opción más segura: balancea gráficos y tablas automáticamente.',
-    Icon: LayoutDashboard, color: '#7C3AED', glow: 'rgba(124,58,237,0.35)',
-  },
-  {
-    id: 'charts', label: 'Gráficos',
-    desc: 'Prioriza charts y lecturas visuales cuando el Excel tiene buena base numérica.',
-    Icon: BarChart2, color: '#0891B2', glow: 'rgba(8,145,178,0.35)',
-  },
-  {
-    id: 'tables', label: 'Tablas',
-    desc: 'Enfoca la salida en tablas claras, comparables y fáciles de revisar.',
-    Icon: Table2, color: '#059669', glow: 'rgba(5,150,105,0.35)',
-  },
+const ORGANIZE_MODES: { id: OrganizerMode; label: string; desc: string }[] = [
+  { id: 'mixed', label: 'Mixto', desc: 'Balanceado' },
+  { id: 'charts', label: 'Gráficos', desc: 'Énfasis visual' },
+  { id: 'tables', label: 'Tablas', desc: 'Énfasis tabular' },
+  { id: 'boardroom', label: 'Ejecutivo', desc: 'Comité / riesgos' },
 ];
-
-const ADVANCED_MODE_OPTION: ModeOption = {
-  id: 'boardroom',
-  label: 'Ejecutivo avanzado',
-  desc: 'Pensado para riesgos, semáforos, comparativos y señales tipo comité.',
-  Icon: Sparkles,
-  color: '#EA580C',
-  glow: 'rgba(234,88,12,0.35)',
-  recommended: true,
-};
-
-const STEP_TABS: { id: Tab; title: string; short: string; hint: string }[] = [
-  {
-    id: 'organize',
-    title: 'Paso 1. Organiza tu Excel',
-    short: 'Organizar Excel',
-    hint: 'Recomendado antes de generar el PowerPoint.',
-  },
-  {
-    id: 'generate',
-    title: 'Paso 2. Genera el PowerPoint',
-    short: 'Generar PowerPoint',
-    hint: 'Usa idealmente el archivo organizado descargado en el paso 1.',
-  },
-];
-
-function hexToRgb(hex: string): string {
-  const h = hex.replace('#', '');
-  const r = parseInt(h.substring(0, 2), 16);
-  const g = parseInt(h.substring(2, 4), 16);
-  const b = parseInt(h.substring(4, 6), 16);
-  return `${r},${g},${b}`;
-}
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -125,19 +64,13 @@ function formatFileSize(bytes: number): string {
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-
+  if (error instanceof Error && error.message) return error.message;
   return fallback;
 }
 
 function validateSelectedFile(file: File): string | null {
   const validationError = validateExcelUpload(file);
-  if (!validationError) {
-    return null;
-  }
-
+  if (!validationError) return null;
   return validationError
     .replace('El archivo debe ser un Excel valido', 'Por favor sube un archivo Excel válido')
     .replace('El archivo subido no tiene un tipo MIME de Excel permitido.', 'El archivo seleccionado no tiene un formato Excel permitido.')
@@ -151,15 +84,11 @@ export default function ExcelUploader() {
   const [isDragActive, setIsDragActive] = useState(false);
   const [status, setStatus] = useState<Status>('idle');
   const [errorMessage, setErrorMessage] = useState('');
-  const [activeTab, setActiveTab] = useState<Tab>('organize');
-  const [orgMode, setOrgMode] = useState<OrganizerMode>('boardroom');
+  const [orgMode, setOrgMode] = useState<OrganizerMode>('mixed');
   const [currentStep, setCurrentStep] = useState(0);
   const [stats, setStats] = useState<GenerationStats | null>(null);
-  const [previewSlides, setPreviewSlides] = useState<PreviewSlide[]>([]);
   const [backendHealth, setBackendHealth] = useState<BackendHealth | null>(null);
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [justAutoAdvanced, setJustAutoAdvanced] = useState(false);
   const [userPrompt, setUserPrompt] = useState('');
   const [presentationContext, setPresentationContext] = useState<PresentationContext>({
     audience: 'ejecutivos',
@@ -173,7 +102,6 @@ export default function ExcelUploader() {
       bg_hex: '#F8FAFC',
     },
   });
-  const [viewportHeight, setViewportHeight] = useState(960);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   type ProgressPhase = 'parsing' | 'inventory' | 'planning' | 'validating' | 'rendering' | 'done' | 'error';
@@ -182,14 +110,10 @@ export default function ExcelUploader() {
   const [audit, setAudit] = useState<unknown>(null);
   const [showAudit, setShowAudit] = useState(false);
   const [retryError, setRetryError] = useState<PipelineErrorPayload | null>(null);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return undefined;
-    const syncViewportHeight = () => setViewportHeight(window.innerHeight || 960);
-    syncViewportHeight();
-    window.addEventListener('resize', syncViewportHeight);
-    return () => window.removeEventListener('resize', syncViewportHeight);
-  }, []);
+  const [excludedSlideIndices, setExcludedSlideIndices] = useState<number[]>([]);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showOrganizer, setShowOrganizer] = useState(false);
+  const [showHealth, setShowHealth] = useState(false);
 
   useEffect(() => {
     if (status !== 'processing') return;
@@ -209,22 +133,15 @@ export default function ExcelUploader() {
     return () => clearTimeout(timeoutId);
   }, [status]);
 
-  useEffect(() => {
-    if (!justAutoAdvanced) return;
-    const timeoutId = setTimeout(() => setJustAutoAdvanced(false), 2400);
-    return () => clearTimeout(timeoutId);
-  }, [justAutoAdvanced]);
-
   const setValidFile = useCallback(async (f: File) => {
     setStatus('processing');
     setErrorMessage('');
-    
+
     const validationError = validateSelectedFile(f);
     if (validationError) {
       setFile(null);
       setStatus('error');
       setErrorMessage(validationError);
-      setJustAutoAdvanced(false);
       return;
     }
 
@@ -235,23 +152,21 @@ export default function ExcelUploader() {
           setFile(null);
           setStatus('error');
           setErrorMessage(contentError);
-          setJustAutoAdvanced(false);
           return;
         }
       }
-      
+
       setFile(f);
       setOriginalFileName(f.name);
       setStatus('idle');
       setErrorMessage('');
       setStats(null);
-      setPreviewSlides([]);
-      setJustAutoAdvanced(false);
+      setExcludedSlideIndices([]);
+      setShowOrganizer(false);
     } catch {
       setFile(null);
       setStatus('error');
       setErrorMessage('Error validando el contenido del archivo.');
-      setJustAutoAdvanced(false);
     }
   }, []);
 
@@ -259,8 +174,6 @@ export default function ExcelUploader() {
     setStatus('idle');
     setErrorMessage('');
     setStats(null);
-    setPreviewSlides([]);
-    setJustAutoAdvanced(false);
   }, []);
 
   const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragActive(true); };
@@ -290,11 +203,13 @@ export default function ExcelUploader() {
     formData.append('audience', presentationContext.audience);
     formData.append('language', presentationContext.language);
     formData.append('theme', JSON.stringify(presentationContext.theme));
+    if (excludedSlideIndices.length > 0) {
+      formData.append('excludeSlideIndices', JSON.stringify(excludedSlideIndices));
+    }
 
     try {
       const res = await fetch('/api/generate-pptx', { method: 'POST', body: formData });
       if (!res.ok || !res.body) {
-        // Backwards-compat for non-streaming responses (validation errors)
         let errPayload: PipelineErrorPayload | null = null;
         try {
           const j = await res.json();
@@ -382,52 +297,10 @@ export default function ExcelUploader() {
     }
   };
 
-  const handlePreview = async () => {
-    if (!file) return;
-    setStatus('processing');
-    setErrorMessage('');
-    setStats(null);
-    setPreviewSlides([]);
-
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      if (userPrompt.trim()) {
-        formData.append('userPrompt', userPrompt.trim());
-      }
-      formData.append('audience', presentationContext.audience);
-      formData.append('language', presentationContext.language);
-      formData.append('theme', JSON.stringify(presentationContext.theme));
-
-      const response = await fetch('/api/advanced-generate', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(payload?.error || 'No se pudo revisar la estructura del archivo.');
-      }
-
-      const slides = Array.isArray(payload?.slides) ? (payload.slides as PreviewSlide[]) : [];
-      if (!slides.length) {
-        throw new Error('La revisión no devolvió resultados.');
-      }
-
-      setPreviewSlides(slides);
-      setStatus('previewed');
-    } catch (err: unknown) {
-      console.error('Error generating preview:', err);
-      setStatus('error');
-      setErrorMessage(getErrorMessage(err, 'Error al revisar la estructura del análisis.'));
-    }
-  };
-
   const handleOrganize = async () => {
     if (!file) return;
     setStatus('processing');
     setErrorMessage('');
-    setPreviewSlides([]);
     try {
       const blob = await autoOrganizeExcel(file, orgMode);
       const organizedFileName = `ORGANIZADO_${orgMode.toUpperCase()}_${file.name}`;
@@ -438,9 +311,8 @@ export default function ExcelUploader() {
       );
       setFile(organizedFile);
       setOriginalFileName(file.name);
-      setActiveTab('generate');
-      setJustAutoAdvanced(true);
       setStatus('organized');
+      setShowOrganizer(false);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -459,10 +331,7 @@ export default function ExcelUploader() {
   const handleHealthCheck = async () => {
     setIsCheckingHealth(true);
     try {
-      const response = await fetch('/api/health', {
-        method: 'GET',
-        cache: 'no-store',
-      });
+      const response = await fetch('/api/health', { method: 'GET', cache: 'no-store' });
       const payload = await response.json().catch(() => null);
       setBackendHealth({
         ok: Boolean(payload?.ok && response.ok),
@@ -479,170 +348,35 @@ export default function ExcelUploader() {
   };
 
   const isLoading = status === 'processing';
-  const allModes = [...PRIMARY_MODE_OPTIONS, ADVANCED_MODE_OPTION];
-  const activeModeInfo = allModes.find((m) => m.id === orgMode) ?? PRIMARY_MODE_OPTIONS[0];
-  const visibleModes = showAdvanced ? allModes : PRIMARY_MODE_OPTIONS;
-  const currentTabInfo = STEP_TABS.find((step) => step.id === activeTab) ?? STEP_TABS[0];
-  const isReadyToGenerate = status === 'organized' && activeTab === 'generate' && Boolean(file);
-  const isCompactViewport = viewportHeight <= 920;
-  const isShortViewport = viewportHeight <= 840;
 
   return (
-    <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start', width: '100%' }}>
-      <div
-        style={{
-          flex: '1 1 0%',
-          background: 'rgba(255,255,255,0.03)',
-          backdropFilter: 'blur(24px) saturate(180%)',
-          borderRadius: '24px',
-          border: '1px solid rgba(255,255,255,0.08)',
-          overflow: 'hidden',
-          boxShadow: '0 24px 80px rgba(0,0,0,0.5), 0 0 1px rgba(255,255,255,0.1) inset',
-        }}
-        className="animate-scale-in"
-      >
-        <div
-        style={{
-          padding: isShortViewport ? '0.8rem 0.85rem 0.7rem' : (isCompactViewport ? '0.9rem 0.95rem 0.75rem' : '1rem 1rem 0.85rem'),
-          borderBottom: '1px solid rgba(255,255,255,0.05)',
-          background: 'linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01))',
-        }}
-      >
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            justifyContent: 'space-between',
-            gap: '0.9rem',
-            marginBottom: '1rem',
-            flexWrap: 'wrap',
-          }}
-        >
-          <div>
-            <p style={{ color: '#93C5FD', fontSize: '0.74rem', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', margin: '0 0 0.35rem' }}>
-              Flujo recomendado
-            </p>
-            <h2 style={{ color: 'white', fontSize: isShortViewport ? '0.92rem' : (isCompactViewport ? '0.98rem' : '1.02rem'), margin: '0 0 0.18rem', fontWeight: 800 }}>
-              Organiza primero. Genera después.
-            </h2>
-            {!isShortViewport && (
-              <p style={{ color: 'rgba(255,255,255,0.38)', fontSize: '0.75rem', margin: 0, lineHeight: 1.45, maxWidth: '30rem' }}>
-                Menos pasos visibles, misma lógica guiada.
-              </p>
-            )}
+    <div className="upl-root">
+      <div className="upl-card animate-scale-in">
+        {/* ─── Compact header ─── */}
+        <div className="upl-header">
+          <div className="upl-head-left">
+            <p className="upl-eyebrow">Sube tu Excel y obtén un PPT en segundos</p>
+            <p className="upl-tagline">La IA lee, decide los slides y descargas listo.</p>
           </div>
-          <div
-            style={{
-              padding: isShortViewport ? '0.42rem 0.6rem' : '0.55rem 0.75rem',
-              borderRadius: '999px',
-              border: '1px solid rgba(74,222,128,0.18)',
-              background: 'rgba(74,222,128,0.08)',
-              color: '#86EFAC',
-              fontSize: '0.7rem',
-              fontWeight: 700,
-            }}
-          >
-            Modo recomendado: Mixto
-          </div>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: isShortViewport ? '0.5rem' : '0.7rem' }}>
-          {STEP_TABS.map((step, index) => {
-            const active = activeTab === step.id;
-            return (
-              <button
-                key={step.id}
-                type="button"
-                onClick={() => {
-                  setActiveTab(step.id);
-                  resetMessages();
-                }}
-                className={step.id === 'generate' && justAutoAdvanced ? 'animate-step-focus' : undefined}
-                style={{
-                  textAlign: 'left',
-                  padding: isShortViewport ? '0.72rem 0.8rem' : (isCompactViewport ? '0.82rem 0.9rem' : '0.95rem 1rem'),
-                  borderRadius: '18px',
-                  border: active ? '1px solid rgba(96,165,250,0.4)' : '1px solid rgba(255,255,255,0.07)',
-                  background: active ? 'rgba(59,130,246,0.12)' : 'rgba(255,255,255,0.025)',
-                  color: 'white',
-                  cursor: 'pointer',
-                  transition: 'all 0.25s ease',
-                  boxShadow: active ? '0 0 0 1px rgba(59,130,246,0.08) inset' : 'none',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.35rem' }}>
-                  <div
-                    style={{
-                      width: '1.8rem',
-                      height: '1.8rem',
-                      borderRadius: '999px',
-                      background: active ? 'linear-gradient(135deg, #1D4ED8, #60A5FA)' : 'rgba(255,255,255,0.08)',
-                      color: active ? 'white' : 'rgba(255,255,255,0.55)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontWeight: 800,
-                      fontSize: '0.82rem',
-                    }}
-                  >
-                    {index + 1}
-                  </div>
-                  <div>
-                    <p style={{ color: active ? 'white' : 'rgba(255,255,255,0.72)', fontSize: isShortViewport ? '0.78rem' : '0.84rem', fontWeight: 800, margin: 0 }}>
-                      {step.short}
-                    </p>
-                    {!isShortViewport && (
-                      <p style={{ color: active ? '#BFDBFE' : 'rgba(255,255,255,0.30)', fontSize: '0.68rem', margin: 0 }}>
-                        {step.hint}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div style={{ padding: isShortViewport ? '0.92rem' : (isCompactViewport ? '1.08rem' : '1.35rem') }}>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.6rem',
-            marginBottom: isShortViewport ? '0.72rem' : '1rem',
-            padding: isShortViewport ? '0.6rem 0.72rem' : '0.75rem 0.85rem',
-            borderRadius: '14px',
-            background: activeTab === 'organize' ? 'rgba(74,222,128,0.07)' : 'rgba(59,130,246,0.08)',
-            border: activeTab === 'organize' ? '1px solid rgba(74,222,128,0.16)' : '1px solid rgba(59,130,246,0.18)',
-          }}
-        >
-          {activeTab === 'organize' ? <Wand2 size={16} color="#86EFAC" /> : <Sparkles size={16} color="#93C5FD" />}
-          <div>
-            <p style={{ color: 'white', fontSize: '0.82rem', fontWeight: 700, margin: '0 0 0.1rem' }}>
-              {currentTabInfo.title}
-            </p>
-            {!isShortViewport && (
-              <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.73rem', margin: 0, lineHeight: 1.45 }}>
-                {activeTab === 'organize'
-                  ? 'Descarga un Excel preparado para que el sistema lo interprete mejor antes de crear las diapositivas.'
-                  : 'Sube el Excel final que quieres convertir. Si vienes del paso 1, usa el archivo organizado que acabas de descargar.'}
-              </p>
-            )}
-          </div>
-        </div>
-
-        {isLoading && !progressPhase && (
-          <div style={{ marginBottom: '1rem' }} className="animate-fade-in">
-            <div
-              style={{
-                background: 'rgba(0,0,0,0.3)',
-                borderRadius: '16px',
-                padding: '1rem 1.05rem',
-                border: '1px solid rgba(59,130,246,0.15)',
-              }}
+          {file && (
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(true)}
+              className="upl-adv-trigger press-on-active"
+              title="Panel avanzado: prompt, audiencia, tema y sugerencias completas"
             >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem', marginBottom: '0.85rem' }}>
+              <Settings2 size={14} />
+              Avanzado
+            </button>
+          )}
+        </div>
+
+        {/* ─── Body ─── */}
+        <div className="upl-body">
+          {/* Generation progress (active during PPTX gen) */}
+          {isLoading && !progressPhase && (
+            <div className="upl-progress-card animate-fade-in">
+              <div className="upl-progress-steps">
                 {STEPS.map((step, i) => {
                   const isActive = i === currentStep;
                   const isDone = i < currentStep;
@@ -650,320 +384,270 @@ export default function ExcelUploader() {
                   return (
                     <div
                       key={step.label}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.55rem',
-                        opacity: isDone ? 0.55 : isActive ? 1 : 0.25,
-                        transition: 'all 0.4s ease',
-                      }}
+                      className={`upl-progress-step ${isDone ? 'is-done' : isActive ? 'is-active' : 'is-pending'}`}
                     >
-                      <div
-                        style={{
-                          width: '22px',
-                          height: '22px',
-                          borderRadius: '6px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          background: isDone ? 'rgba(74,222,128,0.2)' : isActive ? 'rgba(59,130,246,0.2)' : 'transparent',
-                          border: isDone ? '1px solid rgba(74,222,128,0.3)' : isActive ? '1px solid rgba(59,130,246,0.3)' : '1px solid rgba(255,255,255,0.08)',
-                        }}
-                      >
+                      <div className="upl-progress-icon">
                         {isDone
                           ? <CheckCircle2 size={12} color="#4ADE80" />
                           : isActive
                             ? <StepIcon size={12} color="#60A5FA" style={{ animation: 'spin 2s linear infinite' }} />
                             : <StepIcon size={12} color="rgba(255,255,255,0.2)" />}
                       </div>
-                      <span style={{ fontSize: '0.78rem', fontWeight: isActive ? 700 : 500, color: isDone ? '#86EFAC' : isActive ? '#93C5FD' : 'rgba(255,255,255,0.2)' }}>
-                        {step.label}
-                      </span>
+                      <span className="upl-progress-label">{step.label}</span>
                     </div>
                   );
                 })}
               </div>
-              <div style={{ height: '4px', background: 'rgba(255,255,255,0.06)', borderRadius: '2px', overflow: 'hidden' }}>
+              <div className="upl-progress-bar">
                 <div
-                  style={{
-                    height: '100%',
-                    width: `${STEPS[currentStep]?.pct || 0}%`,
-                    background: 'linear-gradient(90deg, #3B82F6, #818CF8)',
-                    borderRadius: '2px',
-                    transition: 'width 0.8s ease-out',
-                  }}
+                  className="upl-progress-bar-fill"
+                  style={{ width: `${STEPS[currentStep]?.pct || 0}%` }}
                 />
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {progressPhase && (
-          <div style={{
-            background: 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.08)',
-            borderRadius: '12px',
-            padding: '1rem',
-            marginBottom: '1rem',
-          }} className="animate-fade-in">
-            <GenerationProgress currentPhase={progressPhase} message={progressMessage} />
-          </div>
-        )}
+          {progressPhase && (
+            <div className="upl-stream-card animate-fade-in">
+              <GenerationProgress currentPhase={progressPhase} message={progressMessage} />
+            </div>
+          )}
 
-        {!isLoading && (
-          <div
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={() => !file && fileInputRef.current?.click()}
-            style={{
-              border: `2px dashed ${isDragActive ? '#3B82F6' : file ? 'rgba(74,222,128,0.4)' : 'rgba(255,255,255,0.12)'}`,
-              borderRadius: '18px',
-              padding: file ? (isShortViewport ? '0.85rem 0.85rem' : '1.25rem 1rem') : (isShortViewport ? '1rem 0.9rem' : '2rem 1rem'),
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              background: isDragActive
-                ? 'rgba(59,130,246,0.08)'
-                : file ? 'rgba(74,222,128,0.03)' : 'rgba(255,255,255,0.015)',
-              transition: 'all 0.3s ease',
-              cursor: file ? 'default' : 'pointer',
-              minHeight: file ? 'auto' : (isShortViewport ? '118px' : (isCompactViewport ? '140px' : '170px')),
-              position: 'relative',
-              overflow: 'hidden',
-            }}
-          >
-            <input type="file" ref={fileInputRef} onChange={handleInput} accept={ACCEPTED_EXCEL_EXTENSIONS.join(',')} style={{ display: 'none' }} />
+          {/* Dropzone — always visible unless processing */}
+          {!isLoading && (
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              onClick={() => !file && fileInputRef.current?.click()}
+              className={[
+                'upl-dropzone',
+                isDragActive ? 'is-dragging' : '',
+                file ? 'has-file' : 'is-empty',
+              ].filter(Boolean).join(' ')}
+            >
+              <input type="file" ref={fileInputRef} onChange={handleInput} accept={ACCEPTED_EXCEL_EXTENSIONS.join(',')} style={{ display: 'none' }} />
 
-            {isDragActive && (
-              <div
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  background: 'linear-gradient(90deg, transparent, rgba(59,130,246,0.05), transparent)',
-                  backgroundSize: '200% 100%',
-                  animation: 'shimmer 1.5s infinite',
-                  pointerEvents: 'none',
-                }}
-              />
-            )}
+              {isDragActive && <div className="upl-dropzone-shimmer" />}
 
-            {!file ? (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.7rem', textAlign: 'center', zIndex: 1 }}>
-                <div
-                  style={{
-                    background: isDragActive ? 'rgba(59,130,246,0.15)' : 'rgba(255,255,255,0.06)',
-                    borderRadius: '16px',
-                    padding: isShortViewport ? '0.75rem' : '1rem',
-                    border: isDragActive ? '1px solid rgba(59,130,246,0.2)' : '1px solid transparent',
-                  }}
-                >
-                  <UploadCloud size={isShortViewport ? 24 : 30} color={isDragActive ? '#60A5FA' : 'rgba(255,255,255,0.35)'} />
-                </div>
-                <div>
-                  <p style={{ color: isDragActive ? '#93C5FD' : 'rgba(255,255,255,0.62)', fontWeight: 700, margin: '0 0 0.28rem', fontSize: isShortViewport ? '0.86rem' : '0.94rem' }}>
-                    {isDragActive ? 'Suelta tu archivo aquí' : 'Sube el Excel con el que quieres trabajar'}
-                  </p>
-                  <p style={{ color: 'rgba(255,255,255,0.3)', fontSize: isShortViewport ? '0.72rem' : '0.78rem', margin: 0, lineHeight: 1.45 }}>
-                    Arrastra el archivo o{' '}
-                    <span style={{ color: '#60A5FA', fontWeight: 700, textDecoration: 'underline' }}>
-                      selecciónalo desde tu equipo
-                    </span>
-                    {' '}· .xlsx / .xls / .xlsm
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', width: '100%' }}>
-                <div
-                  style={{
-                    background: 'rgba(74,222,128,0.12)',
-                    borderRadius: '14px',
-                    padding: isShortViewport ? '0.58rem' : '0.75rem',
-                    border: '1px solid rgba(74,222,128,0.15)',
-                    flexShrink: 0,
-                  }}
-                >
-                  <FileSpreadsheet size={isShortViewport ? 20 : 24} color="#4ADE80" />
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <p style={{ color: 'white', fontWeight: 700, margin: '0 0 0.15rem', fontSize: isShortViewport ? '0.82rem' : '0.9rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {file.name}
-                  </p>
-                  <p style={{ color: 'rgba(255,255,255,0.34)', fontSize: isShortViewport ? '0.68rem' : '0.74rem', margin: '0 0 0.25rem' }}>
-                    {formatFileSize(file.size)} · Límite {formatFileSize(MAX_EXCEL_UPLOAD_BYTES)}
-                  </p>
-                  {!isShortViewport && (
-                    <p style={{ color: 'rgba(255,255,255,0.28)', fontSize: '0.7rem', margin: 0 }}>
-                      {activeTab === 'organize'
-                        ? 'Este archivo se usará para preparar una versión más limpia y lista para el generador.'
-                        : 'Este archivo se convertirá directamente en una presentación PowerPoint.'}
+              {!file ? (
+                <div className="upl-dropzone-empty">
+                  <div className="upl-dropzone-icon">
+                    <UploadCloud size={28} color={isDragActive ? '#60A5FA' : 'rgba(255,255,255,0.35)'} />
+                  </div>
+                  <div>
+                    <p className="upl-dropzone-headline">
+                      {isDragActive ? 'Suelta tu archivo aquí' : 'Sube el Excel con el que quieres trabajar'}
                     </p>
-                  )}
+                    <p className="upl-dropzone-help">
+                      Arrastra o <span className="upl-dropzone-link">selecciónalo</span>{' · '}.xlsx · .xls · .xlsm
+                    </p>
+                  </div>
                 </div>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setFile(null);
-                    setOriginalFileName(null);
-                    resetMessages();
-                  }}
-                  style={{
-                    color: 'rgba(255,255,255,0.45)',
-                    background: 'rgba(255,255,255,0.05)',
-                    border: '1px solid rgba(255,255,255,0.08)',
-                    cursor: 'pointer',
-                    fontSize: '0.72rem',
-                    fontWeight: 600,
-                    padding: '0.45rem 0.72rem',
-                    borderRadius: '10px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.3rem',
-                    flexShrink: 0,
-                  }}
-                >
-                  <RefreshCw size={12} />
-                  Cambiar
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-
-        <div style={{ marginTop: '1rem', marginBottom: '1rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.7rem', marginBottom: '0.55rem', flexWrap: 'wrap' }}>
-            <div>
-              <p style={{ fontSize: '0.72rem', fontWeight: 800, color: 'rgba(255,255,255,0.48)', margin: '0 0 0.18rem', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-                {activeTab === 'organize' ? 'Cómo quieres preparar el Excel' : 'Cómo quieres que se vea el PowerPoint'}
-              </p>
-              {!isShortViewport && (
-                <p style={{ color: 'rgba(255,255,255,0.32)', fontSize: '0.71rem', margin: 0 }}>
-                  Si dudas, usa <strong style={{ color: '#C4B5FD' }}>Mixto</strong>.
-                </p>
+              ) : (
+                <div className="upl-file-row">
+                  <div className="upl-file-icon">
+                    <FileSpreadsheet size={20} color="#4ADE80" />
+                  </div>
+                  <div className="upl-file-meta">
+                    <p className="upl-file-name">{file.name}</p>
+                    <p className="upl-file-size">
+                      {formatFileSize(file.size)} · Límite {formatFileSize(MAX_EXCEL_UPLOAD_BYTES)}
+                    </p>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setFile(null);
+                      setOriginalFileName(null);
+                      resetMessages();
+                    }}
+                    className="upl-file-change press-on-active"
+                    type="button"
+                  >
+                    <RefreshCw size={12} />
+                    Cambiar
+                  </button>
+                </div>
               )}
             </div>
+          )}
+
+          {/* Optional discrete organizer — collapsed by default */}
+          {!isLoading && !file && (
             <button
               type="button"
-              onClick={() => setShowAdvanced((current) => !current)}
-              style={{
-                padding: '0.45rem 0.7rem',
-                borderRadius: '999px',
-                border: '1px solid rgba(255,255,255,0.08)',
-                background: 'rgba(255,255,255,0.03)',
-                color: 'rgba(255,255,255,0.6)',
-                cursor: 'pointer',
-                fontSize: '0.73rem',
-                fontWeight: 700,
-              }}
+              onClick={() => setShowOrganizer(o => !o)}
+              className="upl-organizer-toggle"
             >
-              {showAdvanced ? 'Ocultar opciones avanzadas' : 'Mostrar opciones avanzadas'}
+              {showOrganizer ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              <Wand2 size={12} />
+              ¿Excel desordenado? Organízalo primero (opcional)
+            </button>
+          )}
+
+          {!isLoading && !file && showOrganizer && (
+            <div className="upl-organizer-box animate-fade-in">
+              <p className="upl-organizer-help">
+                Genera una versión limpia y normalizada antes del PPT. Útil si el archivo tiene encabezados raros, celdas combinadas o filas vacías.
+              </p>
+              <div className="upl-organizer-modes">
+                {ORGANIZE_MODES.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setOrgMode(m.id)}
+                    className={`upl-org-mode ${orgMode === m.id ? 'is-active' : ''}`}
+                  >
+                    <span className="upl-org-mode-label">{m.label}</span>
+                    <span className="upl-org-mode-desc">{m.desc}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="upl-organizer-foot">
+                Sube primero un archivo, luego usa este botón para organizarlo.
+              </p>
+            </div>
+          )}
+
+          {!isLoading && file && (
+            <button
+              type="button"
+              onClick={handleOrganize}
+              className="upl-organize-cta press-on-active"
+              title="Genera y descarga una versión organizada del Excel cargado"
+            >
+              <Wand2 size={12} />
+              Organizar este Excel y descargarlo (opcional)
+            </button>
+          )}
+
+          {/* PreparePanel — fused onboarding + plan preview */}
+          {file && !isLoading && status !== 'success' && status !== 'organized' && (
+            <PreparePanel
+              file={file}
+              userPrompt={userPrompt}
+              onPromptChange={setUserPrompt}
+              audience={presentationContext.audience}
+              language={presentationContext.language}
+              theme={presentationContext.theme}
+              mode={orgMode}
+              onModeChange={(m) => setOrgMode(m as OrganizerMode)}
+              onConfirm={(excluded) => {
+                setExcludedSlideIndices(excluded);
+                setTimeout(() => handleGenerate(), 50);
+              }}
+              onOpenAdvanced={() => setShowAdvanced(true)}
+            />
+          )}
+
+          {/* Status banners */}
+          {status === 'error' && !retryError && (
+            <div className="upl-banner upl-banner-error animate-fade-in-up">
+              <AlertCircle size={16} color="#F87171" className="upl-banner-error-icon" />
+              <div>
+                <p className="upl-banner-error-title">Hubo un problema en el proceso</p>
+                <p className="upl-banner-error-msg">{errorMessage}</p>
+              </div>
+            </div>
+          )}
+
+          {retryError && (
+            <div className="upl-banner upl-banner-retry animate-fade-in-up">
+              <p className="upl-banner-retry-title">{formatErrorForUser(retryError).title}</p>
+              <p className="upl-banner-retry-action">{formatErrorForUser(retryError).action}</p>
+              <div className="upl-banner-retry-actions">
+                <button
+                  type="button"
+                  onClick={() => { setRetryError(null); handleGenerate(); }}
+                  className="upl-btn-retry press-on-active"
+                >Reintentar</button>
+                <button
+                  type="button"
+                  onClick={() => setRetryError(null)}
+                  className="upl-btn-cancel press-on-active"
+                >Cancelar</button>
+              </div>
+            </div>
+          )}
+
+          {status === 'organized' && (
+            <div className="upl-banner upl-banner-success animate-fade-in-up">
+              <div className="upl-banner-success-row">
+                <CheckCircle2 size={16} color="#4ADE80" />
+                <p className="upl-banner-success-title">Excel organizado y cargado</p>
+              </div>
+              <p className="upl-banner-success-sub">El archivo organizado quedó seleccionado. Continúa abajo para generar el PowerPoint.</p>
+            </div>
+          )}
+
+          {status === 'success' && (
+            <div className="upl-banner upl-banner-success-big animate-fade-in-up">
+              <div className="upl-banner-success-row">
+                <div className="upl-banner-success-iconwrap">
+                  <CheckCircle2 size={16} color="#4ADE80" />
+                </div>
+                <p className="upl-banner-success-title">¡PowerPoint generado exitosamente!</p>
+              </div>
+              <div className="upl-banner-success-stats">
+                {[
+                  { icon: Layers, label: 'Modo', value: ORGANIZE_MODES.find(m => m.id === (stats?.mode ?? orgMode))?.label ?? 'Mixto' },
+                  { icon: Sparkles, label: 'Archivo', value: stats ? stats.fileName : (file?.name ?? 'Procesado') },
+                ].map(({ icon: Ic, label, value }) => (
+                  <div key={label} className="upl-stat">
+                    <Ic size={12} color="rgba(134,239,172,0.5)" />
+                    <span className="upl-stat-label">{label}:</span>
+                    <span className="upl-stat-value">{value}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="upl-banner-success-actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStatus('idle');
+                    setStats(null);
+                    setAudit(null);
+                  }}
+                  className="upl-btn-secondary press-on-active"
+                >
+                  <RefreshCw size={12} />
+                  Generar otra
+                </button>
+                {audit ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowAudit(true)}
+                    className="upl-btn-ghost press-on-active"
+                  >Ver detalles</button>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {showAudit && audit ? (
+            <AuditModal
+              audit={audit as Parameters<typeof AuditModal>[0]['audit']}
+              onClose={() => setShowAudit(false)}
+            />
+          ) : null}
+
+          {/* Tiny system row at the very bottom — collapsed by default */}
+          <div className="upl-syslink-row">
+            <button
+              type="button"
+              onClick={() => setShowHealth(h => !h)}
+              className="upl-syslink"
+            >
+              {showHealth ? 'Ocultar' : 'Diagnóstico del backend'}
             </button>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: showAdvanced ? 'repeat(2, minmax(0, 1fr))' : 'repeat(3, minmax(0, 1fr))', gap: isShortViewport ? '0.42rem' : '0.55rem' }}>
-            {visibleModes.map(({ id, label, desc, Icon, color, glow, recommended }) => {
-              const active = orgMode === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => setOrgMode(id)}
-                  style={{
-                    padding: isShortViewport ? '0.72rem 0.6rem' : '0.9rem 0.7rem',
-                    border: `1.5px solid ${active ? color : 'rgba(255,255,255,0.08)'}`,
-                    borderRadius: '16px',
-                    cursor: 'pointer',
-                    transition: 'all 0.25s ease',
-                    background: active ? `rgba(${hexToRgb(color)},0.12)` : 'rgba(255,255,255,0.02)',
-                    boxShadow: active ? `0 0 18px ${glow}` : 'none',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'flex-start',
-                    gap: '0.45rem',
-                    textAlign: 'left',
-                    position: 'relative',
-                  }}
-                >
-                  {recommended && (
-                    <span
-                      style={{
-                        position: 'absolute',
-                        top: '0.55rem',
-                        right: '0.55rem',
-                        padding: '0.2rem 0.45rem',
-                        borderRadius: '999px',
-                        background: 'rgba(124,58,237,0.2)',
-                        color: '#C4B5FD',
-                        fontSize: '0.62rem',
-                        fontWeight: 800,
-                        letterSpacing: '0.05em',
-                        textTransform: 'uppercase',
-                      }}
-                    >
-                      Recomendado
-                    </span>
-                  )}
-                  <div
-                    style={{
-                      background: active ? `rgba(${hexToRgb(color)},0.2)` : 'rgba(255,255,255,0.05)',
-                      borderRadius: '10px',
-                      padding: '0.45rem',
-                    }}
-                  >
-                    <Icon size={18} color={active ? color : 'rgba(255,255,255,0.35)'} />
-                  </div>
-                  <span style={{ fontSize: isShortViewport ? '0.76rem' : '0.83rem', fontWeight: 800, color: active ? color : 'rgba(255,255,255,0.74)' }}>
-                    {label}
-                  </span>
-                  {!isShortViewport && (
-                    <span style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.32)', lineHeight: 1.45 }}>
-                      {desc}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {showAdvanced && (
-          <div
-            style={{
-              marginBottom: '1rem',
-              padding: '0.9rem 1rem',
-              borderRadius: '16px',
-              background: 'rgba(255,255,255,0.025)',
-              border: '1px solid rgba(255,255,255,0.06)',
-            }}
-            className="animate-fade-in"
-          >
-            <p style={{ color: 'white', fontSize: '0.77rem', fontWeight: 800, margin: '0 0 0.25rem' }}>
-              Herramientas técnicas opcionales
-            </p>
-            <p style={{ color: 'rgba(255,255,255,0.30)', fontSize: '0.7rem', margin: '0 0 0.7rem', lineHeight: 1.4 }}>
-              Solo úsalo si necesitas revisar el estado técnico.
-            </p>
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: '0.75rem',
-                flexWrap: 'wrap',
-                padding: '0.75rem 0.85rem',
-                background: 'rgba(255,255,255,0.03)',
-                border: '1px solid rgba(255,255,255,0.06)',
-                borderRadius: '12px',
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: '0.74rem', margin: '0 0 0.15rem', fontWeight: 700 }}>
-                  Estado del backend
-                </p>
-                <p style={{ color: backendHealth ? (backendHealth.ok ? '#86EFAC' : '#FCA5A5') : 'rgba(255,255,255,0.32)', fontSize: '0.72rem', margin: 0 }}>
+          {showHealth && (
+            <div className="upl-health-row animate-fade-in">
+              <div>
+                <p className="upl-health-label">Estado del backend</p>
+                <p className={`upl-health-status ${backendHealth ? (backendHealth.ok ? 'is-ok' : 'is-bad') : ''}`}>
                   {backendHealth?.message || 'Aún no revisado'}
                 </p>
               </div>
@@ -971,389 +655,412 @@ export default function ExcelUploader() {
                 type="button"
                 onClick={handleHealthCheck}
                 disabled={isCheckingHealth || isLoading}
-                style={{
-                  padding: '0.55rem 0.8rem',
-                  background: 'rgba(59,130,246,0.12)',
-                  border: '1px solid rgba(59,130,246,0.2)',
-                  borderRadius: '10px',
-                  color: isCheckingHealth || isLoading ? 'rgba(255,255,255,0.25)' : '#93C5FD',
-                  cursor: isCheckingHealth || isLoading ? 'not-allowed' : 'pointer',
-                  fontSize: '0.74rem',
-                  fontWeight: 700,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.35rem',
-                }}
+                className="upl-health-btn press-on-active"
               >
                 {isCheckingHealth ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Shield size={14} />}
-                Revisar backend
-              </button>
-            </div>
-          </div>
-        )}
-
-        {status === 'error' && !retryError && (
-          <div
-            style={{
-              marginTop: '0.875rem',
-              padding: '0.8rem 1rem',
-              background: 'rgba(239,68,68,0.08)',
-              border: '1px solid rgba(239,68,68,0.2)',
-              borderRadius: '12px',
-              display: 'flex',
-              gap: '0.6rem',
-              alignItems: 'flex-start',
-            }}
-            className="animate-fade-in-up"
-          >
-            <AlertCircle size={16} color="#F87171" style={{ flexShrink: 0, marginTop: '2px' }} />
-            <div>
-              <p style={{ color: '#FCA5A5', fontSize: '0.82rem', margin: '0 0 0.2rem', fontWeight: 700 }}>
-                Hubo un problema en el proceso
-              </p>
-              <p style={{ color: 'rgba(252,165,165,0.74)', fontSize: '0.75rem', margin: 0, lineHeight: 1.45 }}>
-                {errorMessage}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {retryError && (
-          <div
-            style={{
-              background: 'rgba(220,38,38,0.08)',
-              border: '1px solid rgba(220,38,38,0.3)',
-              borderRadius: '12px',
-              padding: '1rem',
-              marginTop: '1rem',
-              color: '#FCA5A5',
-            }}
-            className="animate-fade-in-up"
-          >
-            <p style={{ fontWeight: 700, margin: '0 0 0.3rem', fontSize: '0.85rem' }}>
-              {formatErrorForUser(retryError).title}
-            </p>
-            <p style={{ fontSize: '0.78rem', opacity: 0.8, margin: '0 0 0.6rem' }}>
-              {formatErrorForUser(retryError).action}
-            </p>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <button
-                type="button"
-                onClick={() => { setRetryError(null); handleGenerate(); }}
-                style={{
-                  padding: '0.4rem 0.8rem',
-                  background: 'rgba(124,58,237,0.2)',
-                  border: '1px solid rgba(124,58,237,0.4)',
-                  borderRadius: '8px', color: '#C4B5FD', cursor: 'pointer',
-                  fontSize: '0.78rem', fontWeight: 700,
-                }}
-              >
-                Reintentar
-              </button>
-              <button
-                type="button"
-                onClick={() => setRetryError(null)}
-                style={{
-                  padding: '0.4rem 0.8rem',
-                  background: 'transparent',
-                  border: '1px solid rgba(255,255,255,0.15)',
-                  borderRadius: '8px', color: 'rgba(255,255,255,0.6)',
-                  cursor: 'pointer', fontSize: '0.78rem',
-                }}
-              >
-                Cancelar
-              </button>
-            </div>
-          </div>
-        )}
-
-        {status === 'organized' && (
-          <div
-            style={{
-              marginTop: '0.875rem',
-              padding: '0.9rem 1rem',
-              background: 'rgba(74,222,128,0.06)',
-              border: '1px solid rgba(74,222,128,0.2)',
-              borderRadius: '14px',
-            }}
-            className="animate-fade-in-up"
-          >
-            <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', marginBottom: '0.4rem' }}>
-              <CheckCircle2 size={16} color="#4ADE80" />
-              <p style={{ color: '#86EFAC', fontSize: '0.86rem', margin: 0, fontWeight: 800 }}>
-                Excel organizado, descargado y cargado en el paso 2
-              </p>
-            </div>
-            <p style={{ color: 'rgba(255,255,255,0.42)', fontSize: '0.74rem', margin: '0 0 0 1.45rem', lineHeight: 1.5 }}>
-              El archivo organizado ya quedó seleccionado automáticamente. Genera el PowerPoint con el botón principal de abajo.
-            </p>
-          </div>
-        )}
-
-        {status === 'success' && (
-          <div
-            style={{
-              marginTop: '0.875rem',
-              padding: '0.95rem 1rem',
-              background: 'rgba(74,222,128,0.06)',
-              border: '1px solid rgba(74,222,128,0.2)',
-              borderRadius: '14px',
-            }}
-            className="animate-fade-in-up"
-          >
-            <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', marginBottom: '0.45rem' }}>
-              <div style={{ background: 'rgba(74,222,128,0.15)', borderRadius: '8px', padding: '0.35rem' }}>
-                <CheckCircle2 size={16} color="#4ADE80" />
-              </div>
-              <p style={{ color: '#86EFAC', fontSize: '0.9rem', margin: 0, fontWeight: 800 }}>
-                ¡PowerPoint generado exitosamente!
-              </p>
-            </div>
-            <div style={{ display: 'flex', gap: '0.9rem', flexWrap: 'wrap', marginTop: '0.55rem', paddingTop: '0.55rem', borderTop: '1px solid rgba(74,222,128,0.1)' }}>
-              {[
-                { icon: Layers, label: 'Modo', value: stats ? allModes.find((option) => option.id === stats.mode)?.label ?? activeModeInfo.label : activeModeInfo.label },
-                { icon: Sparkles, label: 'Duración', value: stats ? `${stats.duration.toFixed(1)} s` : 'Completada' },
-                { icon: Shield, label: 'Archivo', value: stats ? stats.fileName : (file?.name ?? 'Procesado') },
-              ].map(({ icon: Ic, label, value }) => (
-                <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                  <Ic size={12} color="rgba(134,239,172,0.5)" />
-                  <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: '0.68rem' }}>{label}:</span>
-                  <span style={{ color: '#86EFAC', fontSize: '0.72rem', fontWeight: 700 }}>{value}</span>
-                </div>
-              ))}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginTop: '0.7rem', flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                onClick={() => {
-                  setStatus('idle');
-                  setStats(null);
-                  setAudit(null);
-                }}
-                style={{
-                  padding: '0.45rem 0.78rem',
-                  background: 'rgba(74,222,128,0.1)',
-                  border: '1px solid rgba(74,222,128,0.2)',
-                  borderRadius: '8px',
-                  color: '#86EFAC',
-                  cursor: 'pointer',
-                  fontSize: '0.75rem',
-                  fontWeight: 700,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.3rem',
-                }}
-              >
-                <RefreshCw size={12} />
-                Generar otra presentación
-              </button>
-              {audit ? (
-                <button
-                  type="button"
-                  onClick={() => setShowAudit(true)}
-                  style={{
-                    background: 'rgba(255,255,255,0.04)',
-                    border: '1px solid rgba(255,255,255,0.1)',
-                    borderRadius: '8px',
-                    padding: '0.4rem 0.7rem',
-                    color: 'rgba(255,255,255,0.65)',
-                    cursor: 'pointer', fontSize: '0.72rem',
-                  }}
-                >
-                  Ver detalles de la generación
-                </button>
-              ) : null}
-            </div>
-          </div>
-        )}
-
-        {showAudit && audit ? (
-          <AuditModal
-            audit={audit as Parameters<typeof AuditModal>[0]['audit']}
-            onClose={() => setShowAudit(false)}
-          />
-        ) : null}
-
-        {status === 'previewed' && previewSlides.length > 0 && (
-          <div
-            style={{
-              marginTop: '0.875rem',
-              padding: '0.95rem 1rem',
-              background: 'rgba(96,165,250,0.06)',
-              border: '1px solid rgba(96,165,250,0.18)',
-              borderRadius: '14px',
-            }}
-            className="animate-fade-in-up"
-          >
-            <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', marginBottom: '0.55rem' }}>
-              <Eye size={16} color="#60A5FA" />
-              <p style={{ color: '#93C5FD', fontSize: '0.84rem', margin: 0, fontWeight: 800 }}>
-                Revisión rápida lista
-              </p>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-              {previewSlides.slice(0, isShortViewport ? 3 : 5).map((slide, index) => (
-                <div
-                  key={`${slide.title || slide.type || 'slide'}-${index}`}
-                  style={{
-                    padding: isShortViewport ? '0.55rem 0.65rem' : '0.7rem 0.78rem',
-                    background: 'rgba(255,255,255,0.03)',
-                    border: '1px solid rgba(255,255,255,0.05)',
-                    borderRadius: '10px',
-                  }}
-                >
-                  <p style={{ color: 'white', fontSize: '0.78rem', margin: '0 0 0.2rem', fontWeight: 700 }}>
-                    {String(index + 1).padStart(2, '0')}. {slide.title || 'Diapositiva sin título'}
-                  </p>
-                  <p style={{ color: 'rgba(255,255,255,0.34)', fontSize: '0.7rem', margin: 0 }}>
-                    Tipo: {slide.type || 'sin tipo'}{slide.subtitle ? ` · ${slide.subtitle}` : ''}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div
-          style={{ marginTop: isShortViewport ? '0.9rem' : '1.2rem' }}
-          className={activeTab === 'generate' && justAutoAdvanced ? 'animate-step-arrival' : undefined}
-        >
-          {activeTab === 'organize' ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '0.65rem' }}>
-              <button
-                id="btn-organize-excel"
-                onClick={handleOrganize}
-                disabled={!file || isLoading}
-                style={{
-                  width: '100%',
-                  padding: '1rem',
-                  border: 'none',
-                  borderRadius: '14px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '0.5rem',
-                  fontWeight: 800,
-                  fontSize: '0.94rem',
-                  cursor: (!file || isLoading) ? 'not-allowed' : 'pointer',
-                  background: (!file || isLoading)
-                    ? 'rgba(255,255,255,0.05)'
-                    : orgMode === 'charts'
-                      ? 'linear-gradient(135deg, #155E75 0%, #0891B2 100%)'
-                      : orgMode === 'tables'
-                        ? 'linear-gradient(135deg, #065F46 0%, #059669 100%)'
-                        : orgMode === 'boardroom'
-                          ? 'linear-gradient(135deg, #9A3412 0%, #EA580C 100%)'
-                          : 'linear-gradient(135deg, #3B0764 0%, #7C3AED 100%)',
-                  color: (!file || isLoading) ? 'rgba(255,255,255,0.2)' : 'white',
-                  boxShadow: (!file || isLoading) ? 'none' : `0 8px 28px ${activeModeInfo.glow}`,
-                }}
-              >
-                {isLoading
-                  ? <><Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> Organizando archivo...</>
-                  : <><Settings2 size={18} /> Organizar y descargar Excel</>}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('generate');
-                  resetMessages();
-                }}
-                style={{
-                  width: '100%',
-                  padding: '1rem',
-                  borderRadius: '14px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '0.45rem',
-                  fontWeight: 700,
-                  fontSize: '0.86rem',
-                  cursor: 'pointer',
-                  background: 'rgba(255,255,255,0.04)',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  color: 'rgba(255,255,255,0.72)',
-                }}
-              >
-                <ChevronRight size={16} />
-                Ya quiero generar
-              </button>
-            </div>
-          ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.35fr', gap: '0.65rem' }}>
-              <button
-                id="btn-preview-analysis"
-                onClick={handlePreview}
-                disabled={!file || isLoading}
-                style={{
-                  width: '100%',
-                  padding: '1rem',
-                  borderRadius: '14px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '0.5rem',
-                  fontWeight: 700,
-                  fontSize: '0.86rem',
-                  cursor: (!file || isLoading) ? 'not-allowed' : 'pointer',
-                  background: isReadyToGenerate ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.05)',
-                  border: isReadyToGenerate ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(96,165,250,0.18)',
-                  color: (!file || isLoading) ? 'rgba(255,255,255,0.2)' : (isReadyToGenerate ? 'rgba(255,255,255,0.55)' : '#BFDBFE'),
-                }}
-              >
-                {isLoading
-                  ? <><Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> Revisando...</>
-                  : <><Eye size={18} /> Revisar estructura</>}
-              </button>
-              <button
-                id="btn-generate-pptx"
-                onClick={handleGenerate}
-                disabled={!file || isLoading}
-                className={isReadyToGenerate ? 'animate-attention-glow' : undefined}
-                style={{
-                  width: '100%',
-                  padding: '1rem',
-                  border: 'none',
-                  borderRadius: '14px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '0.5rem',
-                  fontWeight: 800,
-                  fontSize: '0.94rem',
-                  cursor: (!file || isLoading) ? 'not-allowed' : 'pointer',
-                  background: (!file || isLoading)
-                    ? 'rgba(255,255,255,0.05)'
-                    : isReadyToGenerate
-                      ? 'linear-gradient(135deg, #1D4ED8 0%, #2563EB 35%, #4F46E5 100%)'
-                      : 'linear-gradient(135deg, #1E40AF 0%, #3B82F6 50%, #6366F1 100%)',
-                  color: (!file || isLoading) ? 'rgba(255,255,255,0.2)' : 'white',
-                  boxShadow: (!file || isLoading)
-                    ? 'none'
-                    : isReadyToGenerate
-                      ? '0 14px 34px rgba(37,99,235,0.46), 0 0 0 2px rgba(147,197,253,0.18) inset, 0 0 0 3px rgba(59,130,246,0.12)'
-                      : '0 8px 28px rgba(59,130,246,0.4), 0 0 0 1px rgba(59,130,246,0.2) inset',
-                  transformOrigin: 'center',
-                }}
-              >
-                {isLoading
-                  ? <><Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> Generando presentación...</>
-                  : <><Sparkles size={18} /> {isReadyToGenerate ? 'Generar PowerPoint ahora' : 'Generar PowerPoint'}</>}
+                Revisar
               </button>
             </div>
           )}
         </div>
       </div>
-    </div>
-      {/* Sidebar AIControlPanel */}
-      <AIControlPanel
-        file={file}
-        isOrganizedFile={Boolean(file?.name?.startsWith('ORGANIZADO_'))}
-        originalFileName={originalFileName}
-        onPromptChange={setUserPrompt}
-        onFocusChange={(f) => setOrgMode(f === 'text' ? 'mixed' : f)}
-        onContextChange={setPresentationContext}
-      />
+
+      {/* Advanced drawer (hosts AIControlPanel) */}
+      <AdvancedDrawer
+        open={showAdvanced}
+        onClose={() => setShowAdvanced(false)}
+        title="Panel avanzado · IA"
+      >
+        <AIControlPanel
+          file={file}
+          isOrganizedFile={Boolean(file?.name?.startsWith('ORGANIZADO_'))}
+          originalFileName={originalFileName}
+          onPromptChange={setUserPrompt}
+          onFocusChange={(f) => setOrgMode(f === 'text' ? 'mixed' : f)}
+          onContextChange={setPresentationContext}
+        />
+      </AdvancedDrawer>
+
+      <style>{`
+        .upl-root {
+          width: 100%;
+          display: flex;
+          flex-direction: column;
+        }
+
+        .upl-card {
+          background: var(--c-bg-elevated);
+          backdrop-filter: blur(24px) saturate(180%);
+          -webkit-backdrop-filter: blur(24px) saturate(180%);
+          border-radius: var(--r-2xl);
+          border: 1px solid var(--c-border);
+          overflow: hidden;
+          box-shadow: var(--shadow-xl), inset 0 0 1px rgba(255, 255, 255, 0.10);
+        }
+
+        /* Header */
+        .upl-header {
+          padding: clamp(0.75rem, 1.4vw, 1rem) clamp(0.95rem, 1.8vw, 1.25rem);
+          border-bottom: 1px solid var(--c-divider);
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01));
+          display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+          flex-wrap: wrap;
+        }
+        .upl-head-left { min-width: 0; flex: 1; }
+        .upl-eyebrow {
+          color: white; font-weight: 800; font-size: 0.92rem;
+          letter-spacing: -0.01em; line-height: 1.2;
+        }
+        .upl-tagline {
+          color: var(--c-text-tertiary); font-size: 0.72rem;
+          margin-top: 2px; line-height: 1.35;
+        }
+        @media (max-width: 480px) {
+          .upl-tagline { display: none; }
+        }
+        .upl-adv-trigger {
+          display: inline-flex; align-items: center; gap: 0.35rem;
+          padding: 0.45rem 0.7rem;
+          border-radius: var(--r-pill);
+          background: rgba(124, 58, 237, 0.12);
+          border: 1px solid rgba(124, 58, 237, 0.30);
+          color: #C4B5FD;
+          font-size: 0.74rem; font-weight: 700;
+          transition: all var(--t-base) var(--ease-out);
+          flex-shrink: 0;
+        }
+        .upl-adv-trigger:hover { background: rgba(124, 58, 237, 0.20); color: white; }
+
+        /* Body */
+        .upl-body {
+          padding: clamp(0.85rem, 1.6vw, 1.25rem);
+          display: flex;
+          flex-direction: column;
+          gap: clamp(0.7rem, 1.4vw, 0.95rem);
+        }
+
+        /* Progress (loading state) */
+        .upl-progress-card {
+          background: rgba(0, 0, 0, 0.30);
+          border-radius: var(--r-xl);
+          padding: 1rem 1.05rem;
+          border: 1px solid rgba(59, 130, 246, 0.15);
+        }
+        .upl-progress-steps { display: flex; flex-direction: column; gap: 0.45rem; margin-bottom: 0.85rem; }
+        .upl-progress-step {
+          display: flex; align-items: center; gap: 0.55rem;
+          transition: opacity var(--t-slow) var(--ease-out);
+        }
+        .upl-progress-step.is-done    { opacity: 0.55; }
+        .upl-progress-step.is-active  { opacity: 1; }
+        .upl-progress-step.is-pending { opacity: 0.25; }
+        .upl-progress-icon {
+          width: 22px; height: 22px;
+          border-radius: 6px;
+          display: flex; align-items: center; justify-content: center;
+          background: transparent;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          flex-shrink: 0;
+          transition: all var(--t-base) var(--ease-out);
+        }
+        .upl-progress-step.is-active .upl-progress-icon { background: rgba(59, 130, 246, 0.20); border-color: rgba(59, 130, 246, 0.30); }
+        .upl-progress-step.is-done .upl-progress-icon { background: rgba(74, 222, 128, 0.20); border-color: rgba(74, 222, 128, 0.30); }
+        .upl-progress-label { font-size: 0.78rem; font-weight: 500; color: var(--c-text-faint); }
+        .upl-progress-step.is-active .upl-progress-label { font-weight: 700; color: var(--c-brand-blue-300); }
+        .upl-progress-step.is-done .upl-progress-label { color: var(--c-success-400); }
+        .upl-progress-bar { height: 4px; background: rgba(255, 255, 255, 0.06); border-radius: 2px; overflow: hidden; }
+        .upl-progress-bar-fill {
+          height: 100%;
+          background: linear-gradient(90deg, var(--c-brand-blue-500), var(--c-brand-indigo-500));
+          border-radius: 2px;
+          transition: width 0.8s var(--ease-out);
+        }
+        .upl-stream-card {
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid var(--c-border);
+          border-radius: var(--r-lg);
+          padding: 1rem;
+        }
+
+        /* Dropzone */
+        .upl-dropzone {
+          border: 2px dashed var(--c-border-strong);
+          border-radius: var(--r-xl);
+          display: flex; flex-direction: column;
+          align-items: center; justify-content: center;
+          background: rgba(255, 255, 255, 0.015);
+          padding: clamp(0.85rem, 2.5vw, 1.5rem) 1rem;
+          min-height: clamp(98px, 14vh, 140px);
+          position: relative;
+          overflow: hidden;
+          transition: all var(--t-base) var(--ease-out);
+          cursor: pointer;
+        }
+        .upl-dropzone:hover:not(.has-file):not(.is-dragging) {
+          border-color: rgba(96, 165, 250, 0.30);
+          background: rgba(59, 130, 246, 0.04);
+        }
+        .upl-dropzone.is-dragging {
+          border-color: var(--c-brand-blue-500);
+          background: rgba(59, 130, 246, 0.08);
+        }
+        .upl-dropzone.has-file {
+          border-color: rgba(74, 222, 128, 0.40);
+          background: rgba(74, 222, 128, 0.03);
+          padding: clamp(0.65rem, 1.6vw, 0.95rem) 1rem;
+          cursor: default;
+          min-height: auto;
+        }
+        .upl-dropzone-shimmer {
+          position: absolute; inset: 0;
+          background: linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.05), transparent);
+          background-size: 200% 100%;
+          animation: shimmer 1.5s infinite;
+          pointer-events: none;
+        }
+        .upl-dropzone-empty {
+          display: flex; flex-direction: column; align-items: center;
+          gap: 0.65rem; text-align: center; z-index: 1;
+        }
+        .upl-dropzone-icon {
+          background: rgba(255, 255, 255, 0.06);
+          border-radius: var(--r-lg);
+          padding: clamp(0.6rem, 1.4vw, 0.85rem);
+          border: 1px solid transparent;
+          transition: all var(--t-base) var(--ease-out);
+        }
+        .upl-dropzone.is-dragging .upl-dropzone-icon {
+          background: rgba(59, 130, 246, 0.15);
+          border-color: rgba(59, 130, 246, 0.20);
+          transform: scale(1.05);
+        }
+        .upl-dropzone-headline {
+          color: var(--c-text-secondary); font-weight: 700;
+          margin-bottom: 0.2rem;
+          font-size: clamp(0.82rem, 1.3vw, 0.9rem);
+        }
+        .upl-dropzone.is-dragging .upl-dropzone-headline { color: var(--c-brand-blue-300); }
+        .upl-dropzone-help {
+          color: var(--c-text-muted);
+          font-size: clamp(0.7rem, 1.1vw, 0.76rem); line-height: 1.4;
+        }
+        .upl-dropzone-link {
+          color: var(--c-brand-blue-400); font-weight: 700;
+          text-decoration: underline; text-underline-offset: 2px;
+        }
+
+        /* File row (when file is set) */
+        .upl-file-row { display: flex; align-items: center; gap: 0.75rem; width: 100%; }
+        .upl-file-icon {
+          background: rgba(74, 222, 128, 0.12);
+          border-radius: var(--r-lg);
+          padding: 0.5rem;
+          border: 1px solid rgba(74, 222, 128, 0.18);
+          flex-shrink: 0;
+        }
+        .upl-file-meta { flex: 1; min-width: 0; }
+        .upl-file-name {
+          color: white; font-weight: 700;
+          font-size: clamp(0.8rem, 1.3vw, 0.88rem);
+          margin-bottom: 0.12rem;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .upl-file-size { color: var(--c-text-muted); font-size: 0.7rem; }
+        .upl-file-change {
+          color: var(--c-text-tertiary);
+          background: rgba(255, 255, 255, 0.05);
+          border: 1px solid var(--c-border);
+          font-size: 0.7rem; font-weight: 600;
+          padding: 0.4rem 0.65rem;
+          border-radius: var(--r-md);
+          display: flex; align-items: center; gap: 0.3rem;
+          flex-shrink: 0;
+          transition: all var(--t-base) var(--ease-out);
+        }
+        .upl-file-change:hover { background: rgba(255, 255, 255, 0.10); color: white; }
+
+        /* Discrete organizer */
+        .upl-organizer-toggle {
+          display: inline-flex; align-items: center; gap: 0.35rem;
+          padding: 0.45rem 0.6rem;
+          background: transparent; border: none;
+          color: var(--c-text-muted);
+          font-size: 0.72rem; font-weight: 600;
+          cursor: pointer; align-self: flex-start;
+          transition: color var(--t-base) var(--ease-out);
+        }
+        .upl-organizer-toggle:hover { color: var(--c-text-secondary); }
+
+        .upl-organizer-box {
+          padding: 0.85rem 0.95rem;
+          background: rgba(255, 255, 255, 0.025);
+          border: 1px solid var(--c-divider);
+          border-radius: var(--r-lg);
+          display: flex; flex-direction: column; gap: 0.6rem;
+        }
+        .upl-organizer-help { color: var(--c-text-tertiary); font-size: 0.74rem; line-height: 1.45; }
+        .upl-organizer-modes {
+          display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.4rem;
+        }
+        @media (min-width: 520px) {
+          .upl-organizer-modes { grid-template-columns: repeat(4, 1fr); }
+        }
+        .upl-org-mode {
+          padding: 0.5rem 0.6rem;
+          background: rgba(255, 255, 255, 0.02);
+          border: 1px solid var(--c-border);
+          border-radius: var(--r-md);
+          color: var(--c-text-secondary);
+          display: flex; flex-direction: column; gap: 2px;
+          text-align: left; cursor: pointer;
+          transition: all var(--t-base) var(--ease-out);
+        }
+        .upl-org-mode:hover { background: rgba(255, 255, 255, 0.05); color: white; border-color: var(--c-border-strong); }
+        .upl-org-mode.is-active {
+          background: rgba(74, 222, 128, 0.10);
+          border-color: rgba(74, 222, 128, 0.35);
+          color: #86EFAC;
+        }
+        .upl-org-mode-label { font-size: 0.78rem; font-weight: 700; }
+        .upl-org-mode-desc { font-size: 0.66rem; opacity: 0.75; }
+        .upl-organizer-foot { color: var(--c-text-muted); font-size: 0.68rem; font-style: italic; }
+
+        .upl-organize-cta {
+          display: inline-flex; align-items: center; gap: 0.35rem;
+          align-self: flex-start;
+          padding: 0.45rem 0.7rem;
+          background: rgba(74, 222, 128, 0.06);
+          border: 1px solid rgba(74, 222, 128, 0.18);
+          border-radius: var(--r-pill);
+          color: #86EFAC;
+          font-size: 0.7rem; font-weight: 700;
+          cursor: pointer;
+          transition: all var(--t-base) var(--ease-out);
+        }
+        .upl-organize-cta:hover { background: rgba(74, 222, 128, 0.14); color: white; }
+
+        /* Banners */
+        .upl-banner { padding: 0.85rem 1rem; border-radius: var(--r-lg); }
+        .upl-banner-error {
+          background: rgba(239, 68, 68, 0.08);
+          border: 1px solid rgba(239, 68, 68, 0.20);
+          display: flex; gap: 0.6rem; align-items: flex-start;
+        }
+        .upl-banner-error-icon { flex-shrink: 0; margin-top: 2px; }
+        .upl-banner-error-title { color: var(--c-error-300); font-size: 0.82rem; font-weight: 700; margin-bottom: 0.2rem; }
+        .upl-banner-error-msg { color: rgba(252, 165, 165, 0.74); font-size: 0.75rem; line-height: 1.5; }
+        .upl-banner-retry {
+          background: rgba(220, 38, 38, 0.08);
+          border: 1px solid rgba(220, 38, 38, 0.30);
+          color: var(--c-error-300);
+        }
+        .upl-banner-retry-title { font-weight: 700; margin-bottom: 0.3rem; font-size: 0.85rem; }
+        .upl-banner-retry-action { font-size: 0.78rem; opacity: 0.8; margin-bottom: 0.6rem; }
+        .upl-banner-retry-actions { display: flex; gap: 0.5rem; }
+        .upl-btn-retry {
+          padding: 0.4rem 0.8rem;
+          background: rgba(124, 58, 237, 0.20);
+          border: 1px solid rgba(124, 58, 237, 0.40);
+          border-radius: 8px;
+          color: var(--c-brand-violet-300);
+          font-size: 0.78rem; font-weight: 700;
+          transition: background var(--t-base) var(--ease-out);
+        }
+        .upl-btn-retry:hover { background: rgba(124, 58, 237, 0.30); }
+        .upl-btn-cancel {
+          padding: 0.4rem 0.8rem;
+          background: transparent;
+          border: 1px solid var(--c-border-strong);
+          border-radius: 8px;
+          color: var(--c-text-tertiary);
+          font-size: 0.78rem;
+          transition: all var(--t-base) var(--ease-out);
+        }
+        .upl-btn-cancel:hover { background: rgba(255, 255, 255, 0.05); color: white; }
+
+        .upl-banner-success {
+          background: rgba(74, 222, 128, 0.06);
+          border: 1px solid rgba(74, 222, 128, 0.20);
+        }
+        .upl-banner-success-row { display: flex; gap: 0.6rem; align-items: center; margin-bottom: 0.4rem; }
+        .upl-banner-success-title { color: var(--c-success-400); font-size: 0.86rem; font-weight: 800; }
+        .upl-banner-success-sub { color: var(--c-text-tertiary); font-size: 0.74rem; margin-left: 1.45rem; line-height: 1.5; }
+        .upl-banner-success-big {
+          background: rgba(74, 222, 128, 0.06);
+          border: 1px solid rgba(74, 222, 128, 0.20);
+          padding: 0.95rem 1rem;
+        }
+        .upl-banner-success-iconwrap {
+          background: rgba(74, 222, 128, 0.15);
+          border-radius: 8px;
+          padding: 0.35rem;
+        }
+        .upl-banner-success-stats {
+          display: flex; gap: 0.9rem; flex-wrap: wrap;
+          margin-top: 0.55rem; padding-top: 0.55rem;
+          border-top: 1px solid rgba(74, 222, 128, 0.10);
+        }
+        .upl-stat { display: flex; align-items: center; gap: 0.35rem; }
+        .upl-stat-label { color: var(--c-text-muted); font-size: 0.68rem; }
+        .upl-stat-value { color: var(--c-success-400); font-size: 0.72rem; font-weight: 700; }
+        .upl-banner-success-actions { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.7rem; flex-wrap: wrap; }
+        .upl-btn-secondary {
+          padding: 0.45rem 0.78rem;
+          background: rgba(74, 222, 128, 0.10);
+          border: 1px solid rgba(74, 222, 128, 0.20);
+          border-radius: 8px;
+          color: var(--c-success-400);
+          font-size: 0.75rem; font-weight: 700;
+          display: flex; align-items: center; gap: 0.3rem;
+          transition: background var(--t-base) var(--ease-out);
+        }
+        .upl-btn-secondary:hover { background: rgba(74, 222, 128, 0.18); }
+        .upl-btn-ghost {
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid var(--c-border-strong);
+          border-radius: 8px;
+          padding: 0.4rem 0.7rem;
+          color: var(--c-text-tertiary);
+          font-size: 0.72rem;
+          transition: all var(--t-base) var(--ease-out);
+        }
+        .upl-btn-ghost:hover { background: rgba(255, 255, 255, 0.10); color: white; }
+
+        /* System link row */
+        .upl-syslink-row { display: flex; justify-content: flex-end; }
+        .upl-syslink {
+          background: none; border: none; padding: 0;
+          color: var(--c-text-muted);
+          font-size: 0.66rem; cursor: pointer;
+          transition: color var(--t-base) var(--ease-out);
+        }
+        .upl-syslink:hover { color: var(--c-text-secondary); text-decoration: underline; }
+
+        .upl-health-row {
+          display: flex; align-items: center; justify-content: space-between;
+          gap: 0.75rem; flex-wrap: wrap;
+          padding: 0.7rem 0.85rem;
+          background: rgba(255, 255, 255, 0.03);
+          border: 1px solid var(--c-divider);
+          border-radius: var(--r-md);
+        }
+        .upl-health-label { color: var(--c-text-secondary); font-size: 0.72rem; font-weight: 700; margin-bottom: 0.15rem; }
+        .upl-health-status { color: var(--c-text-muted); font-size: 0.7rem; }
+        .upl-health-status.is-ok { color: var(--c-success-400); }
+        .upl-health-status.is-bad { color: var(--c-error-300); }
+        .upl-health-btn {
+          padding: 0.45rem 0.7rem;
+          background: rgba(59, 130, 246, 0.12);
+          border: 1px solid rgba(59, 130, 246, 0.20);
+          border-radius: var(--r-md);
+          color: var(--c-brand-blue-300);
+          font-size: 0.72rem; font-weight: 700;
+          display: flex; align-items: center; gap: 0.35rem;
+          transition: all var(--t-base) var(--ease-out);
+        }
+        .upl-health-btn:hover:not(:disabled) { background: rgba(59, 130, 246, 0.20); }
+        .upl-health-btn:disabled { color: var(--c-text-faint); cursor: not-allowed; }
+      `}</style>
     </div>
   );
 }

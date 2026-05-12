@@ -1,195 +1,147 @@
 import ExcelUploader from '@/components/ExcelUploader';
-import { BarChart3 } from 'lucide-react';
+import { BarChart3, Sparkles } from 'lucide-react';
 
 export const metadata = {
   title: 'Socya PPTX Generator – Excel a PowerPoint Inteligente',
   description: 'Convierte cualquier archivo Excel en una presentación profesional con gráficos, tablas, KPIs y badges — todo con detección automática de datos.',
 };
 
-const FEATURES = [
-  { emoji: '1', label: 'Organiza', desc: 'Prepara el Excel' },
-  { emoji: '2', label: 'Genera', desc: 'Crea el PowerPoint' },
-  { emoji: '✨', label: 'Flujo guiado', desc: 'Menos fricción' },
-];
-
 export default function Home() {
   return (
-    <main style={{
-      minHeight: '100dvh',
-      background: '#060D18',
-      display: 'flex', flexDirection: 'column', alignItems: 'center',
-      padding: '1rem 1rem 0.8rem',
-      fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
-      position: 'relative', overflow: 'hidden',
-    }}>
+    <main className="page-shell">
+      {/* Ambient background (decorative, non-interactive) */}
+      <div className="bg-grid" aria-hidden />
+      <div className="bg-orb orb-blue" aria-hidden />
+      <div className="bg-orb orb-green" aria-hidden />
+      <div className="bg-topline" aria-hidden />
 
-      {/* ── Background Effects ── */}
-      {/* Grid pattern */}
-      <div style={{
-        position: 'absolute', inset: 0,
-        backgroundImage: `
-          linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px)
-        `,
-        backgroundSize: '60px 60px',
-        pointerEvents: 'none',
-      }} />
-
-      {/* Gradient orbs */}
-      <div style={{
-        position: 'absolute', top: '-20rem', right: '-10rem',
-        width: '55rem', height: '55rem', borderRadius: '50%',
-        background: 'radial-gradient(circle, rgba(59,130,246,0.12) 0%, transparent 55%)',
-        pointerEvents: 'none', animation: 'float-orb 20s ease-in-out infinite',
-      }} />
-      <div style={{
-        position: 'absolute', bottom: '-15rem', left: '-12rem',
-        width: '48rem', height: '48rem', borderRadius: '50%',
-        background: 'radial-gradient(circle, rgba(74,222,128,0.08) 0%, transparent 55%)',
-        pointerEvents: 'none', animation: 'float-orb 25s ease-in-out infinite reverse',
-      }} />
-      <div style={{
-        position: 'absolute', top: '40%', left: '50%', transform: 'translate(-50%, -50%)',
-        width: '40rem', height: '40rem', borderRadius: '50%',
-        background: 'radial-gradient(circle, rgba(99,102,241,0.06) 0%, transparent 50%)',
-        pointerEvents: 'none',
-      }} />
-
-      {/* Top fade */}
-      <div style={{
-        position: 'absolute', top: 0, left: 0, right: 0, height: '1px',
-        background: 'linear-gradient(90deg, transparent, rgba(59,130,246,0.3), rgba(99,102,241,0.3), transparent)',
-        pointerEvents: 'none',
-      }} />
-
-      {/* ── Logo / Brand ── */}
-      <div
-        style={{
-          display: 'flex', alignItems: 'center', gap: '0.75rem',
-          marginBottom: '0.85rem', zIndex: 10,
-        }}
-        className="animate-fade-in-up"
-      >
-        <div style={{
-          background: 'linear-gradient(135deg, #1E40AF, #3B82F6)',
-          borderRadius: '14px', padding: '0.65rem',
-          display: 'flex',
-          boxShadow: '0 4px 24px rgba(59,130,246,0.35)',
-          border: '1px solid rgba(59,130,246,0.3)',
-        }}>
-          <BarChart3 size={24} color="white" />
+      {/* Compact brand strip — no hero, no duplicated subtitle */}
+      <header className="page-header animate-fade-in-up">
+        <div className="brand">
+          <div className="brand-mark" aria-hidden>
+            <BarChart3 size={20} color="white" />
+          </div>
+          <div className="brand-text">
+            <p className="brand-title">Socya PPTX Generator</p>
+            <p className="brand-sub">v4.0 · Hermes-driven</p>
+          </div>
         </div>
-        <div>
-          <p style={{
-            color: 'rgba(255,255,255,0.92)', fontWeight: 800,
-            fontSize: '1.08rem', margin: 0, letterSpacing: '-0.02em',
-          }}>
-            Socya PPTX Generator
-          </p>
-          <p style={{
-            color: 'rgba(255,255,255,0.3)', fontSize: '0.72rem',
-            margin: 0, letterSpacing: '0.02em',
-          }}>
-            Motor de Generación Automática v4.0
-          </p>
-        </div>
-      </div>
 
-      {/* ── Headline ── */}
-      <header
-        style={{
-          textAlign: 'center', marginBottom: '0.7rem',
-          zIndex: 10, maxWidth: '640px',
-        }}
-        className="animate-fade-in-up stagger-1"
-      >
-        <div style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: '0.45rem',
-          padding: '0.45rem 0.8rem',
-          borderRadius: '999px',
-          background: 'rgba(74,222,128,0.08)',
-          border: '1px solid rgba(74,222,128,0.16)',
-          color: '#86EFAC',
-          fontSize: '0.7rem',
-          fontWeight: 800,
-          marginBottom: '0.65rem',
-        }}>
-          Flujo recomendado: organizar Excel y luego generar PPTX
+        <div className="status-pill" role="status">
+          <Sparkles size={11} />
+          <span>Detección inteligente activa</span>
         </div>
-        <h1 style={{
-          fontSize: 'clamp(1.5rem, 3vw, 2.2rem)', fontWeight: 900,
-          color: 'white', margin: '0 0 0.45rem',
-          letterSpacing: '-0.035em', lineHeight: 1.12,
-        }}>
-          De{' '}
-          <span style={{ color: '#4ADE80' }}>Excel</span>
-          {' '}a{' '}
-          <span style={{
-            background: 'linear-gradient(90deg, #60A5FA, #818CF8, #A78BFA)',
-            WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
-          }}>
-            PowerPoint
-          </span>
-          {' '}inteligente
-        </h1>
-        <p style={{
-          color: 'rgba(255,255,255,0.40)', fontSize: '0.8rem',
-          lineHeight: 1.45, margin: 0,
-        }}>
-          Un flujo simple para que sea claro qué hacer primero:
-          <strong style={{ color: 'rgba(255,255,255,0.68)' }}> organizar el Excel</strong> y luego
-          <strong style={{ color: 'rgba(255,255,255,0.68)' }}> generar el PowerPoint</strong>.
-        </p>
       </header>
 
-      {/* ── Uploader Component ── */}
-      <div
-        style={{ width: '100%', maxWidth: '1180px', zIndex: 10 }}
-        className="animate-fade-in-up stagger-2"
-      >
+      {/* Main interactive surface */}
+      <section className="uploader-shell animate-fade-in-up stagger-1">
         <ExcelUploader />
-      </div>
+      </section>
 
+      <style>{`
+        .page-shell {
+          min-height: 100dvh;
+          width: 100%;
+          max-width: 100vw;
+          background: var(--c-bg-deep);
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          padding: clamp(0.75rem, 2vw, 1.25rem);
+          font-family: var(--font-sans);
+          position: relative;
+          overflow-x: clip;
+        }
 
+        .bg-grid {
+          position: absolute; inset: 0;
+          background-image:
+            linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255, 255, 255, 0.012) 1px, transparent 1px);
+          background-size: 60px 60px;
+          pointer-events: none;
+        }
+        .bg-orb {
+          position: absolute;
+          border-radius: 50%;
+          pointer-events: none;
+          will-change: transform;
+        }
+        .orb-blue {
+          top: -16rem; right: -8rem;
+          width: 42rem; height: 42rem;
+          background: radial-gradient(circle, rgba(59, 130, 246, 0.10) 0%, transparent 55%);
+          animation: float-orb 20s ease-in-out infinite;
+        }
+        .orb-green {
+          bottom: -12rem; left: -10rem;
+          width: 36rem; height: 36rem;
+          background: radial-gradient(circle, rgba(74, 222, 128, 0.07) 0%, transparent 55%);
+          animation: float-orb 25s ease-in-out infinite reverse;
+        }
+        .bg-topline {
+          position: absolute; top: 0; left: 0; right: 0; height: 1px;
+          background: linear-gradient(90deg,
+            transparent,
+            rgba(59, 130, 246, 0.30),
+            rgba(99, 102, 241, 0.30),
+            transparent);
+          pointer-events: none;
+        }
 
-      {/* ── Feature Grid ── */}
-      <div
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          justifyContent: 'center',
-          gap: '0.5rem 0.6rem',
-          marginTop: '0.65rem', zIndex: 10,
-          maxWidth: '520px',
-        }}
-        className="animate-fade-in-up stagger-3"
-      >
-        {FEATURES.map((f) => (
-          <div
-            key={f.label}
-            style={{
-              display: 'flex', alignItems: 'center', gap: '0.4rem',
-              padding: '0.32rem 0.58rem',
-              background: 'rgba(255,255,255,0.03)',
-              borderRadius: '999px',
-              border: '1px solid rgba(255,255,255,0.06)',
-              transition: 'all 0.2s',
-            }}
-          >
-            <span style={{ fontSize: '0.85rem' }}>{f.emoji}</span>
-            <div>
-              <p style={{
-                color: 'rgba(255,255,255,0.55)', fontWeight: 700,
-                fontSize: '0.67rem', margin: 0, lineHeight: 1.2,
-              }}>
-                {f.label}
-              </p>
-            </div>
-          </div>
-        ))}
-      </div>
+        .page-header {
+          width: 100%;
+          max-width: 960px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: var(--space-3);
+          margin-bottom: clamp(0.85rem, 1.6vw, 1.15rem);
+          z-index: 10;
+        }
+        .brand { display: flex; align-items: center; gap: 0.65rem; }
+        .brand-mark {
+          background: linear-gradient(135deg, var(--c-brand-blue-700), var(--c-brand-blue-500));
+          border-radius: var(--r-md);
+          padding: 0.45rem 0.5rem;
+          display: flex; align-items: center; justify-content: center;
+          box-shadow: 0 4px 18px rgba(59, 130, 246, 0.28),
+                      inset 0 1px 0 rgba(255, 255, 255, 0.15);
+          border: 1px solid rgba(59, 130, 246, 0.30);
+        }
+        .brand-title {
+          color: var(--c-text-primary);
+          font-weight: 800; font-size: 0.92rem;
+          letter-spacing: -0.02em; line-height: 1.1;
+        }
+        .brand-sub {
+          color: var(--c-text-muted);
+          font-size: 0.66rem;
+          letter-spacing: 0.02em;
+          line-height: 1.2;
+          margin-top: 1px;
+        }
+        .status-pill {
+          display: inline-flex; align-items: center;
+          gap: var(--space-2);
+          padding: 0.32rem 0.6rem;
+          border-radius: var(--r-pill);
+          background: rgba(74, 222, 128, 0.08);
+          border: 1px solid rgba(74, 222, 128, 0.18);
+          color: var(--c-success-400);
+          font-size: 0.66rem; font-weight: 700;
+          letter-spacing: 0.02em;
+        }
+        @media (max-width: 480px) {
+          .brand-sub, .status-pill { display: none; }
+        }
+
+        .uploader-shell {
+          width: 100%;
+          max-width: 960px;
+          z-index: 10;
+        }
+      `}</style>
     </main>
   );
 }

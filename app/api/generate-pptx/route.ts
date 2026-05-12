@@ -102,6 +102,18 @@ export async function POST(req: NextRequest) {
   const audience = String(formData.get('audience') ?? 'ejecutivos').trim();
   const language = String(formData.get('language') ?? 'Español').trim();
   const theme = parseTheme(formData.get('theme'));
+  // From the PreparePanel: 0-based indices the user toggled OFF.
+  // Forwarded to Python which drops them right before render.
+  let excludeSlideIndices: number[] = [];
+  try {
+    const raw = formData.get('excludeSlideIndices');
+    if (raw) {
+      const parsed = JSON.parse(String(raw));
+      if (Array.isArray(parsed)) {
+        excludeSlideIndices = parsed.filter((n) => Number.isFinite(Number(n))).map(Number);
+      }
+    }
+  } catch { /* ignore malformed input — generate everything */ }
 
   if (!(file instanceof File)) {
     return NextResponse.json(
@@ -156,6 +168,7 @@ export async function POST(req: NextRequest) {
         language,
         current_date: new Date().toLocaleDateString(),
         theme,
+        excludeSlideIndices,
       });
 
       const templatePath = path.join(process.cwd(), 'Plantilla_Presentacion_Socya (1) (1).pptx');
