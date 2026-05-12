@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Jost, Nunito_Sans } from "next/font/google";
 import "./globals.css";
+import { I18nProvider } from "@/utils/i18n";
 
 // Socya: Futura para piezas gráficas → Jost en web (sustituto geométrico).
 const jost = Jost({
@@ -37,7 +38,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="es" className={`${jost.variable} ${nunitoSans.variable} antialiased`}>
-      <body>{children}</body>
+      <body>
+        <I18nProvider>{children}</I18nProvider>
+      </body>
     </html>
   );
 }

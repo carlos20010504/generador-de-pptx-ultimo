@@ -64,54 +64,137 @@ _LONG_TAIL_HEAD_LOOSE  = 6     # top-N kept normally
 _LONG_TAIL_MAX_RATIO   = 0.20  # tail ≤20% of total → group into "Otros"
 
 
+def _hex_to_rgb(hex_str) -> Optional[RGBColor]:
+    """Convert "#RRGGBB" or "RRGGBB" to RGBColor; return None if invalid."""
+    if not hex_str:
+        return None
+    s = str(hex_str).strip().lstrip("#")
+    if len(s) != 6:
+        return None
+    try:
+        return RGBColor(int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return None
+
+
+def _apply_theme_overrides(theme: Optional[dict]) -> dict:
+    """Patch the module-level color palette from a theme dict and return
+    the originals so the caller can restore them with `_restore_theme`.
+    Empty dict means no overrides applied. Theme schema:
+      {primary_hex, accent_hex, text_hex, bg_hex}
+    Only the colors we know how to map are touched — extras are ignored.
+    """
+    if not isinstance(theme, dict):
+        return {}
+    g = globals()
+    saved: dict = {}
+
+    primary = _hex_to_rgb(theme.get("primary_hex"))
+    accent = _hex_to_rgb(theme.get("accent_hex"))
+    text = _hex_to_rgb(theme.get("text_hex"))
+    bg = _hex_to_rgb(theme.get("bg_hex"))
+
+    if primary is not None:
+        saved["FOREST_DARK"] = g["FOREST_DARK"]
+        g["FOREST_DARK"] = primary
+        # Derive a slightly lighter mid for KPIs (visual depth without a
+        # second hex from the theme).
+        saved["FOREST_MID"] = g["FOREST_MID"]
+        g["FOREST_MID"] = primary
+    if accent is not None:
+        saved["GOLD"] = g["GOLD"]
+        g["GOLD"] = accent
+        # Refresh derived palettes that hold the accent
+        saved["KPI_COLORS"] = g["KPI_COLORS"]
+        g["KPI_COLORS"] = [g["FOREST_MID"], g["FOREST_LITE"], accent, g["TERRACOTTA"]]
+        # CHART_PALETTE uses string hex (matplotlib), not RGBColor
+        saved["CHART_PALETTE"] = g["CHART_PALETTE"]
+        accent_hex = "#{:02X}{:02X}{:02X}".format(accent[0], accent[1], accent[2])
+        primary_hex = "#{:02X}{:02X}{:02X}".format(
+            (primary or g["FOREST_DARK"])[0],
+            (primary or g["FOREST_DARK"])[1],
+            (primary or g["FOREST_DARK"])[2],
+        )
+        g["CHART_PALETTE"] = [primary_hex, accent_hex,
+                              "#4A7C3A", "#B85042", primary_hex, "#84B59F"]
+    if text is not None:
+        saved["TEXT_DARK"] = g["TEXT_DARK"]
+        g["TEXT_DARK"] = text
+    if bg is not None:
+        saved["PAGE_BG"] = g["PAGE_BG"]
+        g["PAGE_BG"] = bg
+    return saved
+
+
+def _restore_theme(saved: dict) -> None:
+    """Undo what `_apply_theme_overrides` patched, so the module returns to
+    its built-in palette between renders (relevant when running multiple
+    renders in the same Python process — tests, dev hot-reload, etc.)."""
+    if not saved:
+        return
+    g = globals()
+    for key, value in saved.items():
+        g[key] = value
+
+
 def render_pptx(slides: List[dict], presentation_meta: dict,
-                template_path: Path, output_path: Path) -> None:
-    """Render slides to a PPTX. presentation_meta drives the title slide + footer."""
-    prs = Presentation(str(template_path))
-    # Force 16:9 widescreen
-    prs.slide_width = Inches(SLIDE_W)
-    prs.slide_height = Inches(SLIDE_H)
-    # Strip pre-existing slides from the template — we control the deck
-    while len(prs.slides._sldIdLst) > 0:
-        rId = prs.slides._sldIdLst[0].rId
-        prs.part.drop_rel(rId)
-        del prs.slides._sldIdLst[0]
+                template_path: Path, output_path: Path,
+                theme: Optional[dict] = None) -> None:
+    """Render slides to a PPTX. presentation_meta drives the title slide + footer.
 
-    blank_layout = _pick_blank_layout(prs)
-    deck_title = (presentation_meta.get("title") or "").strip()
-    deck_subtitle = (presentation_meta.get("subtitle") or "").strip()
-    footer_tagline = _build_footer_tagline(deck_title)
+    `theme` (optional): {primary_hex, accent_hex, text_hex, bg_hex} from the
+    UI selector. When provided, swaps the brand palette before rendering and
+    restores it after (so the next render can pick a different theme cleanly).
+    """
+    saved_palette = _apply_theme_overrides(theme)
+    try:
+        prs = Presentation(str(template_path))
+        # Force 16:9 widescreen
+        prs.slide_width = Inches(SLIDE_W)
+        prs.slide_height = Inches(SLIDE_H)
+        # Strip pre-existing slides from the template — we control the deck
+        while len(prs.slides._sldIdLst) > 0:
+            rId = prs.slides._sldIdLst[0].rId
+            prs.part.drop_rel(rId)
+            del prs.slides._sldIdLst[0]
 
-    total = len(slides)
-    for i, slide_def in enumerate(slides):
-        stype = slide_def.get("type")
-        slide = prs.slides.add_slide(blank_layout)
-        _add_page_background(slide)
+        blank_layout = _pick_blank_layout(prs)
+        deck_title = (presentation_meta.get("title") or "").strip()
+        deck_subtitle = (presentation_meta.get("subtitle") or "").strip()
+        footer_tagline = _build_footer_tagline(deck_title)
 
-        if stype == "title":
-            _add_title_slide(slide, slide_def, deck_title, deck_subtitle,
-                             i + 1, total)
-            continue
+        total = len(slides)
+        for i, slide_def in enumerate(slides):
+            stype = slide_def.get("type")
+            slide = prs.slides.add_slide(blank_layout)
+            _add_page_background(slide)
 
-        eyebrow = slide_def.get("eyebrow") or _eyebrow_from_type(stype, i)
-        _add_eyebrow(slide, eyebrow)
-        _add_title_block(slide, slide_def.get("title", ""),
-                         _slide_subtitle(slide_def))
+            if stype == "title":
+                _add_title_slide(slide, slide_def, deck_title, deck_subtitle,
+                                 i + 1, total)
+                continue
 
-        if stype == "kpi_row":
-            _add_kpi_row(slide, slide_def)
-        elif stype == "chart":
-            _add_chart_slide(slide, slide_def)
-        elif stype == "table":
-            _add_table_slide(slide, slide_def)
-        elif stype == "text_bullets":
-            _add_bullets_slide(slide, slide_def)
+            eyebrow = slide_def.get("eyebrow") or _eyebrow_from_type(stype, i)
+            _add_eyebrow(slide, eyebrow)
+            _add_title_block(slide, slide_def.get("title", ""),
+                             _slide_subtitle(slide_def))
 
-        _add_footer(slide, footer_tagline, i + 1, total)
+            if stype == "kpi_row":
+                _add_kpi_row(slide, slide_def)
+            elif stype == "chart":
+                _add_chart_slide(slide, slide_def)
+            elif stype == "table":
+                _add_table_slide(slide, slide_def)
+            elif stype == "text_bullets":
+                _add_bullets_slide(slide, slide_def)
 
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    prs.save(str(output_path))
+            _add_footer(slide, footer_tagline, i + 1, total)
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        prs.save(str(output_path))
+    finally:
+        _restore_theme(saved_palette)
 
 
 # ──────────────────── Slide builders ────────────────────

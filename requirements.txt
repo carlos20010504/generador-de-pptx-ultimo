@@ -1,0 +1,14 @@
+# Runtime dependencies for the Socya PPTX pipeline.
+# Pinned by minor version where stability matters; loose elsewhere so CI
+# picks up patches without breaking on majors.
+
+pandas>=2.0,<3.0
+openpyxl>=3.1,<4.0
+python-pptx>=0.6.21,<1.1
+matplotlib>=3.7,<4.0
+Pillow>=10.0,<12.0
+numpy>=1.24,<3.0
+requests>=2.31,<3.0
+
+# xlrd is needed for legacy .xls reading (pandas drops it from the default).
+xlrd>=2.0,<3.0

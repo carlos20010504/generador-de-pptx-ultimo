@@ -49,14 +49,10 @@ next-env.d.ts
 *.pdf
 *.txt
 !requirements-dev.txt
+!requirements.txt
 *.csv
 *.audit.json
-*.md
-!README.md
 !README_ADVANCED_PPTX.md
-!GEMINI.md
-!CLAUDE.md
-!AGENTS.md
 !Guia_Organizacion_Excel.md
 !docs/superpowers/specs/*.md
 !docs/superpowers/plans/*.md

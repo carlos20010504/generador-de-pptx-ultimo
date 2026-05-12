@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from 'react';
-import { Download, ArrowLeft, Loader2, AlertCircle, X } from 'lucide-react';
+import { Download, ArrowLeft, Loader2, AlertCircle, X, FileText } from 'lucide-react';
 
 interface Props {
   token: string;
@@ -22,6 +22,34 @@ export default function PreviewPanel({
   token, count, filename, onConfirm, onBack, isDownloading,
 }: Props) {
   const [zoomIdx, setZoomIdx] = useState<number | null>(null);
+  const [pdfState, setPdfState] = useState<'idle' | 'fetching' | 'error'>('idle');
+  const [pdfError, setPdfError] = useState<string | null>(null);
+
+  const handleDownloadPdf = async () => {
+    if (!token) return;
+    setPdfState('fetching');
+    setPdfError(null);
+    try {
+      const res = await fetch(`/api/pptx-pdf?token=${encodeURIComponent(token)}`);
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        throw new Error(j?.error || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename.replace(/\.pptx$/i, '.pdf');
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setPdfState('idle');
+    } catch (err: unknown) {
+      setPdfState('error');
+      setPdfError(err instanceof Error ? err.message : 'Error al exportar PDF.');
+    }
+  };
 
   // Cerrar zoom con ESC + bloquear scroll mientras está abierto
   useEffect(() => {
@@ -76,8 +104,27 @@ export default function PreviewPanel({
         </button>
         <button
           type="button"
+          onClick={handleDownloadPdf}
+          disabled={isDownloading || pdfState === 'fetching'}
+          className="prv-btn-pdf press-on-active"
+          title="Convierte el PPTX a PDF — útil para compartir sin Office"
+        >
+          {pdfState === 'fetching' ? (
+            <>
+              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+              Generando…
+            </>
+          ) : (
+            <>
+              <FileText size={14} />
+              Descargar PDF
+            </>
+          )}
+        </button>
+        <button
+          type="button"
           onClick={onConfirm}
-          disabled={isDownloading}
+          disabled={isDownloading || pdfState === 'fetching'}
           className="prv-btn-primary press-on-active"
         >
           {isDownloading ? (
@@ -93,6 +140,13 @@ export default function PreviewPanel({
           )}
         </button>
       </div>
+
+      {pdfError && (
+        <div className="prv-pdf-err" role="alert">
+          <AlertCircle size={13} />
+          <span>{pdfError}</span>
+        </div>
+      )}
 
       <p className="prv-foot">
         Archivo: <span className="prv-foot-name">{filename}</span>
@@ -310,6 +364,36 @@ const PRV_STYLES = `
   box-shadow: 0 10px 24px rgba(8, 112, 98, 0.36);
 }
 .prv-btn-primary:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+
+.prv-btn-pdf {
+  padding: 0.85rem 1rem;
+  background: var(--c-bg-elevated);
+  border: 1.5px solid var(--c-primary);
+  border-radius: var(--r-md);
+  color: var(--c-primary);
+  font-family: var(--font-heading);
+  font-size: 0.78rem; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  display: flex; align-items: center; justify-content: center; gap: 0.4rem;
+  cursor: pointer;
+  transition: all 0.18s;
+  white-space: nowrap;
+}
+.prv-btn-pdf:hover:not(:disabled) {
+  background: var(--c-accent-green);
+  color: var(--c-primary-dark);
+}
+.prv-btn-pdf:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.prv-pdf-err {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.5rem 0.7rem;
+  background: #FEF2F2;
+  border: 1px solid rgba(212, 56, 56, 0.30);
+  border-radius: var(--r-md);
+  color: var(--c-error-300);
+  font-size: 0.74rem;
+}
 
 .prv-foot {
   color: var(--c-text-tertiary);

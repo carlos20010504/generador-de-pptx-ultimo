@@ -5,6 +5,7 @@ import {
   Sparkles, FileSpreadsheet, AlertTriangle, AlertCircle,
   TrendingUp, Layers, BarChart2, Loader2, ChevronDown, ChevronRight,
   Lightbulb, CheckSquare, Square, Table2, FileText, LayoutDashboard,
+  GripVertical, Pencil, Check as CheckIcon,
 } from 'lucide-react';
 
 /* ──────────────────────────────────────────────────────────────
@@ -65,11 +66,27 @@ interface Props {
   audience: string;
   language: string;
   theme: ThemeShape;
+  onThemeChange?: (t: ThemeShape) => void;
   mode: Mode;
   onModeChange: (m: Mode) => void;
-  onConfirm: (excludedIndices: number[]) => void;
+  // Returns excluded indices PLUS user overrides applied in the panel:
+  //   - titles: { originalIndex: newTitle } — only changed titles
+  //   - order:  number[] of originalIndex in the new order; null when
+  //             the user didn't reorder (preserves current behavior).
+  onConfirm: (
+    excludedIndices: number[],
+    overrides: { titles?: Record<number, string>; order?: number[] | null }
+  ) => void;
   onOpenAdvanced?: () => void;
 }
+
+// Themes para el PPT generado. Sincronizado con AIControlPanel.THEME_OPTIONS.
+const PREP_THEMES: ThemeShape[] = [
+  { key: 'socya-institucional', name: 'Institucional', primary_hex: '#087062', accent_hex: '#69BE28', text_hex: '#1A1A1A', bg_hex: '#FFFFFF' },
+  { key: 'socya-comite',        name: 'Comité',        primary_hex: '#123C49', accent_hex: '#F3C400', text_hex: '#1A1A1A', bg_hex: '#FFFFFF' },
+  { key: 'socya-impacto',       name: 'Impacto',       primary_hex: '#087062', accent_hex: '#FF8300', text_hex: '#1A1A1A', bg_hex: '#FFFFFF' },
+  { key: 'analitica-moderna',   name: 'Analítica',     primary_hex: '#0F172A', accent_hex: '#2563EB', text_hex: '#1A1A1A', bg_hex: '#F8FAFC' },
+];
 
 const SLIDE_TYPE_META: Record<string, { Ic: React.ComponentType<{ size?: number; color?: string }>; label: string; color: string }> = {
   title:        { Ic: FileSpreadsheet, label: 'Portada',   color: '#F3C400' }, // yellow
@@ -90,7 +107,7 @@ const MODE_LABELS: Record<Mode, string> = {
 
 export default function PreparePanel({
   file, userPrompt, onPromptChange,
-  audience, language, theme, mode, onModeChange,
+  audience, language, theme, onThemeChange, mode, onModeChange,
   onConfirm, onOpenAdvanced,
 }: Props) {
   const [summary, setSummary] = useState<QuickSummary | null>(null);
@@ -109,6 +126,35 @@ export default function PreparePanel({
   // re-fetches on every parent re-render which abort in-flight requests.
   const fileKey = `${file.name}|${file.size}|${file.lastModified}`;
   const promptKey = `${fileKey}|${userPrompt}`;
+
+  // Edición inline de títulos. Map<originalIndex, nuevoTitulo>. Sólo
+  // entradas presentes son overrides; las demás conservan su valor del plan.
+  const [editedTitles, setEditedTitles] = useState<Record<number, string>>({});
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState<string>('');
+
+  // Reordenamiento por drag&drop. `customOrder` es array de originalIndex
+  // en el orden que quiere el usuario. null = orden original del plan.
+  const [customOrder, setCustomOrder] = useState<number[] | null>(null);
+  const [dragIdx, setDragIdx] = useState<number | null>(null);   // pos en customOrder mientras drag
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+
+  // Cuando el plan llega/cambia, resetea overrides para evitar referencias
+  // a slides que ya no existen.
+  useEffect(() => {
+    setEditedTitles({});
+    setCustomOrder(null);
+    setExcluded(new Set());
+    setEditingIdx(null);
+    setExpandedSlide(null);
+  }, [plan?.slides?.length, promptKey]);
+
+  // Lista efectiva en pantalla: aplica customOrder si existe.
+  const orderedIndices = useMemo(() => {
+    const total = plan?.slides?.length ?? 0;
+    if (customOrder && customOrder.length === total) return customOrder;
+    return Array.from({ length: total }, (_, i) => i);
+  }, [customOrder, plan?.slides?.length]);
 
   // Timeouts client-side: si el AI cuelga, abortamos en vez de dejar al
   // usuario esperando indefinidamente. quick-summary es determinístico
@@ -222,6 +268,68 @@ export default function PreparePanel({
       next.has(idx) ? next.delete(idx) : next.add(idx);
       return next;
     });
+  };
+
+  // ── Inline edit ──────────────────────────────────────────────────
+  const startEdit = (originalIdx: number, currentTitle: string) => {
+    setEditingIdx(originalIdx);
+    setEditDraft(editedTitles[originalIdx] ?? currentTitle ?? '');
+  };
+  const commitEdit = () => {
+    if (editingIdx === null) return;
+    const trimmed = editDraft.trim();
+    setEditedTitles(prev => {
+      const next = { ...prev };
+      if (!trimmed) {
+        delete next[editingIdx];   // empty → revert al original
+      } else {
+        next[editingIdx] = trimmed;
+      }
+      return next;
+    });
+    setEditingIdx(null);
+    setEditDraft('');
+  };
+  const cancelEdit = () => {
+    setEditingIdx(null);
+    setEditDraft('');
+  };
+
+  // ── Drag & drop reorder ──────────────────────────────────────────
+  // `dragIdx` y `dragOverIdx` son posiciones DENTRO de orderedIndices.
+  const onDragStart = (posInOrdered: number) => (e: React.DragEvent) => {
+    setDragIdx(posInOrdered);
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox necesita data válida para iniciar el drag
+    try { e.dataTransfer.setData('text/plain', String(posInOrdered)); } catch { /* ignore */ }
+  };
+  const onDragOver = (posInOrdered: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    if (dragIdx === null || dragIdx === posInOrdered) return;
+    setDragOverIdx(posInOrdered);
+  };
+  const onDrop = (posInOrdered: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    if (dragIdx === null || dragIdx === posInOrdered) {
+      setDragIdx(null); setDragOverIdx(null);
+      return;
+    }
+    const source = dragIdx;
+    const target = posInOrdered;
+    setCustomOrder(prev => {
+      const base = prev && prev.length === orderedIndices.length
+        ? [...prev]
+        : [...orderedIndices];
+      const [moved] = base.splice(source, 1);
+      base.splice(target, 0, moved);
+      return base;
+    });
+    setDragIdx(null);
+    setDragOverIdx(null);
+  };
+  const onDragEnd = () => {
+    setDragIdx(null);
+    setDragOverIdx(null);
   };
 
   const handleSuggestionClick = (s: QuickSummary['suggestions'][0]) => {
@@ -339,47 +447,120 @@ export default function PreparePanel({
           </div>
         ) : plan ? (
           <>
+            <p className="prep-slide-hint">
+              Click para activar/desactivar · arrastra <GripVertical size={11} style={{ verticalAlign: 'middle' }} /> para reordenar · usa <Pencil size={11} style={{ verticalAlign: 'middle' }} /> para editar el título.
+            </p>
             <ul className="prep-slides">
-              {plan.slides.map((slide) => {
+              {orderedIndices.map((origIdx, posInOrdered) => {
+                const slide = plan.slides[origIdx];
+                if (!slide) return null;
                 const meta = SLIDE_TYPE_META[slide.type] || SLIDE_TYPE_META.unknown;
                 const isExcluded = excluded.has(slide.index);
                 const isMandatory = !!slide.mandatory;
                 const isExpanded = expandedSlide === slide.index;
+                const isEditing = editingIdx === slide.index;
+                const displayTitle = editedTitles[slide.index] ?? slide.title;
+                const isDragOver = dragOverIdx === posInOrdered;
+                const isDragging = dragIdx === posInOrdered;
                 return (
                   <li key={slide.index}>
-                    <button
-                      type="button"
-                      onClick={() => toggle(slide.index, isMandatory)}
-                      onDoubleClick={() => setExpandedSlide(isExpanded ? null : slide.index)}
-                      disabled={isMandatory}
+                    <div
                       className={[
                         'prep-slide',
                         isExcluded ? 'is-excluded' : 'is-active',
                         isMandatory ? 'is-mandatory' : '',
+                        isDragging ? 'is-dragging' : '',
+                        isDragOver ? 'is-drag-over' : '',
                       ].filter(Boolean).join(' ')}
+                      draggable={!isMandatory && !isEditing}
+                      onDragStart={onDragStart(posInOrdered)}
+                      onDragOver={onDragOver(posInOrdered)}
+                      onDrop={onDrop(posInOrdered)}
+                      onDragEnd={onDragEnd}
+                      onDragLeave={() => setDragOverIdx(null)}
                     >
-                      <span className="prep-slide-check">
+                      {/* Drag handle (no actúa como toggle) */}
+                      <span
+                        className={`prep-slide-drag ${isMandatory ? 'is-disabled' : ''}`}
+                        title={isMandatory ? 'Slide obligatoria — no se puede mover' : 'Arrastra para reordenar'}
+                        aria-label="Mover slide"
+                      >
+                        <GripVertical size={13} />
+                      </span>
+
+                      {/* Toggle activar/desactivar */}
+                      <button
+                        type="button"
+                        onClick={() => toggle(slide.index, isMandatory)}
+                        disabled={isMandatory}
+                        className="prep-slide-check-btn"
+                        aria-label={isExcluded ? 'Activar slide' : 'Desactivar slide'}
+                      >
                         {isExcluded
                           ? <Square size={15} color="rgba(26,26,26,0.30)" />
                           : <CheckSquare size={15} color={isMandatory ? '#F3C400' : '#69BE28'} />}
-                      </span>
-                      <span className="prep-slide-num">{String(slide.index + 1).padStart(2, '0')}</span>
+                      </button>
+
+                      <span className="prep-slide-num">{String(posInOrdered + 1).padStart(2, '0')}</span>
                       <meta.Ic size={12} color={meta.color} />
                       <span className="prep-slide-type" style={{ color: meta.color }}>{meta.label}</span>
-                      <span className="prep-slide-title">{slide.title || `${meta.label} sin título`}</span>
+
+                      {/* Title — inline editable */}
+                      {isEditing ? (
+                        <span className="prep-slide-edit">
+                          <input
+                            autoFocus
+                            type="text"
+                            value={editDraft}
+                            onChange={(e) => setEditDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') { e.preventDefault(); commitEdit(); }
+                              if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+                            }}
+                            onBlur={commitEdit}
+                            className="prep-slide-input"
+                            placeholder="Nuevo título"
+                            maxLength={140}
+                          />
+                          <button
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={commitEdit}
+                            className="prep-slide-edit-ok"
+                            aria-label="Guardar"
+                          >
+                            <CheckIcon size={11} />
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="prep-slide-title-btn"
+                          onClick={() => startEdit(slide.index, displayTitle || meta.label)}
+                          title="Click para editar"
+                        >
+                          <span className="prep-slide-title">
+                            {displayTitle || `${meta.label} sin título`}
+                          </span>
+                          {editedTitles[slide.index] !== undefined && (
+                            <span className="prep-slide-edited" title="Título editado">·</span>
+                          )}
+                          <Pencil size={10} className="prep-slide-edit-icon" />
+                        </button>
+                      )}
+
                       {isMandatory && <span className="prep-slide-pin">obligatoria</span>}
-                      <span
+
+                      {/* Expand chevron */}
+                      <button
+                        type="button"
                         className="prep-slide-toggle"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setExpandedSlide(isExpanded ? null : slide.index);
-                        }}
-                        role="button"
+                        onClick={() => setExpandedSlide(isExpanded ? null : slide.index)}
                         aria-label={isExpanded ? 'Ocultar detalles' : 'Ver detalles'}
                       >
                         {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                      </span>
-                    </button>
+                      </button>
+                    </div>
                     {isExpanded && (
                       <div className="prep-slide-detail">
                         {slide.subtitle && <p className="prep-slide-sub">{slide.subtitle}</p>}
@@ -487,6 +668,29 @@ export default function PreparePanel({
               </div>
             </div>
 
+            {onThemeChange && (
+              <div className="prep-mode-row">
+                <label className="prep-mode-label">Tema visual</label>
+                <div className="prep-theme-options">
+                  {PREP_THEMES.map((t) => (
+                    <button
+                      key={t.key}
+                      type="button"
+                      onClick={() => onThemeChange(t)}
+                      className={`prep-theme-opt ${theme.key === t.key ? 'is-active' : ''}`}
+                      title={`${t.name}: primario ${t.primary_hex}, acento ${t.accent_hex}`}
+                    >
+                      <span className="prep-theme-swatch" aria-hidden>
+                        <span style={{ background: t.primary_hex }} />
+                        <span style={{ background: t.accent_hex }} />
+                      </span>
+                      {t.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {onOpenAdvanced && (
               <p className="prep-refine-hint">
                 ¿Necesitas más control (tema, audiencia, sugerencias completas)? Abre el{' '}
@@ -502,7 +706,13 @@ export default function PreparePanel({
          ──────────────────────────────────────────────── */}
       <button
         type="button"
-        onClick={() => onConfirm(Array.from(excluded))}
+        onClick={() => onConfirm(Array.from(excluded), {
+          // Sólo enviamos overrides cuando hay algo realmente cambiado.
+          titles: Object.keys(editedTitles).length > 0 ? editedTitles : undefined,
+          order: customOrder && customOrder.length === (plan?.slides?.length ?? 0)
+            ? customOrder
+            : null,
+        })}
         disabled={planLoading || !plan || stats.kept === 0}
         className="prep-cta press-on-active"
       >
@@ -742,6 +952,13 @@ const PREP_STYLES = `
   list-style: none; margin: 0; padding: 0;
   max-height: 50vh; overflow-y: auto;
 }
+.prep-slide-hint {
+  color: var(--c-text-tertiary);
+  font-size: 0.7rem;
+  line-height: 1.5;
+  padding: 0.1rem 0.2rem;
+}
+
 .prep-slide {
   display: flex; align-items: center; gap: 0.55rem;
   width: 100%;
@@ -751,11 +968,98 @@ const PREP_STYLES = `
   border-radius: var(--r-md);
   text-align: left;
   color: var(--c-text-primary);
-  cursor: pointer;
-  transition: background var(--t-base) var(--ease-out), border-color var(--t-base) var(--ease-out);
+  transition: background var(--t-base) var(--ease-out), border-color var(--t-base) var(--ease-out), opacity var(--t-base) var(--ease-out);
   font-size: 0.78rem;
 }
-.prep-slide:hover:not(:disabled):not(.is-mandatory) {
+.prep-slide.is-dragging { opacity: 0.5; }
+.prep-slide.is-drag-over {
+  border-color: var(--c-primary);
+  border-style: dashed;
+  background: var(--c-bg-tinted);
+}
+
+/* Drag handle */
+.prep-slide-drag {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.2rem; height: 1.2rem;
+  color: var(--c-text-muted);
+  cursor: grab;
+  flex-shrink: 0;
+  border-radius: var(--r-sm);
+}
+.prep-slide-drag:hover { color: var(--c-primary); background: var(--c-bg-tinted); }
+.prep-slide-drag:active { cursor: grabbing; }
+.prep-slide-drag.is-disabled { cursor: not-allowed; opacity: 0.35; }
+
+/* Toggle activate/deactivate */
+.prep-slide-check-btn {
+  background: none; border: none; padding: 0;
+  display: inline-flex; align-items: center;
+  cursor: pointer; flex-shrink: 0;
+}
+.prep-slide-check-btn:disabled { cursor: default; }
+
+/* Title button (click to edit) */
+.prep-slide-title-btn {
+  flex: 1; min-width: 0;
+  background: none; border: none; padding: 0.2rem 0.35rem;
+  border-radius: var(--r-sm);
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  color: var(--c-text-primary);
+  text-align: left;
+  cursor: text;
+  transition: background var(--t-base) var(--ease-out);
+}
+.prep-slide-title-btn:hover {
+  background: var(--c-bg-tinted);
+}
+.prep-slide-title-btn:hover .prep-slide-edit-icon {
+  opacity: 1;
+}
+.prep-slide-edit-icon {
+  color: var(--c-text-muted);
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity var(--t-base) var(--ease-out);
+}
+.prep-slide-edited {
+  color: var(--c-primary);
+  font-weight: 800;
+  font-size: 1rem;
+  line-height: 0;
+  margin: 0 -0.1rem;
+}
+
+/* Inline edit input */
+.prep-slide-edit {
+  flex: 1; min-width: 0;
+  display: inline-flex; align-items: center; gap: 0.4rem;
+}
+.prep-slide-input {
+  flex: 1; min-width: 0;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--c-text-primary);
+  background: var(--c-bg-elevated);
+  border: 1.5px solid var(--c-primary);
+  border-radius: var(--r-sm);
+  padding: 0.25rem 0.45rem;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(8, 112, 98, 0.15);
+}
+.prep-slide-edit-ok {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.55rem; height: 1.55rem;
+  background: var(--c-primary);
+  border: none;
+  border-radius: var(--r-sm);
+  color: white;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.prep-slide-edit-ok:hover { background: var(--c-primary-dark); }
+.prep-slide:not(.is-mandatory):hover {
   background: var(--c-bg-tinted);
   border-color: var(--c-primary);
 }
@@ -963,6 +1267,44 @@ const PREP_STYLES = `
   background: var(--c-primary);
   color: white;
   box-shadow: 0 1px 3px rgba(8, 112, 98, 0.30);
+}
+
+.prep-theme-options {
+  display: inline-flex; flex-wrap: wrap; gap: 0.4rem;
+}
+.prep-theme-opt {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  padding: 0.4rem 0.65rem 0.4rem 0.4rem;
+  background: var(--c-bg-elevated);
+  border: 1.5px solid var(--c-border);
+  border-radius: var(--r-pill);
+  color: var(--c-text-secondary);
+  font-family: var(--font-heading);
+  font-size: 0.7rem; font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: all var(--t-base) var(--ease-out);
+}
+.prep-theme-opt:hover {
+  background: var(--c-bg-tinted);
+  border-color: var(--c-primary);
+  color: var(--c-primary);
+}
+.prep-theme-opt.is-active {
+  border-color: var(--c-primary);
+  background: var(--c-accent-green);
+  color: var(--c-primary-dark);
+  box-shadow: 0 1px 3px rgba(8, 112, 98, 0.20);
+}
+.prep-theme-swatch {
+  display: inline-flex;
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  border: 1px solid rgba(26, 26, 26, 0.10);
+  width: 28px; height: 14px;
+}
+.prep-theme-swatch > span {
+  flex: 1; display: block;
 }
 
 .prep-refine-hint {

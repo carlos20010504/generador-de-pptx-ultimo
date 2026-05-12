@@ -119,6 +119,30 @@ export async function POST(req: NextRequest) {
     }
   } catch { /* ignore malformed input — generate everything */ }
 
+  // Map of {originalIndex: nuevoTitulo} editado por el usuario en el panel.
+  let slideTitles: Record<number, string> | null = null;
+  try {
+    const raw = formData.get('slideTitles');
+    if (raw) {
+      const parsed = JSON.parse(String(raw));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        slideTitles = parsed as Record<number, string>;
+      }
+    }
+  } catch { /* ignore */ }
+
+  // Reordenamiento: array de originalIndex en el orden que quiere el usuario.
+  let slideOrder: number[] | null = null;
+  try {
+    const raw = formData.get('slideOrder');
+    if (raw) {
+      const parsed = JSON.parse(String(raw));
+      if (Array.isArray(parsed)) {
+        slideOrder = parsed.filter((n) => Number.isFinite(Number(n))).map(Number);
+      }
+    }
+  } catch { /* ignore */ }
+
   if (!(file instanceof File)) {
     return NextResponse.json(
       {
@@ -173,6 +197,8 @@ export async function POST(req: NextRequest) {
         current_date: new Date().toLocaleDateString(),
         theme,
         excludeSlideIndices,
+        slideTitles,
+        slideOrder,
       });
 
       const templatePath = path.join(process.cwd(), 'Plantilla_Presentacion_Socya (1) (1).pptx');

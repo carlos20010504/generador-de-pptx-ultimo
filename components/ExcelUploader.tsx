@@ -15,6 +15,7 @@ import AuditModal from './AuditModal';
 import PreparePanel from './PreparePanel';
 import AdvancedDrawer from './AdvancedDrawer';
 import PreviewPanel from './PreviewPanel';
+import { useT } from '@/utils/i18n';
 import { formatErrorForUser, isPipelineError, PipelineErrorPayload } from '@/utils/error-codes';
 
 type Status = 'idle' | 'processing' | 'previewing' | 'success' | 'organized' | 'error';
@@ -80,6 +81,7 @@ function validateSelectedFile(file: File): string | null {
 }
 
 export default function ExcelUploader() {
+  const t = useT();
   const [file, setFile] = useState<File | null>(null);
   const [originalFileName, setOriginalFileName] = useState<string | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
@@ -112,6 +114,10 @@ export default function ExcelUploader() {
   const [showAudit, setShowAudit] = useState(false);
   const [retryError, setRetryError] = useState<PipelineErrorPayload | null>(null);
   const [excludedSlideIndices, setExcludedSlideIndices] = useState<number[]>([]);
+  // User-edited titles ({originalIndex: nuevoTitulo}) y reordenamiento manual.
+  // null en ambos = sin overrides → backend usa el plan tal cual.
+  const [slideTitleOverrides, setSlideTitleOverrides] = useState<Record<number, string> | null>(null);
+  const [slideOrderOverride, setSlideOrderOverride] = useState<number[] | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showOrganizer, setShowOrganizer] = useState(false);
   const [showHealth, setShowHealth] = useState(false);
@@ -216,6 +222,12 @@ export default function ExcelUploader() {
     formData.append('theme', JSON.stringify(presentationContext.theme));
     if (excludedSlideIndices.length > 0) {
       formData.append('excludeSlideIndices', JSON.stringify(excludedSlideIndices));
+    }
+    if (slideTitleOverrides && Object.keys(slideTitleOverrides).length > 0) {
+      formData.append('slideTitles', JSON.stringify(slideTitleOverrides));
+    }
+    if (slideOrderOverride && slideOrderOverride.length > 0) {
+      formData.append('slideOrder', JSON.stringify(slideOrderOverride));
     }
 
     try {
@@ -480,8 +492,8 @@ export default function ExcelUploader() {
         {/* ─── Compact header ─── */}
         <div className="upl-header">
           <div className="upl-head-left">
-            <p className="upl-eyebrow">Sube tu Excel y obtén un PPT en segundos</p>
-            <p className="upl-tagline">La IA lee, decide los slides y descargas listo.</p>
+            <p className="upl-eyebrow">{t('Sube tu Excel y obtén un PPT en segundos')}</p>
+            <p className="upl-tagline">{t('La IA lee, decide los slides y descargas listo.')}</p>
           </div>
           {file && (
             <button
@@ -491,7 +503,7 @@ export default function ExcelUploader() {
               title="Panel avanzado: prompt, audiencia, tema y sugerencias completas"
             >
               <Settings2 size={14} />
-              Avanzado
+              {t('Avanzado')}
             </button>
           )}
         </div>
@@ -562,10 +574,10 @@ export default function ExcelUploader() {
                   </div>
                   <div>
                     <p className="upl-dropzone-headline">
-                      {isDragActive ? 'Suelta tu archivo aquí' : 'Sube el Excel con el que quieres trabajar'}
+                      {isDragActive ? t('Suelta tu archivo aquí') : t('Sube el Excel con el que quieres trabajar')}
                     </p>
                     <p className="upl-dropzone-help">
-                      Arrastra o <span className="upl-dropzone-link">selecciónalo</span>{' · '}.xlsx · .xls · .xlsm
+                      {t('Arrastra o')} <span className="upl-dropzone-link">{t('selecciónalo')}</span>{' · '}.xlsx · .xls · .xlsm
                     </p>
                   </div>
                 </div>
@@ -591,7 +603,7 @@ export default function ExcelUploader() {
                     type="button"
                   >
                     <RefreshCw size={12} />
-                    Cambiar
+                    {t('Cambiar')}
                   </button>
                 </div>
               )}
@@ -607,7 +619,7 @@ export default function ExcelUploader() {
             >
               {showOrganizer ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
               <Wand2 size={12} />
-              ¿Excel desordenado? Organízalo primero (opcional)
+              {t('¿Excel desordenado? Organízalo primero (opcional)')}
             </button>
           )}
 
@@ -643,7 +655,7 @@ export default function ExcelUploader() {
               title="Genera y descarga una versión organizada del Excel cargado"
             >
               <Wand2 size={12} />
-              Organizar este Excel y descargarlo (opcional)
+              {t('Organizar este Excel y descargarlo (opcional)')}
             </button>
           )}
 
@@ -673,8 +685,11 @@ export default function ExcelUploader() {
               theme={presentationContext.theme}
               mode={orgMode}
               onModeChange={(m) => setOrgMode(m as OrganizerMode)}
-              onConfirm={(excluded) => {
+              onThemeChange={(t) => setPresentationContext(prev => ({ ...prev, theme: t }))}
+              onConfirm={(excluded, overrides) => {
                 setExcludedSlideIndices(excluded);
+                setSlideTitleOverrides(overrides.titles ?? null);
+                setSlideOrderOverride(overrides.order ?? null);
                 setTimeout(() => handleGenerate(), 50);
               }}
               onOpenAdvanced={() => setShowAdvanced(true)}
@@ -780,7 +795,7 @@ export default function ExcelUploader() {
               rel="noopener noreferrer"
               className="upl-syslink"
             >
-              Estado del sistema ↗
+              {t('Estado del sistema ↗')}
             </a>
             <span className="upl-syslink-sep" aria-hidden>·</span>
             <button

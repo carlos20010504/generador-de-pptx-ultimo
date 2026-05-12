@@ -108,3 +108,69 @@ def cmd_preview_pptx(args) -> None:
     width = getattr(args, "width", None) or DEFAULT_WIDTH
     result = generate_previews(args.input, args.output_dir, width=width)
     sys.stdout.write(json.dumps(result, ensure_ascii=True))
+
+
+# PowerPoint's SaveAs format constant for PDF.
+_PP_SAVE_AS_PDF = 32
+
+
+def export_to_pdf(pptx_path: str, pdf_path: str) -> dict:
+    """Export a PPTX to PDF via PowerPoint COM (Windows-only). Returns
+    {"ok": bool, "path": str|None, "error": str|None}. Same fail-soft
+    contract as `generate_previews` so callers don't need try/except."""
+    if not Path(pptx_path).is_file():
+        return {"ok": False, "path": None,
+                "error": "PPTX no encontrado."}
+    if sys.platform != "win32":
+        return {"ok": False, "path": None,
+                "error": "Export a PDF no disponible en este sistema (requiere Windows + PowerPoint)."}
+
+    pptx_abs = os.path.abspath(pptx_path)
+    pdf_abs = os.path.abspath(pdf_path)
+    os.makedirs(os.path.dirname(pdf_abs) or ".", exist_ok=True)
+
+    try:
+        import comtypes.client  # type: ignore[import-untyped]
+    except ImportError as e:
+        return {"ok": False, "path": None,
+                "error": f"Falta dependencia para PDF: {e}"}
+
+    ppt = None
+    deck = None
+    try:
+        ppt = comtypes.client.CreateObject("PowerPoint.Application")
+        ppt.Visible = 1
+        deck = ppt.Presentations.Open(
+            pptx_abs, ReadOnly=True, Untitled=False, WithWindow=False,
+        )
+        # Fallback first to ExportAsFixedFormat (richer, supports notes etc.);
+        # if not available on this PowerPoint build, use SaveAs(PDF).
+        try:
+            deck.ExportAsFixedFormat(pdf_abs, 2)  # 2 == ppFixedFormatTypePDF
+        except Exception:
+            deck.SaveAs(pdf_abs, _PP_SAVE_AS_PDF)
+    except Exception as e:
+        return {"ok": False, "path": None,
+                "error": f"PowerPoint no pudo exportar a PDF: {str(e)[:200]}"}
+    finally:
+        try:
+            if deck is not None:
+                deck.Close()
+        except Exception:
+            pass
+        try:
+            if ppt is not None:
+                ppt.Quit()
+        except Exception:
+            pass
+
+    if not Path(pdf_abs).is_file():
+        return {"ok": False, "path": None,
+                "error": "PDF no se generó (PowerPoint terminó sin escribir el archivo)."}
+    return {"ok": True, "path": pdf_abs, "error": None}
+
+
+def cmd_export_pdf(args) -> None:
+    """CLI entry: emit PDF export status JSON to stdout."""
+    result = export_to_pdf(args.input, args.output)
+    sys.stdout.write(json.dumps(result, ensure_ascii=True))

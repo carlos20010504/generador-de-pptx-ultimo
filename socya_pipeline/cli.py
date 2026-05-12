@@ -157,10 +157,59 @@ def cmd_generate(args):
             excluded_count = len(rendered) - len(kept)
             rendered = kept
 
+        # Optional user override: per-slide title edits. Same indexing
+        # convention as `excludeSlideIndices` — positions in the rendered
+        # list as the UI saw them in the plan preview.
+        title_overrides_raw = request.get("slideTitles") or {}
+        if isinstance(title_overrides_raw, dict) and title_overrides_raw:
+            title_overrides = {}
+            for k, v in title_overrides_raw.items():
+                try:
+                    title_overrides[int(k)] = str(v)
+                except (TypeError, ValueError):
+                    continue
+            for pos, slide in enumerate(rendered):
+                if pos in title_overrides:
+                    new_title = title_overrides[pos].strip()
+                    if new_title:
+                        slide["title"] = new_title
+
+        # Optional user override: reorder. Array of original positions in
+        # the order the user wants. Title slide (pos 0) is always kept at
+        # position 0 to preserve deck coherence. Falls back to no-op if the
+        # input is malformed.
+        order_raw = request.get("slideOrder")
+        if isinstance(order_raw, list) and order_raw and len(rendered) > 1:
+            try:
+                order = [int(x) for x in order_raw]
+                # Sólo aplicamos si las posiciones cubren TODAS las slides
+                # supervivientes — evita reorders parciales que confunden.
+                if sorted(order) == list(range(len(rendered))):
+                    new_list = []
+                    seen = set()
+                    # Title slide first if it was at original position 0
+                    if 0 not in seen:
+                        new_list.append(rendered[0])
+                        seen.add(0)
+                    for pos in order:
+                        if pos in seen:
+                            continue
+                        if 0 <= pos < len(rendered):
+                            new_list.append(rendered[pos])
+                            seen.add(pos)
+                    if len(new_list) == len(rendered):
+                        rendered = new_list
+            except (TypeError, ValueError):
+                pass
+
         from socya_pipeline.renderer import render_pptx
         template = Path(args.template)
+        # Theme comes through the request from the UI selector. The renderer
+        # falls back to its built-in Socya defaults if `theme` is missing.
+        theme = request.get("theme") if isinstance(request.get("theme"), dict) else None
         render_pptx(rendered, plan.get("presentation_meta", {}),
-                     template_path=template, output_path=Path(args.output))
+                     template_path=template, output_path=Path(args.output),
+                     theme=theme)
 
         # Write audit JSON next to output
         audit = {
@@ -243,13 +292,19 @@ def main():
     sum_p.set_defaults(func=cmd_quick_summary)
     # PPTX → PNG preview rendering. Best-effort; fails soft if PowerPoint
     # is not available so the caller can still serve the download.
-    from socya_pipeline.preview import cmd_preview_pptx
+    from socya_pipeline.preview import cmd_preview_pptx, cmd_export_pdf
     prev_p = sub.add_parser("preview-pptx",
                               help="Render PNG previews of each slide in a PPTX")
     prev_p.add_argument("--input", required=True)
     prev_p.add_argument("--output-dir", required=True)
     prev_p.add_argument("--width", type=int, default=None)
     prev_p.set_defaults(func=cmd_preview_pptx)
+
+    pdf_p = sub.add_parser("export-pdf",
+                             help="Export a PPTX to PDF via PowerPoint COM (Windows-only)")
+    pdf_p.add_argument("--input", required=True)
+    pdf_p.add_argument("--output", required=True)
+    pdf_p.set_defaults(func=cmd_export_pdf)
     args = p.parse_args()
     args.func(args)
 
