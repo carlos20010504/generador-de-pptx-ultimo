@@ -424,18 +424,34 @@ def _compose_two_row_headers(xls, sheet_name: str, df: pd.DataFrame
     if n < 2:
         return df
 
-    # Señal A: ≥40% de columnas son 'Unnamed:' adyacentes a una columna nombrada
-    # (típico de super-headers — pandas asigna 'Unnamed' a las celdas vacías
-    # de la fila 0 que están a la derecha de un super-encabezado).
+    # Señal A: super-headers se manifiestan en pandas como
+    #   (i) 'Unnamed: N' a la derecha del super-header (fila 1 con celdas
+    #       vacías a la derecha del valor merged-like); o
+    #   (ii) 'Nombre', 'Nombre.1', 'Nombre.2' (pandas auto-suffija
+    #        duplicados cuando el super-header NO está merged pero sí
+    #        repetido — caso real "Ventas, Ventas, Ventas" en row 1).
+    # Cualquiera de las dos señales — ≥25% del total de columnas — sugiere
+    # que la fila 0 actual es realmente sub-headers de un super.
+    import re as _re_local
+    suffix_re = _re_local.compile(r"\.(\d+)$")
     unnamed_after_named = 0
-    last_named = None
+    repeated_after_named = 0
+    last_named_root = None
     for c in cols:
         if c.startswith("Unnamed:"):
-            if last_named:
+            if last_named_root:
                 unnamed_after_named += 1
-        else:
-            last_named = c
-    if unnamed_after_named < max(2, n * 0.25):
+            continue
+        m = suffix_re.search(c)
+        if m and last_named_root:
+            # 'Ventas.1' tras 'Ventas' → dedup suffix
+            root = c[: m.start()]
+            if root == last_named_root:
+                repeated_after_named += 1
+                continue
+        last_named_root = c
+    signal = unnamed_after_named + repeated_after_named
+    if signal < max(2, int(n * 0.25)):
         return df
 
     # Señal B: la fila 0 (que sería la 2da fila de headers) es mayormente
@@ -455,11 +471,15 @@ def _compose_two_row_headers(xls, sheet_name: str, df: pd.DataFrame
         return df
 
     # Componer headers: forward-fill el supercategoría sobre los Unnamed
+    # y los duplicados con dedup-suffix de pandas (Ventas, Ventas.1, etc.)
     super_filled: List[str] = []
     last = ""
     for c in cols:
-        if not c.startswith("Unnamed:") and c.lower() != "nan":
-            last = c
+        # Normalizar: quitar dedup suffix '.N' y NaN para inferir root
+        m = suffix_re.search(c)
+        root = c[: m.start()] if m else c
+        if not root.startswith("Unnamed:") and root.lower() not in ("nan", ""):
+            last = root
         super_filled.append(last)
 
     new_headers: List[str] = []
@@ -488,9 +508,23 @@ def _compose_two_row_headers(xls, sheet_name: str, df: pd.DataFrame
 def _resolve_merged_headers(df: pd.DataFrame, path: Path, sheet_name: str,
                               header_row: int = 1) -> pd.DataFrame:
     """If the sheet has merged cells in/around the header row, replicate the
-    top-left value into the right neighbor headers. Without this, a merged
-    'Total' header spanning C1:E1 becomes ['Total', 'Unnamed: 3', 'Unnamed: 4']
-    and downstream type detection treats them as anonymous columns."""
+    top-left value into the right neighbor headers. Two real-world variants:
+
+      A) Merged super-header SOLO en row 1 (no hay sub-headers en row 2):
+         'Total' merged C1:E1 → df.columns = ['Total', 'Unnamed:3', 'Unnamed:4']
+         → componemos como ['Total', 'Total_2', 'Total_3'].
+
+      B) Merged super-header en row 1 + sub-headers en row 2:
+         Row 1 'Q1 2024' merged B1:D1, 'Q2 2024' merged E1:G1.
+         Row 2: Ventas, Costos, Margen, Ventas, Costos, Margen.
+         → componemos df.columns como ['Q1 2024 > Ventas', 'Q1 2024 > Costos', ...]
+         y CONSUMIMOS row 0 (que era row 2 del Excel) — pasa a ser fila de
+         datos, no de sub-headers. Sin esto los sub-headers se contaminarían
+         con el dtype de las columnas.
+
+    Detección B vs A: si la PRIMERA fila de datos (df.iloc[0]) tiene mostly
+    strings no-numéricos en las columnas Unnamed, asumimos sub-headers.
+    """
     if not str(path).lower().endswith((".xlsx", ".xlsm")):
         return df
     try:
@@ -505,8 +539,9 @@ def _resolve_merged_headers(df: pd.DataFrame, path: Path, sheet_name: str,
             wb.close()
             return df
 
-        new_cols = list(df.columns)
-        changed = False
+        # Build a map of {col_idx_0based: super_header_value} from merged
+        # ranges that intersect the header row.
+        super_map: dict = {}
         for mrange in ranges:
             if mrange.min_row > header_row or mrange.max_row < header_row:
                 continue
@@ -514,20 +549,68 @@ def _resolve_merged_headers(df: pd.DataFrame, path: Path, sheet_name: str,
             if top_left is None or not str(top_left).strip():
                 continue
             for col in range(mrange.min_col, mrange.max_col + 1):
-                idx = col - 1  # openpyxl is 1-indexed; df.columns is 0-indexed
-                if not (0 <= idx < len(new_cols)):
-                    continue
-                current = str(new_cols[idx])
-                # Only override autogenerated 'Unnamed:N' to avoid clobbering
-                # legitimate column names.
-                if current.startswith("Unnamed:") or current.lower() == "nan":
-                    suffix = col - mrange.min_col + 1
-                    new_cols[idx] = f"{top_left}_{suffix}" if suffix > 1 else str(top_left)
-                    changed = True
+                super_map[col - 1] = str(top_left).strip()
         wb.close()
-        if changed:
-            df = df.copy()
+
+        if not super_map:
+            return df
+
+        # Detectar variante B: ¿la primera fila de datos en las columnas
+        # afectadas tiene strings (sub-headers) o números (data)?
+        cur_cols = list(df.columns)
+        is_variant_b = False
+        if len(df) > 0:
+            try:
+                row0 = df.iloc[0].tolist()
+                affected_indices = [i for i in super_map if 0 <= i < len(row0)]
+                if affected_indices:
+                    str_count = 0
+                    for i in affected_indices:
+                        v = row0[i]
+                        if (isinstance(v, str) and v.strip()
+                            and not _looks_numeric(v)):
+                            str_count += 1
+                    if str_count >= max(2, len(affected_indices) * 0.6):
+                        is_variant_b = True
+            except Exception:
+                pass
+
+        new_cols = list(cur_cols)
+        if is_variant_b:
+            # Componer "Super > Sub" usando row 0 como sub-headers
+            row0 = df.iloc[0].tolist()
+            for i in range(len(new_cols)):
+                if i in super_map:
+                    sub = ""
+                    if i < len(row0):
+                        v = row0[i]
+                        if v is not None and str(v).strip():
+                            sub = str(v).strip()
+                    if sub:
+                        new_cols[i] = f"{super_map[i]} > {sub}"
+                    else:
+                        new_cols[i] = super_map[i]
+            # Consumimos row 0 (sub-headers no son datos)
+            df = df.iloc[1:].reset_index(drop=True).copy()
             df.columns = new_cols
+        else:
+            # Variante A: forward-fill de super sobre Unnamed con suffix
+            for i in range(len(new_cols)):
+                if i in super_map:
+                    current = str(new_cols[i])
+                    if current.startswith("Unnamed:") or current.lower() == "nan":
+                        # Find la posición relativa dentro del rango merged
+                        # contando cuántos hermanos del mismo super están
+                        # antes de este idx.
+                        same_super_before = sum(
+                            1 for j in range(i) if super_map.get(j) == super_map[i]
+                        )
+                        suffix = same_super_before + 1
+                        new_cols[i] = (f"{super_map[i]}_{suffix}" if suffix > 1
+                                         else super_map[i])
+            if new_cols != cur_cols:
+                df = df.copy()
+                df.columns = new_cols
     except Exception:
         # Best-effort — never fail the parse over merged cell resolution.
         pass

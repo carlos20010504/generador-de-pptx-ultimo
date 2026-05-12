@@ -713,7 +713,18 @@ def detect_computed_column(target_values: List[float],
 # ─────────────────────────────────────────────────────────────────────
 
 _RE_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-_RE_PHONE = re.compile(r"^\+?\d[\d\s().-]{7,}\d$")
+# Phone: REQUIERE al menos un indicador real de teléfono (+, paréntesis,
+# guión, o espacio interno). Pure-digit strings y floats con '.' NO son
+# phones — eran la fuente principal de falsos positivos en columnas de
+# dinero (ej. "1500000.50" matcheaba antes con `[\d\s().-]`).
+_RE_PHONE = re.compile(
+    r"^"
+    r"(?:\+\d[\d\s().-]{7,}\d"          # comienza con + (internacional), o
+    r"|\(\d{2,4}\)[\s\d.-]{6,}\d"      # tiene paréntesis explícitos, o
+    r"|\d[\d ]{2,}-[\d -]{4,}\d"       # tiene guiones internos
+    r"|\d{2,4}\s\d{3,4}\s\d{4,})"      # tiene espacios separando bloques
+    r"$"
+)
 _RE_DOC_ID = re.compile(r"^\d{7,11}$")
 
 
@@ -805,11 +816,16 @@ def is_pii_column(samples: List, col_name: str = "",
         return None
 
     name_lower = str(col_name or "").lower()
+    is_money_col = any(h in name_lower for h in _MONEY_HINTS)
 
-    # Money columns are never doc_ids no matter what the digits look like
+    # Money columns are never doc_ids ni phones, no importa cómo se vean
+    # los dígitos. Antes sólo cubríamos doc_id; ahora también phone porque
+    # floats como '1500000.50' pueden parecer phones tras endurecer la regex,
+    # pero la columna tipo 'Subtotal'/'Monto' nos dice que NO lo son.
+    if best_kind in ("doc_id", "phone") and is_money_col:
+        return None
+
     if best_kind == "doc_id":
-        if any(h in name_lower for h in _MONEY_HINTS):
-            return None
         # Require explicit hint in the column name to enmascarar — silent
         # masking of opaque numeric columns is risky
         if not any(h in name_lower for h in _PII_COL_HINTS["doc_id"]):

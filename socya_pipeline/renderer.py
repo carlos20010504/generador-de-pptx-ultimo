@@ -781,20 +781,23 @@ def _annotate_peak_valley_line(ax, values: list) -> None:
             # magnitud que el endpoint y a 1-2 puntos de distancia), skip.
             return abs(values[idx] - values[last_idx]) >= rng * 0.10
 
+        # Usamos prefijos ASCII-seguros (la palabra MAX/MIN) en vez de
+        # glyphs Unicode (▲ ▼) — Calibri no tiene esos glyphs en algunos
+        # sistemas y matplotlib emite warnings + cuadritos en el render.
         if _is_significant(max_idx):
-            ax.plot([max_idx], [max_v], marker="o", markersize=11,
+            ax.plot([max_idx], [max_v], marker="^", markersize=12,
                      markerfacecolor="#C9A227", markeredgecolor="#1B3B2F",
                      markeredgewidth=1.5, zorder=5)
-            ax.annotate(f"▲ {_format_value_short(max_v)}",
+            ax.annotate(f"MAX {_format_value_short(max_v)}",
                           xy=(max_idx, max_v),
-                          xytext=(0, 14), textcoords="offset points",
+                          xytext=(0, 16), textcoords="offset points",
                           ha="center", fontsize=9, fontfamily="Calibri",
                           fontweight="bold", color="#1B3B2F")
         if _is_significant(min_idx) and min_idx != max_idx:
-            ax.plot([min_idx], [min_v], marker="o", markersize=11,
+            ax.plot([min_idx], [min_v], marker="v", markersize=12,
                      markerfacecolor="#B85042", markeredgecolor="#1B3B2F",
                      markeredgewidth=1.5, zorder=5)
-            ax.annotate(f"▼ {_format_value_short(min_v)}",
+            ax.annotate(f"MIN {_format_value_short(min_v)}",
                           xy=(min_idx, min_v),
                           xytext=(0, -22), textcoords="offset points",
                           ha="center", fontsize=9, fontfamily="Calibri",
@@ -992,7 +995,7 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
                 b.set_linewidth(2.5)
                 ax.text(b.get_x() + b.get_width() / 2,
                           b.get_height() + max_v * 0.085,
-                          "★ MÁX",
+                          "MAX",
                           ha="center", va="bottom", fontsize=8.5,
                           fontfamily="Calibri", fontweight="bold",
                           color="#C9A227")

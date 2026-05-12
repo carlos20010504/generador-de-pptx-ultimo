@@ -808,11 +808,13 @@ def _build_chart_data(block, df, chart_type):
             return None
         nums = pd.to_numeric(df[col], errors="coerce")
         nums = nums.replace([float("inf"), float("-inf")], pd.NA).dropna()
-        if len(nums) < 8:
-            # Histograma con <8 puntos no comunica nada — fallback a bar.
-            chart_type = "bar"
-        else:
+        if len(nums) >= 8:
             return _build_histogram_data(col, nums)
+        # Insuficientes puntos para un histograma honesto. Devolvemos None
+        # → la slide se dropea limpiamente como chart_data_empty. Mejor que
+        # forzar a "bar" sobre un kpi_candidate (que no es categorical y
+        # nunca rellena datos válidos).
+        return None
 
     if block.kind == "categorical_distribution":
         col = _resolve_column(block.provenance.columns[0], df)

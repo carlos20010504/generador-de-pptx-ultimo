@@ -108,7 +108,12 @@ _NUM_RE = re.compile(r"-?\d+(?:[\.,]\d+)?")
 _NAME_RE = re.compile(r"\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}\b")
 
 def _bullet_has_provenance(bullet: str, block, wb: WorkbookData) -> bool:
-    """Returns True if every number / proper name in the bullet exists in the block."""
+    """Returns True if every number / proper name in the bullet exists in the
+    block. El haystack incluye samples + top_values + stats agregadas
+    (sum/mean/min/max), porque el AI suele citar totales y promedios que
+    no están en samples crudos. Tolerancia numérica 5% — lo suficiente
+    para narrativas tipo '$1.5M' contra valor real $1,523,456.
+    """
     if not bullet or not bullet.strip():
         return False
     text = str(bullet).strip()
@@ -126,10 +131,11 @@ def _bullet_has_provenance(bullet: str, block, wb: WorkbookData) -> bool:
 
     # Build a flat searchable string of relevant cells
     haystack_str = ""
-    haystack_nums = set()
+    haystack_nums: set = set()
     for col in sheet.columns:
         if col.name not in cols_set:
             continue
+        # Samples crudos
         for s in col.samples:
             if s is None:
                 continue
@@ -137,23 +143,70 @@ def _bullet_has_provenance(bullet: str, block, wb: WorkbookData) -> bool:
                 haystack_nums.add(round(float(s), 2))
             else:
                 haystack_str += " " + str(s).lower()
+        # Top categóricos (con conteos también — el AI cita "X tiene 47 casos")
         for tv in (col.top_values or []):
             haystack_str += " " + str(tv[0]).lower()
+            if len(tv) > 1 and isinstance(tv[1], (int, float)):
+                haystack_nums.add(round(float(tv[1]), 2))
+        # Stats agregadas — fundamental para bullets de narrativa.
+        # El AI dice "el total es $5M" y esto vive en col.sum, no en samples.
+        for stat in (col.sum, col.mean, col.min, col.max):
+            if stat is not None and isinstance(stat, (int, float)):
+                try:
+                    haystack_nums.add(round(float(stat), 2))
+                except (ValueError, OverflowError):
+                    pass
+    # Agregamos también el rango total de la hoja (filas) — el AI cita
+    # cosas como "se procesaron 200 registros" donde 200 = sheet rows.
+    rows_n = sheet.shape[0] if sheet.shape else 0
+    if rows_n:
+        haystack_nums.add(float(rows_n))
 
+    # Match cada número del bullet con tolerancia 5% (suficiente para
+    # narrativas con sufijos K/M/B redondeados). Para magnitudes pequeñas
+    # (<100) requerimos exact match.
     for n in nums:
         try:
-            n_val = float(n.replace(",", "."))
-            if not any(abs(n_val - h) <= max(1.0, abs(h) * 0.005) for h in haystack_nums):
-                return False
+            n_val = _parse_narrative_number(n, text)
         except ValueError:
             continue
+        if n_val is None:
+            continue
+        tolerance = (max(1.0, abs(n_val) * 0.05) if abs(n_val) >= 100
+                       else 0.5)
+        if not any(abs(n_val - h) <= tolerance for h in haystack_nums):
+            return False
 
-    text_lower = text.lower()
     for name in names:
         if name.lower() not in haystack_str:
             return False
 
     return True
+
+
+def _parse_narrative_number(token: str, full_text: str):
+    """Convierte un token numérico considerando sufijos K/M/B/MM cercanos
+    en el texto. 'El total es 1.5M' → 1500000. Devuelve float o None si
+    no se puede parsear."""
+    try:
+        base = float(token.replace(",", "."))
+    except ValueError:
+        return None
+    # Buscar sufijo inmediatamente después del token en el texto
+    pos = full_text.find(token)
+    if pos < 0:
+        return base
+    suffix_area = full_text[pos + len(token): pos + len(token) + 3].upper().strip()
+    if suffix_area.startswith("MM"):  # millones (ES algunos contextos)
+        return base * 1_000_000
+    if suffix_area.startswith("M"):
+        # 'M' puede ser millones o millones — usamos millones
+        return base * 1_000_000
+    if suffix_area.startswith("K") or suffix_area.startswith("MIL"):
+        return base * 1_000
+    if suffix_area.startswith("B"):
+        return base * 1_000_000_000
+    return base
 
 
 def _clean_bullet(text: str) -> str:
