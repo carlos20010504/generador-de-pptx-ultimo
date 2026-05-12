@@ -453,6 +453,10 @@ def _build_table_data(slide: dict, block, df: pd.DataFrame,
         return None
 
     max_rows = int(slide.get("max_rows") or 10)
+    # Smart sort: si hay columna numérica sumable y el AI no especificó
+    # un orden, ordenar por la primera numérica desc. La tabla "habla" del
+    # ranking inmediatamente — el lector no tiene que buscar el máximo.
+    cleaned = _smart_sort_table(cleaned, df, dtype_map, sheet_name)
     sampled = _diverse_sample(cleaned, df, max_rows)
 
     # Detect PII columns once per table — cheaper than per-cell checks
@@ -460,6 +464,12 @@ def _build_table_data(slide: dict, block, df: pd.DataFrame,
 
     # Per-column formatting based on source dtype + PII masking
     formatted_rows = []
+    numeric_col_indices: list = []   # para totales row
+    for col_idx, col_name in enumerate(sampled.columns):
+        col_dtype = dtype_map.get((sheet_name, col_name))
+        if col_dtype in ("currency", "numeric") and col_name not in pii_kinds:
+            numeric_col_indices.append(col_idx)
+
     for _, row in sampled.iterrows():
         out_row = []
         for col_name in sampled.columns:
@@ -474,10 +484,88 @@ def _build_table_data(slide: dict, block, df: pd.DataFrame,
                                                    col_name, col_dtype))
         formatted_rows.append(out_row)
 
-    return {
+    # Total row: cuando hay >=1 columna numérica sumable y la tabla tiene
+    # >=3 filas (con menos no aporta). Sólo currency/numeric, no percent
+    # (% no se suma) ni year (años no se suman). Marcamos la fila como
+    # is_total para que el renderer pueda darle estilo bold/separator.
+    totals_row = None
+    if len(formatted_rows) >= 3 and numeric_col_indices:
+        totals_row = _build_totals_row(cleaned, sampled, numeric_col_indices,
+                                          dtype_map, sheet_name)
+
+    out = {
         "headers": [_humanize_header(h) or f"Col {i+1}" for i, h in enumerate(sampled.columns)],
         "rows": formatted_rows,
     }
+    if totals_row:
+        out["totals_row"] = totals_row
+    # Pasamos qué columnas son numéricas para que el renderer pueda
+    # aplicar heatmap-style cell coloring sin tener que re-detectar.
+    if numeric_col_indices:
+        out["numeric_col_indices"] = numeric_col_indices
+        # Min/max por columna numérica para el gradient
+        col_ranges = {}
+        for ci in numeric_col_indices:
+            col_name = sampled.columns[ci]
+            try:
+                series = pd.to_numeric(cleaned[col_name], errors="coerce").dropna()
+                if not series.empty:
+                    col_ranges[ci] = [float(series.min()), float(series.max())]
+            except Exception:
+                continue
+        if col_ranges:
+            out["numeric_col_ranges"] = col_ranges
+    return out
+
+
+def _smart_sort_table(cleaned, df, dtype_map: dict, sheet_name: str):
+    """Si hay columna numérica/currency sumable, ordena descendente por la
+    primera (mayor magnitud típica). El lector ve el ranking de un vistazo.
+    Mantiene orden Excel cuando NO hay numérica clara."""
+    try:
+        for col_name in cleaned.columns:
+            col_dtype = dtype_map.get((sheet_name, col_name))
+            if col_dtype in ("currency", "numeric"):
+                series = pd.to_numeric(cleaned[col_name], errors="coerce")
+                # Skip si está casi todo vacío
+                if series.notna().sum() < max(3, len(series) * 0.3):
+                    continue
+                return cleaned.assign(__sort_key=series).sort_values(
+                    "__sort_key", ascending=False, na_position="last",
+                ).drop(columns="__sort_key").reset_index(drop=True)
+    except Exception:
+        pass
+    return cleaned
+
+
+def _build_totals_row(cleaned, sampled, numeric_col_indices: list,
+                       dtype_map: dict, sheet_name: str):
+    """Devuelve una fila TOTAL alineada con las columnas de `sampled`.
+    Suma sobre TODA la tabla cleaned (no sólo las filas sampled), porque
+    la fila TOTAL debe representar el universo, no la muestra."""
+    try:
+        cells = []
+        for col_idx, col_name in enumerate(sampled.columns):
+            if col_idx == 0:
+                cells.append("TOTAL")
+                continue
+            if col_idx in numeric_col_indices:
+                series = pd.to_numeric(cleaned[col_name], errors="coerce")
+                series = series.replace([float("inf"), float("-inf")], pd.NA).dropna()
+                if series.empty:
+                    cells.append("")
+                    continue
+                total = float(series.sum())
+                col_dtype = dtype_map.get((sheet_name, col_name))
+                # Reusar el formateador de celdas — paso valor sintético
+                source_col = cleaned[col_name] if col_name in cleaned.columns else None
+                cells.append(_format_table_cell(total, source_col,
+                                                  col_name, col_dtype))
+            else:
+                cells.append("")
+        return cells
+    except Exception:
+        return None
 
 
 def _humanize_header(value) -> str:
@@ -712,6 +800,20 @@ def _format_kpi_value(value):
 
 
 def _build_chart_data(block, df, chart_type):
+    # Histogram: requiere columna numérica continua. Funciona bien con
+    # block.kind == "kpi_candidate" (que apunta a una columna numeric/currency).
+    if chart_type == "histogram" and block.provenance.columns:
+        col = _resolve_column(block.provenance.columns[0], df)
+        if not col:
+            return None
+        nums = pd.to_numeric(df[col], errors="coerce")
+        nums = nums.replace([float("inf"), float("-inf")], pd.NA).dropna()
+        if len(nums) < 8:
+            # Histograma con <8 puntos no comunica nada — fallback a bar.
+            chart_type = "bar"
+        else:
+            return _build_histogram_data(col, nums)
+
     if block.kind == "categorical_distribution":
         col = _resolve_column(block.provenance.columns[0], df)
         if not col:
@@ -784,6 +886,44 @@ def _build_chart_data(block, df, chart_type):
             "values": values,
         }
     return None
+
+
+def _build_histogram_data(col_name: str, nums) -> dict:
+    """Bin a numeric series into ~10 bins for histogram rendering. Choses
+    bin count by Freedman-Diaconis when feasible, else sqrt rule. Returns
+    labels (bin range strings) + counts."""
+    try:
+        import numpy as _np
+        arr = _np.array(nums.tolist(), dtype=float)
+        if arr.size == 0:
+            return None
+        # Freedman-Diaconis bin width
+        q75, q25 = _np.percentile(arr, [75, 25])
+        iqr = float(q75 - q25)
+        n = arr.size
+        if iqr > 0:
+            h = 2 * iqr * (n ** (-1 / 3))
+            data_range = float(arr.max() - arr.min())
+            bins = max(5, min(15, int(_np.ceil(data_range / max(h, 1e-9)))))
+        else:
+            bins = max(5, min(12, int(_np.ceil(_np.sqrt(n)))))
+        counts, edges = _np.histogram(arr, bins=bins)
+        labels = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            labels.append(f"{insights.format_compact(lo)}–{insights.format_compact(hi)}")
+        return {
+            "chart_type": "histogram",
+            "name": col_name,
+            "labels": labels,
+            "values": [int(c) for c in counts.tolist()],
+            "_stats": {
+                "mean": float(arr.mean()),
+                "median": float(_np.median(arr)),
+                "n": int(n),
+            },
+        }
+    except Exception:
+        return None
 
 
 def _drop_non_finite_pairs(labels, values):

@@ -429,10 +429,14 @@ def _add_chart_slide(slide, slide_def: dict) -> None:
 
 
 def _add_table_slide(slide, slide_def: dict) -> None:
-    """Table with colored header band and zebra-striped rows."""
+    """Table with colored header band, zebra-striped rows, opcional totals
+    row al final, y heatmap-style cell coloring para columnas numéricas."""
     data = slide_def.get("data", {})
     headers = data.get("headers", [])
     rows = data.get("rows", [])
+    totals_row = data.get("totals_row")
+    numeric_col_indices = set(data.get("numeric_col_indices", []) or [])
+    numeric_col_ranges = data.get("numeric_col_ranges", {}) or {}
     if not headers or not rows:
         return
 
@@ -441,7 +445,9 @@ def _add_table_slide(slide, slide_def: dict) -> None:
     headers = [_clean_header(h) for h in headers[:max_cols]]
     rows = [list(r)[:max_cols] for r in rows[:max_rows]]
     n_cols = len(headers)
-    n_rows = len(rows) + 1
+    has_totals = bool(totals_row)
+    body_rows_n = len(rows)
+    n_rows = body_rows_n + 1 + (1 if has_totals else 0)
 
     table_x = MARGIN
     table_y = CONTENT_TOP
@@ -455,6 +461,7 @@ def _add_table_slide(slide, slide_def: dict) -> None:
                                            Inches(table_w), Inches(table_h))
     tbl = table_shape.table
 
+    # Header row
     for j, h in enumerate(headers):
         cell = tbl.cell(0, j)
         cell.text = ""
@@ -464,7 +471,8 @@ def _add_table_slide(slide, slide_def: dict) -> None:
         tf.margin_left = tf.margin_right = Inches(0.08)
         tf.margin_top = tf.margin_bottom = Inches(0.04)
         p = tf.paragraphs[0]
-        p.alignment = PP_ALIGN.LEFT
+        # Numeric columns alineadas a derecha
+        p.alignment = PP_ALIGN.RIGHT if j in numeric_col_indices else PP_ALIGN.LEFT
         run = p.add_run()
         run.text = str(h).upper()
         run.font.name = BODY_FONT
@@ -472,23 +480,104 @@ def _add_table_slide(slide, slide_def: dict) -> None:
         run.font.bold = True
         run.font.color.rgb = WHITE
 
+    # Body rows
     for i, row in enumerate(rows, start=1):
         for j, val in enumerate(row):
             cell = tbl.cell(i, j)
             cell.text = ""
+            # Heatmap shading para columnas numéricas (override del zebra).
+            # Bajo intensidad — la idea es ayudar a escanear, no gritar.
+            heat_color = None
+            if j in numeric_col_indices and j in numeric_col_ranges:
+                heat_color = _heatmap_color(val, numeric_col_ranges[j])
             cell.fill.solid()
-            cell.fill.fore_color.rgb = ZEBRA_BG if i % 2 == 0 else WHITE
+            if heat_color is not None:
+                cell.fill.fore_color.rgb = heat_color
+            else:
+                cell.fill.fore_color.rgb = ZEBRA_BG if i % 2 == 0 else WHITE
             tf = cell.text_frame
             tf.word_wrap = True
             tf.margin_left = tf.margin_right = Inches(0.08)
             tf.margin_top = tf.margin_bottom = Inches(0.04)
             p = tf.paragraphs[0]
-            p.alignment = PP_ALIGN.LEFT
+            p.alignment = PP_ALIGN.RIGHT if j in numeric_col_indices else PP_ALIGN.LEFT
             run = p.add_run()
             run.text = "" if val is None else str(val)
             run.font.name = BODY_FONT
             run.font.size = Pt(10)
             run.font.color.rgb = TEXT_DARK
+
+    # Totals row
+    if has_totals:
+        row_idx = body_rows_n + 1
+        for j, val in enumerate(totals_row[:n_cols]):
+            cell = tbl.cell(row_idx, j)
+            cell.text = ""
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = FOREST_DARK
+            tf = cell.text_frame
+            tf.word_wrap = True
+            tf.margin_left = tf.margin_right = Inches(0.08)
+            tf.margin_top = tf.margin_bottom = Inches(0.04)
+            p = tf.paragraphs[0]
+            p.alignment = PP_ALIGN.RIGHT if j in numeric_col_indices else PP_ALIGN.LEFT
+            run = p.add_run()
+            run.text = "" if val is None else str(val)
+            run.font.name = BODY_FONT
+            run.font.size = Pt(10.5)
+            run.font.bold = True
+            run.font.color.rgb = WHITE
+
+
+def _heatmap_color(display_val, value_range) -> Optional[RGBColor]:
+    """Mapea un valor a un tono pastel verde→amarillo→rojo según su posición
+    en [min, max]. Devuelve None si no se puede parsear el valor o si el
+    rango es degenerado.
+
+    Convención semántica neutra (no asume "alto = bueno"): usamos verde
+    para valores ALTOS (típicamente magnitudes mayores) y blanco-cremoso
+    para valores BAJOS. Si el contexto requiere otra convención (ej.
+    "tasa de rechazo" donde alto = malo), eso necesitaría una hint del
+    inventory — fuera de scope.
+    """
+    try:
+        # display_val viene formateado ($1.5M, 23%, etc.). Extraer el numérico.
+        import re as _re
+        s = str(display_val or "")
+        m = _re.search(r"-?\d+(?:[.,]\d+)?", s.replace(".", "").replace(",", "."))
+        # Mejor: limpiar puntos de miles y coma decimal — heurística simple
+        cleaned = _re.sub(r"[^\d.\-]", "", s.replace(",", "."))
+        if not cleaned or cleaned in ("-", "."):
+            return None
+        # Si tenía sufijo K/M/B aplicarlo
+        v = float(cleaned)
+        upper = s.upper()
+        if "B" in upper:
+            v *= 1_000_000_000
+        elif "M" in upper and "MIL" not in upper:
+            v *= 1_000_000
+        elif "K" in upper:
+            v *= 1_000
+        lo, hi = float(value_range[0]), float(value_range[1])
+        if hi <= lo:
+            return None
+        # Posición [0, 1]
+        t = max(0.0, min(1.0, (v - lo) / (hi - lo)))
+        # Pastel desde crema (#FAFAF5 ≈ PAGE_BG) hasta verde Socya (#69BE28)
+        # con muy baja saturación para no gritar.
+        # cream → soft green
+        # cream  rgb(250, 250, 245)
+        # green  rgb(105, 190, 40)  — usamos sólo 25% de intensidad
+        # Mezcla: dest = cream + t * (green - cream) * 0.30
+        cr, cg, cb = 250, 250, 245
+        gr, gg, gb = 105, 190, 40
+        intensity = 0.30  # mantener sutil
+        r = int(cr + (gr - cr) * t * intensity)
+        g = int(cg + (gg - cg) * t * intensity)
+        b = int(cb + (gb - cb) * t * intensity)
+        return RGBColor(max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+    except Exception:
+        return None
 
 
 def _add_bullets_slide(slide, slide_def: dict) -> None:
@@ -607,6 +696,66 @@ def _add_footer(slide, tagline: str, page: int, total: int) -> None:
 
 # ──────────────────── Charts (matplotlib) ────────────────────
 
+def _add_mean_reference_line(ax, values: list, *, axis: str = "y",
+                                color: str = "#6B6B6B",
+                                show_threshold: float = 0.10) -> None:
+    """Dibuja una línea horizontal (axis='y') o vertical (axis='x') al
+    promedio cuando la varianza es significativa (≥ `show_threshold` * mean).
+    Si la serie es plana (todo similar al promedio) no aporta — skip.
+    Mantiene la línea sutil para no robar atención al data principal.
+    """
+    try:
+        nums = [float(v) for v in values if v is not None]
+        if len(nums) < 4:
+            return
+        mean = sum(nums) / len(nums)
+        if mean <= 0:
+            return
+        max_v = max(nums)
+        min_v = min(nums)
+        rng = max_v - min_v
+        # Skip si la serie es prácticamente plana
+        if rng < mean * show_threshold:
+            return
+        if axis == "y":
+            ax.axhline(y=mean, color=color, linestyle="--", linewidth=1.2,
+                        alpha=0.55, zorder=1)
+            # Etiqueta a la derecha del eje
+            xlim = ax.get_xlim()
+            ax.text(xlim[1], mean, f" prom: {_format_value_short(mean)}",
+                      va="center", ha="left", fontsize=8.5,
+                      fontfamily="Calibri", color=color, alpha=0.85)
+        else:
+            ax.axvline(x=mean, color=color, linestyle="--", linewidth=1.2,
+                        alpha=0.55, zorder=1)
+    except Exception:
+        # Polish, nunca rompe.
+        pass
+
+
+def _add_variance_band(ax, values: list, color: str = "#1B3B2F") -> None:
+    """En time-series largos (>=8 puntos), sombrea ±1σ alrededor del
+    promedio. Visualiza qué tan volátil es la serie respecto a su nivel
+    típico — útil cuando la línea zigzaguea pero el AI dice 'estable'.
+    """
+    try:
+        nums = [float(v) for v in values if v is not None]
+        if len(nums) < 8:
+            return
+        mean = sum(nums) / len(nums)
+        var = sum((v - mean) ** 2 for v in nums) / max(1, (len(nums) - 1))
+        sd = var ** 0.5
+        if sd <= 0 or sd / max(abs(mean), 1) < 0.05:
+            return  # serie estable — band aporta poco
+        x = list(range(len(nums)))
+        upper = mean + sd
+        lower = max(0.0, mean - sd)
+        ax.fill_between(x, [lower] * len(x), [upper] * len(x),
+                          color=color, alpha=0.06, zorder=0)
+    except Exception:
+        pass
+
+
 def _annotate_peak_valley_line(ax, values: list) -> None:
     """Highlight peak y valley visualmente en una línea cuando NO son los
     endpoints (que ya tienen anotación) y la diferencia con el endpoint es
@@ -723,6 +872,8 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
                 color="#6B6B6B")
 
     elif chart_type == "line":
+        # Variance band PRIMERO (zorder=0) para que quede DETRÁS de la línea.
+        _add_variance_band(ax, values, color=CHART_PALETTE[0])
         ax.plot(labels, values, marker="o", color=CHART_PALETTE[0],
                  linewidth=3.0, markersize=8, markerfacecolor=CHART_PALETTE[2],
                  markeredgecolor=CHART_PALETTE[0], markeredgewidth=2)
@@ -730,6 +881,9 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
         ax.fill_between(range(len(labels)), values, alpha=0.08,
                           color=CHART_PALETTE[0])
         _style_axes(ax, integer_y=_all_integers(values))
+        # Reference line al promedio — sólo si la serie tiene varianza
+        # suficiente para que aporte (heurística dentro del helper).
+        _add_mean_reference_line(ax, values)
         ax.tick_params(axis="x", rotation=25, labelsize=10)
         # Endpoint annotation
         if values:
@@ -768,6 +922,48 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
         # Add headroom on x for labels
         ax.set_xlim(0, max_v * 1.18)
 
+    elif chart_type == "histogram":
+        # Bins ya pre-calculados en extractor (_build_histogram_data).
+        # Renderizamos como barras adyacentes (sin gap) — visualmente "es"
+        # un histograma. Mostramos línea de mediana sobreimpuesta cuando
+        # los stats están disponibles.
+        x_pos = list(range(len(labels)))
+        ax.bar(x_pos, values, color=CHART_PALETTE[0], edgecolor="#FAFAF5",
+                linewidth=0.8, width=1.0, align="edge")
+        ax.set_xticks([i + 0.5 for i in x_pos])
+        # Sólo mostrar etiquetas alternas si hay >8 bins (espacio)
+        step = max(1, len(labels) // 8)
+        tick_labels = [l if i % step == 0 else "" for i, l in enumerate(labels)]
+        ax.set_xticklabels(tick_labels, fontfamily="Calibri", fontsize=9,
+                            color="#333333", rotation=30, ha="right")
+        _style_axes(ax, integer_y=True)
+        # Mediana visible
+        stats = data.get("_stats") or {}
+        median = stats.get("median")
+        if median is not None:
+            try:
+                # Find which bin the median falls into for x positioning
+                med_x = None
+                for i, lbl in enumerate(labels):
+                    parts = lbl.split("–")
+                    if len(parts) == 2:
+                        # Convert compact format back is hard; usar índice
+                        # como aproximación por mitad de bins.
+                        med_x = len(labels) / 2
+                        break
+                if med_x is not None:
+                    ax.axvline(x=med_x, color="#C9A227", linestyle="--",
+                                linewidth=1.5, alpha=0.85, zorder=3)
+                    ax.text(med_x, max(values) * 0.95,
+                              f" Mediana: {_format_value_short(median)}",
+                              ha="left", va="top", fontsize=9,
+                              fontfamily="Calibri", color="#1B3B2F",
+                              fontweight="bold")
+            except Exception:
+                pass
+        ax.set_ylabel("Frecuencia", fontsize=10, color="#6B6B6B",
+                       fontfamily="Calibri")
+
     else:  # vertical bar
         x_pos = list(range(len(labels)))
         bars = ax.bar(x_pos, values, color=colors, edgecolor="#FAFAF5",
@@ -778,6 +974,9 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
         rotate = 25 if any(len(l) > 8 for l in labels) else 0
         ax.tick_params(axis="x", rotation=rotate, labelsize=10)
         _style_axes(ax, integer_y=_all_integers(values))
+        # Reference line al promedio (sólo si aporta — ver heurística).
+        # Útil para que el lector ubique cada barra vs la media de un vistazo.
+        _add_mean_reference_line(ax, values)
         max_v = max(values) if values else 1
         peak_idx = values.index(max_v) if values else -1
         for i, (b, v) in enumerate(zip(bars, values)):

@@ -127,6 +127,8 @@ REGLAS CRÍTICAS:
        "block_ref": "C1", "narrative": "Bogotá concentra 53 registros (53%), seguida por Medellín (23%) y Cali (15%)." }},
     {{ "type": "chart", "chart_type": "pie", "title": "Composición por Estado",
        "block_ref": "C2", "narrative": "El 75% está en estado CONTABILIZADO, mientras 13% está RECHAZADO." }},
+    {{ "type": "chart", "chart_type": "histogram", "title": "Distribución de Montos Solicitados",
+       "block_ref": "K2", "narrative": "La mayoría se concentra entre $50K y $200K; cola larga hasta $2M." }},
     {{ "type": "table", "title": "Detalle Operativo", "block_ref": "T1",
        "columns_subset": ["Mes","Total","Ciudad","Estado"], "max_rows": 10 }},
     {{ "type": "text_bullets", "title": "Hallazgos Accionables", "supports_block": "T1",
