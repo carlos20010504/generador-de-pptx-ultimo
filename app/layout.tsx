@@ -1,5 +1,22 @@
 import type { Metadata, Viewport } from "next";
+import { Jost, Nunito_Sans } from "next/font/google";
 import "./globals.css";
+
+// Socya: Futura para piezas gráficas → Jost en web (sustituto geométrico).
+const jost = Jost({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800"],
+  variable: "--font-jost",
+  display: "swap",
+});
+
+// Socya: Calibri para documentos → Nunito Sans en web.
+const nunitoSans = Nunito_Sans({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-nunito-sans",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "Socya PPTX Generator",
@@ -10,7 +27,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   maximumScale: 5,
-  themeColor: "#060D18",
+  themeColor: "#087062",
 };
 
 export default function RootLayout({
@@ -19,7 +36,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="es" className="antialiased">
+    <html lang="es" className={`${jost.variable} ${nunitoSans.variable} antialiased`}>
       <body>{children}</body>
     </html>
   );

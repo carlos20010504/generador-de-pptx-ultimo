@@ -1,26 +1,144 @@
 @import "tailwindcss";
 
+/* ════════════════════════════════════════════════════════════════
+   DESIGN TOKENS — Socya identity (DESING.md)
+   White surface · teal #087062 primary · logo-green #69BE28 acentos
+   ════════════════════════════════════════════════════════════════ */
+
 :root {
-  --background: #0a1628;
-  --foreground: #f0f6ff;
-  --primary: #0066CC;
-  --primary-light: #60A5FA;
-  --accent: #4ADE80;
-  --accent-warm: #F59E0B;
-  --surface: rgba(255, 255, 255, 0.04);
-  --surface-hover: rgba(255, 255, 255, 0.08);
-  --border: rgba(255, 255, 255, 0.08);
-  --text-muted: rgba(255, 255, 255, 0.4);
-  --font-geist-sans: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-geist-mono: "Consolas", "SFMono-Regular", "Cascadia Code", monospace;
+  /* ── Brand: Socya logosímbolo (normativos — Manual DAPC08 p.7) ── */
+  --c-logo-green:  #69BE28;
+  --c-logo-gray:   #4D4F53;
+
+  /* ── Brand: paleta digital extendida (socya.org.co) ── */
+  --c-primary:      #087062;   /* dominante UI: teal profundo */
+  --c-primary-dark: #123C49;   /* hover, footer, max contraste */
+  --c-sky:          #00A0DF;   /* enlaces, infraestructura */
+  --c-lime:         #80C612;   /* progreso, métricas positivas */
+  --c-yellow:       #F3C400;   /* KPIs destacados, alertas info */
+  --c-orange:       #FF8300;   /* CTAs urgencia, negocios circulares */
+  --c-accent-green: #EEF7E6;   /* fondos badges/chips suaves */
+
+  /* ── Surfaces (light theme) ── */
+  --c-bg-deep:      #F5F5F5;   /* alias legacy → neutral */
+  --c-bg-base:      #FFFFFF;
+  --c-bg-elevated:  #FFFFFF;
+  --c-bg-elevated-2:#FAFAFA;
+  --c-bg-neutral:   #F5F5F5;
+  --c-bg-tinted:    #F2F8F6;   /* whisper de teal en fondos sutiles */
+
+  /* ── Brand "blue" scale → remapeada al teal Socya ──
+     (mantenemos los nombres var(--c-brand-blue-*) para no romper componentes;
+     todos los azules originales pasan a la familia teal del primary) */
+  --c-brand-blue-700: #043B33;   /* teal muy oscuro */
+  --c-brand-blue-600: #065548;
+  --c-brand-blue-500: #087062;   /* === c-primary === */
+  --c-brand-blue-400: #0E9080;
+  --c-brand-blue-300: #3FA89B;
+  --c-brand-blue-200: #A7DBD4;
+
+  /* ── Indigo/violet scale → remapeada a sky/lime para mantener compat ── */
+  --c-brand-indigo-500: #00A0DF;   /* sky */
+  --c-brand-violet-400: #80C612;   /* lime */
+  --c-brand-violet-300: #B9E063;   /* lime claro */
+
+  /* ── Success / warn / error en clave Socya ── */
+  --c-success-500: #69BE28;        /* logo-green vibrante */
+  --c-success-400: #8FD150;
+  --c-warn-500:    #F3C400;        /* yellow Socya */
+  --c-error-500:   #D43838;
+  --c-error-400:   #E45B5B;
+  --c-error-300:   #B82424;        /* texto de error sobre claro */
+
+  /* ── Texto sobre fondo claro ── */
+  --c-text-primary:    #1A1A1A;                   /* on-surface principal */
+  --c-text-secondary:  #4D4F53;                   /* logo-gray */
+  --c-text-tertiary:   rgba(26, 26, 26, 0.62);
+  --c-text-muted:      rgba(26, 26, 26, 0.45);
+  --c-text-faint:      rgba(26, 26, 26, 0.30);
+
+  /* ── Bordes y divisores ── */
+  --c-border:         rgba(26, 26, 26, 0.10);
+  --c-border-strong:  rgba(26, 26, 26, 0.18);
+  --c-divider:        rgba(26, 26, 26, 0.07);
+
+  /* ── Spacing scale (4px base) ── */
+  --space-1:  0.25rem;
+  --space-2:  0.5rem;
+  --space-3:  0.75rem;
+  --space-4:  1rem;
+  --space-5:  1.25rem;
+  --space-6:  1.5rem;
+  --space-8:  2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* ── Radius (Socya: 8px botones, 16px cards, full pills) ── */
+  --r-sm:  4px;
+  --r-md:  8px;
+  --r-lg:  16px;
+  --r-xl:  20px;
+  --r-2xl: 24px;
+  --r-pill: 9999px;
+
+  /* ── Typography ──
+     Socya: Futura (Jost en web) para piezas gráficas / titulares / labels.
+     Calibri (Nunito Sans en web) para documentos / cuerpo. */
+  --font-heading: var(--font-jost), "Jost", "Futura", "Segoe UI", system-ui, sans-serif;
+  --font-sans:    var(--font-nunito-sans), "Nunito Sans", "Calibri", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  --font-mono:    "JetBrains Mono", "Consolas", "SFMono-Regular", "Cascadia Code", monospace;
+
+  --fs-xs:   0.7rem;
+  --fs-sm:   0.78rem;
+  --fs-base: 0.875rem;
+  --fs-md:   1rem;
+  --fs-lg:   1.125rem;
+  --fs-xl:   1.5rem;
+  --fs-2xl:  2rem;
+  --fs-display: clamp(1.05rem, 5vw, 2.4rem);
+
+  /* ── Shadows (suaves para light theme) ── */
+  --shadow-sm:  0 1px 2px rgba(8, 112, 98, 0.06);
+  --shadow-md:  0 6px 20px rgba(18, 60, 73, 0.08);
+  --shadow-lg:  0 14px 40px rgba(18, 60, 73, 0.12);
+  --shadow-xl:  0 20px 60px rgba(18, 60, 73, 0.14);
+  --shadow-glow-blue: 0 8px 24px rgba(8, 112, 98, 0.30), 0 0 0 1px rgba(8, 112, 98, 0.18) inset;
+
+  /* ── Motion ── */
+  --ease-out:    cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --t-fast: 150ms;
+  --t-base: 220ms;
+  --t-slow: 420ms;
+
+  /* ── Legacy compat (variables exportadas a Tailwind / componentes viejos) ── */
+  --background: var(--c-bg-base);
+  --foreground: var(--c-text-primary);
+  --primary: var(--c-primary);
+  --primary-light: var(--c-brand-blue-400);
+  --accent: var(--c-success-500);
+  --accent-warm: var(--c-warn-500);
+  --surface: var(--c-bg-elevated);
+  --surface-hover: var(--c-bg-elevated-2);
+  --border: var(--c-border);
+  --text-muted: var(--c-text-tertiary);
+  --font-geist-sans: var(--font-sans);
+  --font-geist-mono: var(--font-mono);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
 }
+
+/* ════════════════════════════════════════════════════════════════
+   RESET / BASE
+   ════════════════════════════════════════════════════════════════ */
 
 * {
   box-sizing: border-box;
@@ -28,45 +146,86 @@
   padding: 0;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+html {
+  scroll-behavior: smooth;
 }
 
-/* ── Animations ─────────────────────────────────────────────── */
+body {
+  background: var(--c-bg-neutral);
+  color: var(--c-text-primary);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv01", "cv02";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow-x: clip;
+}
+
+/* Headings always use the heading family — Socya: Futura/Jost */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  letter-spacing: -0.01em;
+}
+
+/* Brand-friendly text selection */
+::selection {
+  background: rgba(8, 112, 98, 0.18);
+  color: var(--c-primary-dark);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   FOCUS — accesible, en marca
+   ════════════════════════════════════════════════════════════════ */
+
+:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+  border-radius: var(--r-md);
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 3px;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   ANIMATIONS — propósito, sutileza, respeta reduced-motion
+   ════════════════════════════════════════════════════════════════ */
 
 @keyframes spin {
   from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  to   { transform: rotate(360deg); }
 }
 
 @keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(16px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes fadeIn {
   from { opacity: 0; }
-  to { opacity: 1; }
+  to   { opacity: 1; }
 }
 
 @keyframes scaleIn {
-  from { opacity: 0; transform: scale(0.95); }
-  to { opacity: 1; transform: scale(1); }
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
 }
 
 @keyframes shimmer {
-  0% { background-position: -200% 0; }
+  0%   { background-position: -200% 0; }
   100% { background-position: 200% 0; }
 }
 
 @keyframes pulse-ring {
-  0% { transform: scale(0.8); opacity: 0.6; }
-  50% { transform: scale(1.1); opacity: 0.2; }
-  100% { transform: scale(0.8); opacity: 0.6; }
+  0%   { transform: scale(0.9); opacity: 0.6; }
+  50%  { transform: scale(1.05); opacity: 0.25; }
+  100% { transform: scale(0.9); opacity: 0.6; }
 }
 
 @keyframes float-orb {
@@ -75,112 +234,145 @@ body {
   66% { transform: translate(-8px, 6px) scale(0.97); }
 }
 
-@keyframes progress-fill {
-  from { width: 0%; }
-  to { width: 100%; }
-}
-
 @keyframes slide-in-right {
   from { opacity: 0; transform: translateX(20px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-@keyframes bounce-subtle {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateX(0); }
 }
 
 @keyframes attention-glow {
   0%, 100% {
     transform: translateY(0) scale(1);
     box-shadow:
-      0 12px 30px rgba(37, 99, 235, 0.42),
-      0 0 0 1px rgba(147, 197, 253, 0.12) inset;
+      0 10px 24px rgba(8, 112, 98, 0.25),
+      0 0 0 1px rgba(8, 112, 98, 0.10) inset;
   }
   50% {
     transform: translateY(-1px) scale(1.01);
     box-shadow:
-      0 18px 38px rgba(59, 130, 246, 0.56),
-      0 0 0 1px rgba(191, 219, 254, 0.22) inset,
-      0 0 24px rgba(96, 165, 250, 0.22);
+      0 16px 32px rgba(8, 112, 98, 0.36),
+      0 0 0 1px rgba(8, 112, 98, 0.18) inset,
+      0 0 24px rgba(105, 190, 40, 0.18);
   }
 }
 
 @keyframes step-arrival {
-  0% {
-    opacity: 0;
-    transform: translateY(14px);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  0%   { opacity: 0; transform: translateY(12px); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes step-focus {
-  0% {
-    box-shadow: 0 0 0 0 rgba(96, 165, 250, 0);
-  }
-  35% {
-    box-shadow: 0 0 0 6px rgba(96, 165, 250, 0.14);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(96, 165, 250, 0);
-  }
+  0%   { box-shadow: 0 0 0 0 rgba(8, 112, 98, 0); }
+  35%  { box-shadow: 0 0 0 8px rgba(8, 112, 98, 0.10); }
+  100% { box-shadow: 0 0 0 0 rgba(8, 112, 98, 0); }
 }
 
-.animate-fade-in-up {
-  animation: fadeInUp 0.5s ease-out both;
-}
+.animate-fade-in-up   { animation: fadeInUp var(--t-slow) var(--ease-out) both; }
+.animate-fade-in      { animation: fadeIn var(--t-base) var(--ease-out) both; }
+.animate-scale-in     { animation: scaleIn var(--t-base) var(--ease-out) both; }
+.animate-slide-in-right { animation: slide-in-right var(--t-slow) var(--ease-out) both; }
+.animate-attention-glow { animation: attention-glow 2.4s ease-in-out infinite; }
+.animate-step-arrival { animation: step-arrival var(--t-slow) var(--ease-spring) both; }
+.animate-step-focus   { animation: step-focus 1.4s var(--ease-out) 1; }
 
-.animate-fade-in {
-  animation: fadeIn 0.4s ease-out both;
-}
-
-.animate-scale-in {
-  animation: scaleIn 0.4s ease-out both;
-}
-
-.animate-slide-in-right {
-  animation: slide-in-right 0.5s ease-out both;
-}
-
-.animate-attention-glow {
-  animation: attention-glow 2.4s ease-in-out infinite;
-}
-
-.animate-step-arrival {
-  animation: step-arrival 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-.animate-step-focus {
-  animation: step-focus 1.4s ease-out 1;
-}
-
-/* Stagger delays for children */
 .stagger-1 { animation-delay: 0.05s; }
-.stagger-2 { animation-delay: 0.1s; }
+.stagger-2 { animation-delay: 0.10s; }
 .stagger-3 { animation-delay: 0.15s; }
-.stagger-4 { animation-delay: 0.2s; }
+.stagger-4 { animation-delay: 0.20s; }
 .stagger-5 { animation-delay: 0.25s; }
-.stagger-6 { animation-delay: 0.3s; }
+.stagger-6 { animation-delay: 0.30s; }
 
-/* ── Scrollbar ──────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   UTILITY CLASSES
+   ════════════════════════════════════════════════════════════════ */
+
+.lift-on-hover {
+  transition:
+    transform var(--t-base) var(--ease-out),
+    box-shadow var(--t-base) var(--ease-out),
+    border-color var(--t-base) var(--ease-out);
+}
+.lift-on-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+}
+
+.press-on-active {
+  transition: transform var(--t-fast) var(--ease-out);
+}
+.press-on-active:active {
+  transform: scale(0.98);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--r-pill);
+  background: var(--c-bg-tinted);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-secondary);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+/* Tarjeta light: superficie blanca, borde sutil, sin glass */
+.glass {
+  background: var(--c-bg-elevated);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+}
+
+/* Divisor verde 3px (patrón Socya — Manual DAPC08) */
+.socya-divider {
+  height: 3px;
+  background: var(--c-logo-green);
+  border: none;
+  margin: 0;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   SCROLLBAR — sutil sobre claro
+   ════════════════════════════════════════════════════════════════ */
 
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
-
 ::-webkit-scrollbar-track {
   background: transparent;
 }
-
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 3px;
+  background: rgba(26, 26, 26, 0.18);
+  border-radius: 4px;
+  transition: background var(--t-base) var(--ease-out);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(8, 112, 98, 0.35);
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+/* ════════════════════════════════════════════════════════════════
+   RESPONSIVE BREAKPOINTS — referencia
+   ────────────────────────────────────────────────────────────────
+   sm:  640px · md: 768px · lg: 1024px · xl: 1280px · 2xl: 1536px
+   ════════════════════════════════════════════════════════════════ */
+
+.hide-on-mobile { display: none; }
+@media (min-width: 768px) {
+  .hide-on-mobile { display: initial; }
+}
+
+.show-on-mobile { display: initial; }
+@media (min-width: 768px) {
+  .show-on-mobile { display: none; }
 }

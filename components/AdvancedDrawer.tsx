@@ -73,7 +73,7 @@ export default function AdvancedDrawer({ open, onClose, children, title = 'Panel
       <style>{`
         .adv-backdrop {
           position: fixed; inset: 0;
-          background: rgba(0, 0, 0, 0.55);
+          background: rgba(18, 60, 73, 0.42);
           backdrop-filter: blur(4px);
           opacity: 0; pointer-events: none;
           transition: opacity 220ms var(--ease-out);
@@ -88,7 +88,7 @@ export default function AdvancedDrawer({ open, onClose, children, title = 'Panel
           max-width: 380px;
           background: var(--c-bg-elevated);
           border-left: 1px solid var(--c-border);
-          box-shadow: -16px 0 48px rgba(0, 0, 0, 0.45);
+          box-shadow: -16px 0 48px rgba(18, 60, 73, 0.18);
           transform: translateX(100%);
           transition: transform 280ms var(--ease-out);
           z-index: 100;
@@ -105,7 +105,7 @@ export default function AdvancedDrawer({ open, onClose, children, title = 'Panel
             max-height: 88vh;
             border-left: none;
             border-top: 1px solid var(--c-border);
-            border-radius: var(--r-2xl) var(--r-2xl) 0 0;
+            border-radius: var(--r-lg) var(--r-lg) 0 0;
             transform: translateY(100%);
           }
           .adv-drawer.is-open { transform: translateY(0); }
@@ -113,31 +113,38 @@ export default function AdvancedDrawer({ open, onClose, children, title = 'Panel
 
         .adv-header {
           display: flex; align-items: center; justify-content: space-between;
-          padding: 0.85rem 1rem;
+          padding: 0.95rem 1.1rem;
           border-bottom: 1px solid var(--c-divider);
-          background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01));
+          background: linear-gradient(180deg, var(--c-accent-green), transparent);
           flex-shrink: 0;
         }
         .adv-title {
-          color: white; font-weight: 800; font-size: 0.88rem;
+          color: var(--c-primary-dark);
+          font-family: var(--font-heading);
+          font-weight: 800; font-size: 0.92rem;
           letter-spacing: -0.01em; margin: 0;
         }
         .adv-close {
-          width: 1.85rem; height: 1.85rem;
+          width: 1.95rem; height: 1.95rem;
           border-radius: var(--r-md);
-          background: rgba(255, 255, 255, 0.04);
-          border: 1px solid var(--c-border);
-          color: var(--c-text-tertiary);
+          background: var(--c-bg-elevated);
+          border: 1px solid var(--c-border-strong);
+          color: var(--c-text-secondary);
           display: flex; align-items: center; justify-content: center;
           cursor: pointer;
           transition: all var(--t-base) var(--ease-out);
         }
-        .adv-close:hover { background: rgba(255, 255, 255, 0.10); color: white; }
+        .adv-close:hover {
+          background: var(--c-primary);
+          color: white;
+          border-color: var(--c-primary);
+        }
 
         .adv-body {
           flex: 1;
           overflow-y: auto;
-          padding: 0.85rem 1rem 1rem;
+          padding: 1rem 1.1rem 1.1rem;
+          background: var(--c-bg-elevated);
         }
       `}</style>
     </>,

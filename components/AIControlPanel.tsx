@@ -273,19 +273,31 @@ export default function AIControlPanel({
   ];
 
   return (
-    <div style={{
-      width: '340px',
-      minWidth: '320px',
-      maxWidth: '360px',
-      flexShrink: 0,
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.75rem',
-      position: 'sticky',
-      top: '1rem',
-      maxHeight: 'calc(100dvh - 2rem)',
-      overflowY: 'auto',
-    }}>
+    <div className="ai-panel-root">
+      <style>{`
+        .ai-panel-root {
+          width: 100%;
+          display: flex;
+          flex-direction: column;
+          gap: 0.75rem;
+        }
+        /* Sidebar behavior only kicks in on desktop where the parent grid
+           actually makes us a sidebar (≥1024px). On smaller screens we sit
+           inline in the page flow so scroll stays on <html> (no inner
+           scroll container that traps mobile gestures). */
+        @media (min-width: 1024px) {
+          .ai-panel-root {
+            width: 340px;
+            min-width: 320px;
+            max-width: 360px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 1rem;
+            max-height: calc(100dvh - 2rem);
+            overflow-y: auto;
+          }
+        }
+      `}</style>
       {/* Header */}
       <div style={{
         background: 'rgba(124,58,237,0.08)',
@@ -304,7 +316,7 @@ export default function AIControlPanel({
             <Wand2 size={15} color="#A78BFA" />
           </div>
           <div>
-            <p style={{ color: 'white', fontSize: '0.82rem', fontWeight: 800, margin: 0, lineHeight: 1.2 }}>
+            <p style={{ color: '#1A1A1A', fontSize: '0.82rem', fontWeight: 800, margin: 0, lineHeight: 1.2 }}>
               Asistente IA
             </p>
             <p style={{
@@ -312,14 +324,14 @@ export default function AIControlPanel({
                 ? (aiStatusBadge(aiStatus).tone === 'cache' ? '#86EFAC'
                    : aiStatusBadge(aiStatus).tone === 'warn' ? '#FCD34D'
                    : '#A78BFA')
-                : 'rgba(255,255,255,0.35)',
+                : 'rgba(26,26,26,0.45)',
               fontSize: '0.62rem', margin: 0,
             }}>
               {aiStatus ? `✦ ${aiStatusBadge(aiStatus).label}` : 'Hermes 3 · OpenRouter'}
             </p>
           </div>
         </div>
-        <p style={{ color: 'rgba(255,255,255,0.42)', fontSize: '0.68rem', margin: 0, lineHeight: 1.4 }}>
+        <p style={{ color: '#4D4F53', fontSize: '0.68rem', margin: 0, lineHeight: 1.4 }}>
           {hasFile
             ? isOrganizedFile
               ? 'La IA está preparada para leer el Excel ya organizado, resumir de qué trata y sugerir cómo construir la presentación.'
@@ -331,13 +343,13 @@ export default function AIControlPanel({
             marginTop: '0.55rem',
             padding: '0.5rem 0.6rem',
             borderRadius: '10px',
-            background: isOrganizedFile ? 'rgba(74,222,128,0.12)' : 'rgba(255,255,255,0.04)',
-            border: isOrganizedFile ? '1px solid rgba(74,222,128,0.22)' : '1px solid rgba(255,255,255,0.07)',
+            background: isOrganizedFile ? 'rgba(74,222,128,0.12)' : '#FFFFFF',
+            border: isOrganizedFile ? '1px solid rgba(74,222,128,0.22)' : '1px solid rgba(26,26,26,0.10)',
           }}>
-            <p style={{ color: isOrganizedFile ? '#86EFAC' : 'rgba(255,255,255,0.58)', fontSize: '0.64rem', fontWeight: 700, margin: '0 0 0.15rem' }}>
+            <p style={{ color: isOrganizedFile ? '#86EFAC' : '#4D4F53', fontSize: '0.64rem', fontWeight: 700, margin: '0 0 0.15rem' }}>
               {isOrganizedFile ? 'Excel organizado listo para IA' : 'Excel cargado para análisis'}
             </p>
-            <p style={{ color: 'rgba(255,255,255,0.42)', fontSize: '0.62rem', margin: 0, lineHeight: 1.35 }}>
+            <p style={{ color: '#4D4F53', fontSize: '0.62rem', margin: 0, lineHeight: 1.35 }}>
               {isOrganizedFile
                 ? `La lectura IA se hará sobre ${currentFileName}${sourceFileLabel && sourceFileLabel !== currentFileName ? `, generado desde ${sourceFileLabel}` : ''}.`
                 : `Archivo actual: ${currentFileName}.`}
@@ -353,13 +365,13 @@ export default function AIControlPanel({
 
       {/* Focus Selector */}
       <div style={{
-        background: 'rgba(255,255,255,0.02)',
-        border: '1px solid rgba(255,255,255,0.06)',
+        background: '#FAFAFA',
+        border: '1px solid rgba(26,26,26,0.08)',
         borderRadius: '14px',
         padding: '0.8rem',
       }}>
         <p style={{
-          color: 'rgba(255,255,255,0.45)',
+          color: '#4D4F53',
           fontSize: '0.62rem',
           fontWeight: 700,
           textTransform: 'uppercase',
@@ -378,9 +390,9 @@ export default function AIControlPanel({
                 style={{
                   padding: '0.5rem 0.2rem',
                   borderRadius: '10px',
-                  border: `1px solid ${active ? color + '55' : 'rgba(255,255,255,0.07)'}`,
-                  background: active ? `${color}18` : 'rgba(255,255,255,0.02)',
-                  color: active ? color : 'rgba(255,255,255,0.35)',
+                  border: `1px solid ${active ? color + '55' : 'rgba(26,26,26,0.10)'}`,
+                  background: active ? `${color}18` : '#FAFAFA',
+                  color: active ? color : 'rgba(26,26,26,0.45)',
                   cursor: 'pointer',
                   fontSize: '0.6rem',
                   fontWeight: 700,
@@ -401,13 +413,13 @@ export default function AIControlPanel({
 
       {/* Prompt Input */}
       <div style={{
-        background: 'rgba(255,255,255,0.02)',
-        border: '1px solid rgba(255,255,255,0.06)',
+        background: '#FAFAFA',
+        border: '1px solid rgba(26,26,26,0.08)',
         borderRadius: '14px',
         padding: '0.8rem',
       }}>
         <p style={{
-          color: 'rgba(255,255,255,0.45)',
+          color: '#4D4F53',
           fontSize: '0.62rem',
           fontWeight: 700,
           textTransform: 'uppercase',
@@ -429,10 +441,10 @@ export default function AIControlPanel({
               width: '100%',
               minHeight: '90px',
               background: 'rgba(0,0,0,0.25)',
-              border: '1px solid rgba(255,255,255,0.09)',
+              border: '1px solid rgba(26,26,26,0.15)',
               borderRadius: '10px',
               padding: '0.65rem 0.7rem 2.2rem',
-              color: hasFile ? 'white' : 'rgba(255,255,255,0.25)',
+              color: hasFile ? '#1A1A1A' : 'rgba(26,26,26,0.30)',
               fontSize: '0.75rem',
               fontFamily: 'inherit',
               resize: 'none',
@@ -442,7 +454,7 @@ export default function AIControlPanel({
               cursor: hasFile ? 'text' : 'not-allowed',
             }}
             onFocus={(e) => { e.currentTarget.style.borderColor = 'rgba(124,58,237,0.4)'; }}
-            onBlur={(e) => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.09)'; }}
+            onBlur={(e) => { e.currentTarget.style.borderColor = 'rgba(26,26,26,0.15)'; }}
           />
           {/* Send / Clear buttons row */}
           <div style={{
@@ -458,11 +470,11 @@ export default function AIControlPanel({
                 onClick={clearPrompt}
                 title="Borrar"
                 style={{
-                  background: 'rgba(255,255,255,0.06)',
-                  border: '1px solid rgba(255,255,255,0.1)',
+                  background: '#EEF7E6',
+                  border: '1px solid rgba(26,26,26,0.10)',
                   borderRadius: '6px',
                   padding: '0.25rem 0.4rem',
-                  color: 'rgba(255,255,255,0.35)',
+                  color: 'rgba(26,26,26,0.45)',
                   fontSize: '0.58rem',
                   fontWeight: 700,
                   cursor: 'pointer',
@@ -499,14 +511,14 @@ export default function AIControlPanel({
 
       {/* Suggestions */}
       <div style={{
-        background: 'rgba(255,255,255,0.02)',
-        border: '1px solid rgba(255,255,255,0.06)',
+        background: '#FAFAFA',
+        border: '1px solid rgba(26,26,26,0.08)',
         borderRadius: '14px',
         padding: '0.8rem',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.55rem' }}>
           <p style={{
-            color: 'rgba(255,255,255,0.45)',
+            color: '#4D4F53',
             fontSize: '0.62rem',
             fontWeight: 700,
             textTransform: 'uppercase',
@@ -522,7 +534,7 @@ export default function AIControlPanel({
               style={{
                 background: 'none',
                 border: 'none',
-                color: 'rgba(255,255,255,0.3)',
+                color: 'rgba(26,26,26,0.30)',
                 cursor: 'pointer',
                 padding: '0.2rem',
                 display: 'flex',
@@ -536,7 +548,7 @@ export default function AIControlPanel({
         {isLoadingSuggestions ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 0' }}>
             <Loader2 size={13} color="#A78BFA" style={{ animation: 'spin 1s linear infinite' }} />
-            <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.7rem' }}>
+            <span style={{ color: 'rgba(26,26,26,0.45)', fontSize: '0.7rem' }}>
               {isOrganizedFile
                 ? 'La IA está leyendo el Excel organizado y proponiendo la mejor forma de presentarlo...'
                 : 'La IA está leyendo tu Excel y construyendo una estrategia de presentación...'}
@@ -551,9 +563,9 @@ export default function AIControlPanel({
                 style={{
                   padding: '0.5rem 0.6rem',
                   borderRadius: '9px',
-                  background: 'rgba(255,255,255,0.03)',
-                  border: '1px solid rgba(255,255,255,0.07)',
-                  color: 'rgba(255,255,255,0.55)',
+                  background: '#F2F8F6',
+                  border: '1px solid rgba(26,26,26,0.10)',
+                  color: '#4D4F53',
                   fontSize: '0.68rem',
                   cursor: 'pointer',
                   textAlign: 'left',
@@ -569,9 +581,9 @@ export default function AIControlPanel({
                   e.currentTarget.style.color = 'white';
                 }}
                 onMouseOut={(e) => {
-                  e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
-                  e.currentTarget.style.borderColor = 'rgba(255,255,255,0.07)';
-                  e.currentTarget.style.color = 'rgba(255,255,255,0.55)';
+                  e.currentTarget.style.background = '#F2F8F6';
+                  e.currentTarget.style.borderColor = 'rgba(26,26,26,0.10)';
+                  e.currentTarget.style.color = '#4D4F53';
                 }}
               >
                 <ChevronRight size={11} style={{ marginTop: '2px', flexShrink: 0, color: '#A78BFA' }} />
@@ -581,8 +593,8 @@ export default function AIControlPanel({
           </div>
         ) : (
           <div style={{ padding: '0.5rem 0', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <Lightbulb size={12} color="rgba(255,255,255,0.2)" />
-            <span style={{ color: 'rgba(255,255,255,0.25)', fontSize: '0.68rem' }}>
+            <Lightbulb size={12} color="rgba(26,26,26,0.25)" />
+            <span style={{ color: 'rgba(26,26,26,0.30)', fontSize: '0.68rem' }}>
               {hasFile ? 'Sin sugerencias IA por ahora — escribe tu propio prompt.' : 'Sube un Excel para ver sugerencias.'}
             </span>
           </div>
@@ -593,13 +605,13 @@ export default function AIControlPanel({
           <div style={{
             marginTop: '0.6rem',
             paddingTop: '0.6rem',
-            borderTop: '1px solid rgba(255,255,255,0.05)',
+            borderTop: '1px solid rgba(26,26,26,0.06)',
             display: 'flex',
             alignItems: 'center',
             gap: '0.35rem',
           }}>
             <Sparkles size={10} color="#A78BFA" />
-            <span style={{ color: 'rgba(255,255,255,0.28)', fontSize: '0.6rem' }}>
+            <span style={{ color: 'rgba(26,26,26,0.30)', fontSize: '0.6rem' }}>
               Usa una sugerencia como base o escribe tu propio prompt para personalizar el PowerPoint
             </span>
           </div>
@@ -609,13 +621,13 @@ export default function AIControlPanel({
       {/* Inteligencia contextual */}
       {hasFile && !isLoadingSuggestions && (executiveSummary || semanticSummary || datasetSummary || findings.length > 0 || trends.length > 0 || recommendedSlides.length > 0 || healthSignals.length > 0) && (
         <div style={{
-          background: 'rgba(255,255,255,0.02)',
-          border: '1px solid rgba(255,255,255,0.06)',
+          background: '#FAFAFA',
+          border: '1px solid rgba(26,26,26,0.08)',
           borderRadius: '14px',
           padding: '0.8rem',
         }}>
           <p style={{
-            color: 'rgba(255,255,255,0.45)',
+            color: '#4D4F53',
             fontSize: '0.62rem',
             fontWeight: 700,
             textTransform: 'uppercase',
@@ -631,16 +643,16 @@ export default function AIControlPanel({
 
           {datasetSummary && (
             <div style={{ marginBottom: '0.65rem' }}>
-              <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.6rem', margin: '0 0 0.38rem', fontWeight: 700 }}>
+              <p style={{ color: 'rgba(26,26,26,0.45)', fontSize: '0.6rem', margin: '0 0 0.38rem', fontWeight: 700 }}>
                 Resumen del Excel
               </p>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.35rem' }}>
                 {summaryCards.map((item) => (
-                  <div key={item.label} style={{ padding: '0.42rem 0.48rem', borderRadius: '9px', background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(255,255,255,0.06)' }}>
-                    <p style={{ color: 'rgba(255,255,255,0.30)', fontSize: '0.55rem', margin: '0 0 0.1rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <div key={item.label} style={{ padding: '0.42rem 0.48rem', borderRadius: '9px', background: '#FAFAFA', border: '1px solid rgba(26,26,26,0.08)' }}>
+                    <p style={{ color: 'rgba(26,26,26,0.30)', fontSize: '0.55rem', margin: '0 0 0.1rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                       {item.label}
                     </p>
-                    <p style={{ color: 'rgba(255,255,255,0.70)', fontSize: '0.65rem', margin: 0, lineHeight: 1.3, fontWeight: 700 }}>
+                    <p style={{ color: 'rgba(26,26,26,0.70)', fontSize: '0.65rem', margin: 0, lineHeight: 1.3, fontWeight: 700 }}>
                       {item.value}
                     </p>
                   </div>
@@ -651,23 +663,23 @@ export default function AIControlPanel({
 
           {semanticSummary && (
             <div style={{ marginBottom: '0.6rem' }}>
-              <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.6rem', margin: '0 0 0.3rem', fontWeight: 700 }}>
+              <p style={{ color: 'rgba(26,26,26,0.45)', fontSize: '0.6rem', margin: '0 0 0.3rem', fontWeight: 700 }}>
                 Tema del Excel
               </p>
               {semanticSummary.topic && (
-                <p style={{ color: 'rgba(255,255,255,0.72)', fontSize: '0.68rem', margin: '0 0 0.18rem', lineHeight: 1.4, fontWeight: 700 }}>
+                <p style={{ color: 'rgba(26,26,26,0.72)', fontSize: '0.68rem', margin: '0 0 0.18rem', lineHeight: 1.4, fontWeight: 700 }}>
                   {semanticSummary.topic}
                 </p>
               )}
               {semanticSummary.informationType && (
-                <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.64rem', margin: '0 0 0.22rem', lineHeight: 1.4 }}>
+                <p style={{ color: 'rgba(26,26,26,0.55)', fontSize: '0.64rem', margin: '0 0 0.22rem', lineHeight: 1.4 }}>
                   Tipo de información: {semanticSummary.informationType}
                 </p>
               )}
               {Array.isArray(semanticSummary.emphasis) && semanticSummary.emphasis.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.24rem' }}>
                   {semanticSummary.emphasis.map((item, idx) => (
-                    <div key={`semantic-${idx}`} style={{ color: 'rgba(255,255,255,0.48)', fontSize: '0.62rem', lineHeight: 1.35 }}>
+                    <div key={`semantic-${idx}`} style={{ color: 'rgba(26,26,26,0.55)', fontSize: '0.62rem', lineHeight: 1.35 }}>
                       • {item}
                     </div>
                   ))}
@@ -678,10 +690,10 @@ export default function AIControlPanel({
 
           {executiveSummary && (
             <div style={{ marginBottom: '0.55rem' }}>
-              <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.6rem', margin: '0 0 0.25rem', fontWeight: 700 }}>
+              <p style={{ color: 'rgba(26,26,26,0.45)', fontSize: '0.6rem', margin: '0 0 0.25rem', fontWeight: 700 }}>
                 De qué trata el Excel
               </p>
-              <p style={{ color: 'rgba(255,255,255,0.62)', fontSize: '0.69rem', margin: 0, lineHeight: 1.45 }}>
+              <p style={{ color: '#4D4F53', fontSize: '0.69rem', margin: 0, lineHeight: 1.45 }}>
               {executiveSummary}
               </p>
             </div>
@@ -689,12 +701,12 @@ export default function AIControlPanel({
 
           {findings.length > 0 && (
             <div style={{ marginBottom: '0.55rem' }}>
-              <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.6rem', margin: '0 0 0.32rem', fontWeight: 700 }}>
+              <p style={{ color: 'rgba(26,26,26,0.45)', fontSize: '0.6rem', margin: '0 0 0.32rem', fontWeight: 700 }}>
                 Hallazgos clave
               </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.32rem' }}>
                 {findings.map((item, idx) => (
-                  <div key={`finding-${idx}`} style={{ color: 'rgba(255,255,255,0.55)', fontSize: '0.66rem', lineHeight: 1.35 }}>
+                  <div key={`finding-${idx}`} style={{ color: '#4D4F53', fontSize: '0.66rem', lineHeight: 1.35 }}>
                     • {item}
                   </div>
                 ))}
@@ -704,13 +716,13 @@ export default function AIControlPanel({
 
           {trends.length > 0 && (
             <div style={{ marginBottom: '0.55rem' }}>
-              <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.6rem', margin: '0 0 0.32rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+              <p style={{ color: 'rgba(26,26,26,0.45)', fontSize: '0.6rem', margin: '0 0 0.32rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
                 <TrendingUp size={10} />
                 Tendencias
               </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.28rem' }}>
                 {trends.map((item, idx) => (
-                  <div key={`trend-${idx}`} style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.64rem', lineHeight: 1.35 }}>
+                  <div key={`trend-${idx}`} style={{ color: 'rgba(26,26,26,0.55)', fontSize: '0.64rem', lineHeight: 1.35 }}>
                     • {item}
                   </div>
                 ))}
@@ -720,16 +732,16 @@ export default function AIControlPanel({
 
           {recommendedSlides.length > 0 && (
             <div style={{ marginBottom: healthSignals.length > 0 ? '0.55rem' : 0 }}>
-              <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.6rem', margin: '0 0 0.32rem', fontWeight: 700 }}>
+              <p style={{ color: 'rgba(26,26,26,0.45)', fontSize: '0.6rem', margin: '0 0 0.32rem', fontWeight: 700 }}>
                 Cómo recomienda presentarlo
               </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
                 {recommendedSlides.map((slide, idx) => (
-                  <div key={`rec-slide-${idx}`} style={{ padding: '0.45rem 0.5rem', borderRadius: '8px', background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(255,255,255,0.06)' }}>
-                    <p style={{ color: 'rgba(255,255,255,0.62)', fontSize: '0.65rem', margin: '0 0 0.12rem', fontWeight: 700 }}>
+                  <div key={`rec-slide-${idx}`} style={{ padding: '0.45rem 0.5rem', borderRadius: '8px', background: '#FAFAFA', border: '1px solid rgba(26,26,26,0.08)' }}>
+                    <p style={{ color: '#4D4F53', fontSize: '0.65rem', margin: '0 0 0.12rem', fontWeight: 700 }}>
                       {slide.title || `Diapositiva ${idx + 1}`}
                     </p>
-                    <p style={{ color: 'rgba(255,255,255,0.38)', fontSize: '0.61rem', margin: 0, lineHeight: 1.35 }}>
+                    <p style={{ color: 'rgba(26,26,26,0.45)', fontSize: '0.61rem', margin: 0, lineHeight: 1.35 }}>
                       {slide.reason || 'Bloque recomendado por la IA para mejorar la narrativa.'}
                     </p>
                     <button
@@ -757,12 +769,12 @@ export default function AIControlPanel({
 
           {healthSignals.length > 0 && (
             <div>
-              <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.6rem', margin: '0 0 0.32rem', fontWeight: 700 }}>
+              <p style={{ color: 'rgba(26,26,26,0.45)', fontSize: '0.6rem', margin: '0 0 0.32rem', fontWeight: 700 }}>
                 Estado del análisis
               </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
                 {healthSignals.map((signal, idx) => (
-                  <div key={`health-${idx}`} style={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.63rem', lineHeight: 1.35 }}>
+                  <div key={`health-${idx}`} style={{ color: '#4D4F53', fontSize: '0.63rem', lineHeight: 1.35 }}>
                     • {signal}
                   </div>
                 ))}
@@ -775,13 +787,13 @@ export default function AIControlPanel({
       {/* Ayuda de prompts */}
       {hasFile && !isLoadingSuggestions && promptHints.length > 0 && (
         <div style={{
-          background: 'rgba(255,255,255,0.02)',
-          border: '1px solid rgba(255,255,255,0.06)',
+          background: '#FAFAFA',
+          border: '1px solid rgba(26,26,26,0.08)',
           borderRadius: '14px',
           padding: '0.8rem',
         }}>
           <p style={{
-            color: 'rgba(255,255,255,0.45)',
+            color: '#4D4F53',
             fontSize: '0.62rem',
             fontWeight: 700,
             textTransform: 'uppercase',
@@ -792,7 +804,7 @@ export default function AIControlPanel({
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.32rem' }}>
             {promptHints.map((hint, idx) => (
-              <div key={`prompt-hint-${idx}`} style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.65rem', lineHeight: 1.38 }}>
+              <div key={`prompt-hint-${idx}`} style={{ color: 'rgba(26,26,26,0.55)', fontSize: '0.65rem', lineHeight: 1.38 }}>
                 • {hint}
               </div>
             ))}

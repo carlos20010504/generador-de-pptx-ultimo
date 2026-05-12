@@ -1,5 +1,5 @@
 import ExcelUploader from '@/components/ExcelUploader';
-import { BarChart3, Sparkles } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 
 export const metadata = {
   title: 'Socya PPTX Generator – Excel a PowerPoint Inteligente',
@@ -9,21 +9,26 @@ export const metadata = {
 export default function Home() {
   return (
     <main className="page-shell">
-      {/* Ambient background (decorative, non-interactive) */}
-      <div className="bg-grid" aria-hidden />
-      <div className="bg-orb orb-blue" aria-hidden />
-      <div className="bg-orb orb-green" aria-hidden />
-      <div className="bg-topline" aria-hidden />
+      {/* Subtle ambient teal wash — anchored to brand, no dark orbs */}
+      <div className="bg-wash bg-wash-top" aria-hidden />
+      <div className="bg-wash bg-wash-bottom" aria-hidden />
 
-      {/* Compact brand strip — no hero, no duplicated subtitle */}
+      {/* Brand strip · 3px logo-green divider · Socya pattern (Manual DAPC08) */}
       <header className="page-header animate-fade-in-up">
         <div className="brand">
           <div className="brand-mark" aria-hidden>
-            <BarChart3 size={20} color="white" />
+            {/* Stylized "S" leaf — minimal Socya glyph */}
+            <svg viewBox="0 0 32 32" width="22" height="22" fill="none">
+              <path
+                d="M22.5 9.4c-1.6-1.7-4-2.6-6.6-2.6-3.5 0-6.4 2.1-6.4 4.7 0 2.4 2 3.7 5.7 4.5l1.6.4c4.5 1 7.1 2.7 7.1 6.1 0 3.6-3.6 6.2-8.4 6.2-3.4 0-6.3-1.4-7.9-3.5"
+                stroke="#69BE28" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"
+              />
+              <circle cx="24" cy="6.5" r="1.8" fill="#69BE28" />
+            </svg>
           </div>
           <div className="brand-text">
-            <p className="brand-title">Socya PPTX Generator</p>
-            <p className="brand-sub">v4.0 · Hermes-driven</p>
+            <p className="brand-title">Socya <span className="brand-title-accent">PPTX</span></p>
+            <p className="brand-sub">Generador inteligente · v4.0</p>
           </div>
         </div>
 
@@ -32,6 +37,8 @@ export default function Home() {
           <span>Detección inteligente activa</span>
         </div>
       </header>
+
+      <div className="socya-divider" aria-hidden />
 
       {/* Main interactive surface */}
       <section className="uploader-shell animate-fade-in-up stagger-1">
@@ -43,50 +50,32 @@ export default function Home() {
           min-height: 100dvh;
           width: 100%;
           max-width: 100vw;
-          background: var(--c-bg-deep);
+          background: var(--c-bg-neutral);
           display: flex;
           flex-direction: column;
           align-items: center;
-          padding: clamp(0.75rem, 2vw, 1.25rem);
+          padding: clamp(0.85rem, 2vw, 1.4rem);
           font-family: var(--font-sans);
+          color: var(--c-text-primary);
           position: relative;
           overflow-x: clip;
         }
 
-        .bg-grid {
-          position: absolute; inset: 0;
-          background-image:
-            linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(255, 255, 255, 0.012) 1px, transparent 1px);
-          background-size: 60px 60px;
-          pointer-events: none;
-        }
-        .bg-orb {
+        /* Subtle teal wash — replaces dark orbs. Light, on-brand, never noisy. */
+        .bg-wash {
           position: absolute;
-          border-radius: 50%;
+          inset: 0;
           pointer-events: none;
-          will-change: transform;
+          opacity: 0.55;
         }
-        .orb-blue {
-          top: -16rem; right: -8rem;
-          width: 42rem; height: 42rem;
-          background: radial-gradient(circle, rgba(59, 130, 246, 0.10) 0%, transparent 55%);
-          animation: float-orb 20s ease-in-out infinite;
+        .bg-wash-top {
+          background:
+            radial-gradient(60% 35% at 18% 0%, rgba(8, 112, 98, 0.10) 0%, transparent 70%),
+            radial-gradient(45% 30% at 92% 4%, rgba(105, 190, 40, 0.10) 0%, transparent 70%);
         }
-        .orb-green {
-          bottom: -12rem; left: -10rem;
-          width: 36rem; height: 36rem;
-          background: radial-gradient(circle, rgba(74, 222, 128, 0.07) 0%, transparent 55%);
-          animation: float-orb 25s ease-in-out infinite reverse;
-        }
-        .bg-topline {
-          position: absolute; top: 0; left: 0; right: 0; height: 1px;
-          background: linear-gradient(90deg,
-            transparent,
-            rgba(59, 130, 246, 0.30),
-            rgba(99, 102, 241, 0.30),
-            transparent);
-          pointer-events: none;
+        .bg-wash-bottom {
+          background:
+            radial-gradient(50% 35% at 80% 100%, rgba(8, 112, 98, 0.08) 0%, transparent 70%);
         }
 
         .page-header {
@@ -96,44 +85,63 @@ export default function Home() {
           align-items: center;
           justify-content: space-between;
           gap: var(--space-3);
-          margin-bottom: clamp(0.85rem, 1.6vw, 1.15rem);
+          margin-bottom: 0;
+          padding: 0.85rem 0.25rem;
           z-index: 10;
         }
-        .brand { display: flex; align-items: center; gap: 0.65rem; }
+        .brand { display: flex; align-items: center; gap: 0.7rem; }
         .brand-mark {
-          background: linear-gradient(135deg, var(--c-brand-blue-700), var(--c-brand-blue-500));
+          background: white;
           border-radius: var(--r-md);
-          padding: 0.45rem 0.5rem;
+          padding: 0.35rem 0.45rem;
           display: flex; align-items: center; justify-content: center;
-          box-shadow: 0 4px 18px rgba(59, 130, 246, 0.28),
-                      inset 0 1px 0 rgba(255, 255, 255, 0.15);
-          border: 1px solid rgba(59, 130, 246, 0.30);
+          border: 1px solid var(--c-border);
+          box-shadow: var(--shadow-sm);
         }
         .brand-title {
           color: var(--c-text-primary);
-          font-weight: 800; font-size: 0.92rem;
-          letter-spacing: -0.02em; line-height: 1.1;
+          font-family: var(--font-heading);
+          font-weight: 800;
+          font-size: 1rem;
+          letter-spacing: -0.02em;
+          line-height: 1.05;
+        }
+        .brand-title-accent {
+          color: var(--c-primary);
         }
         .brand-sub {
-          color: var(--c-text-muted);
+          color: var(--c-text-tertiary);
+          font-family: var(--font-heading);
           font-size: 0.66rem;
-          letter-spacing: 0.02em;
+          letter-spacing: 0.04em;
           line-height: 1.2;
-          margin-top: 1px;
+          margin-top: 2px;
+          text-transform: uppercase;
         }
+
         .status-pill {
           display: inline-flex; align-items: center;
           gap: var(--space-2);
-          padding: 0.32rem 0.6rem;
+          padding: 0.34rem 0.65rem;
           border-radius: var(--r-pill);
-          background: rgba(74, 222, 128, 0.08);
-          border: 1px solid rgba(74, 222, 128, 0.18);
-          color: var(--c-success-400);
-          font-size: 0.66rem; font-weight: 700;
-          letter-spacing: 0.02em;
+          background: var(--c-accent-green);
+          border: 1px solid rgba(105, 190, 40, 0.30);
+          color: var(--c-primary);
+          font-family: var(--font-heading);
+          font-size: 0.65rem;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
         }
         @media (max-width: 480px) {
           .brand-sub, .status-pill { display: none; }
+        }
+
+        .socya-divider {
+          width: 100%;
+          max-width: 960px;
+          margin-bottom: clamp(1rem, 2vw, 1.4rem);
+          z-index: 10;
         }
 
         .uploader-shell {
