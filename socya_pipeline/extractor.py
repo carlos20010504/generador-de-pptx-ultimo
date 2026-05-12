@@ -369,6 +369,17 @@ def _extract_kpi_row(slide: dict, blocks_by_id: dict) -> Optional[dict]:
                             f"{_format_kpi_value(b.extra.get('max'))}")
         else:
             display_value = _format_kpi_value(value)
+
+        # Si el parser detectó una unidad explícita en el header (kg, USD,
+        # Ton, hab, etc.) y el value formateado no la incluye ya, la
+        # sufijamos. Así "1.5K" pasa a ser "1.5K kg" sin que el AI deba
+        # adivinar la unidad.
+        unit_hint = b.extra.get("unit_hint")
+        if unit_hint and not _value_already_carries_unit(display_value, unit_hint):
+            # Skip si la unidad es una currency code que ya se mostraría
+            # con su prefijo $ (display_unit currency case ya lo cubre).
+            if unit_hint not in ("USD", "EUR", "COP", "MXN", "CLP", "ARS", "BRL", "GBP", "JPY", "CNY"):
+                display_value = f"{display_value} {unit_hint}"
         kpis.append({"label": b.label,
                       "value": display_value,
                       "description": description})
@@ -380,6 +391,14 @@ def _extract_kpi_row(slide: dict, blocks_by_id: dict) -> Optional[dict]:
     # otherwise look identical to the reader.
     _disambiguate_kpi_labels(kpis, used_blocks)
     return {"kpis": kpis}
+
+
+def _value_already_carries_unit(display_value: str, unit: str) -> bool:
+    """True si el formateado ya menciona la unidad (case-insensitive).
+    Evita 'kg kg' cuando el AI puso la unidad en el label original."""
+    if not display_value or not unit:
+        return False
+    return unit.lower() in str(display_value).lower()
 
 
 def _disambiguate_kpi_labels(kpis: List[dict], blocks: List) -> None:

@@ -121,6 +121,13 @@ def cmd_generate(args):
             profile=profile,
             file_path=Path(args.input),
         )
+        # Optional second-pass critique (refiner). Off por default; opt-in
+        # via env SOCYA_AI_REFINE=1. Best-effort — fallos no rompen la
+        # generación. Se aplica sólo en cmd_generate (no en cmd_plan)
+        # para que la preview UI muestre lo mismo que el render final
+        # cuando el refiner está apagado (caso default).
+        from socya_pipeline.refiner import refine_plan
+        plan = refine_plan(plan, api_key=api_key, profile=profile)
         outcome = validate_plan(plan, inv, wb)
         if not outcome.slides:
             raise PipelineError(
@@ -216,6 +223,9 @@ def cmd_generate(args):
             "model_used": plan.get("_meta", {}).get("model"),
             "cache_hit": plan.get("_meta", {}).get("cache_hit", False),
             "fallback_chain_steps": plan.get("_meta", {}).get("fallback_steps", []),
+            "refined": plan.get("_meta", {}).get("refined", False),
+            "refine_fixes_applied": plan.get("_meta", {}).get("refine_fixes_applied", 0),
+            "refine_dropped": plan.get("_meta", {}).get("refine_dropped", 0),
             "slides_planned": len(plan.get("slides", [])),
             "slides_validated": len(outcome.slides),
             "slides_dropped": outcome.dropped,

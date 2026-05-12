@@ -28,6 +28,10 @@ class ColumnData:
     mean: Any = None
     sum: Any = None
     top_values: List[List[Any]] = field(default_factory=list)  # [[value, count], ...]
+    # Unidad inferida del header / cell format (ej. "USD", "kg", "%", "Ton"),
+    # None si no se detecta. Usado para etiquetar KPIs y ejes de chart sin
+    # tener que adivinar.
+    unit: Any = None
 
 @dataclass
 class SheetData:
@@ -41,6 +45,10 @@ class SheetData:
 class WorkbookData:
     filename: str
     sheets: List[SheetData]
+    # Named ranges definidos por el usuario en Excel (Insert > Name).
+    # Es la señal semántica MÁS fuerte: el usuario etiquetó datos importantes.
+    # Lista de {name, sheet, range, scope}. Vacía cuando no hay o falla la lectura.
+    named_ranges: List[dict] = field(default_factory=list)
 
 def parse_workbook(path, api_key: str = None) -> WorkbookData:
     """Parse an Excel into a WorkbookData. If `api_key` is provided AND the
@@ -72,6 +80,7 @@ def parse_workbook(path, api_key: str = None) -> WorkbookData:
             continue
         df = _resolve_merged_headers(df, p, sheet_name)
         df = _promote_real_headers(xls, sheet_name, df)
+        df = _compose_two_row_headers(xls, sheet_name, df)
         df = _strip_total_rows(df)
         df = _filter_formula_errors(df)
         sheets.append(_summarize_sheet(sheet_name, df,
@@ -84,7 +93,10 @@ def parse_workbook(path, api_key: str = None) -> WorkbookData:
             user_action="upload_again",
         )
 
-    wb = WorkbookData(filename=p.name, sheets=sheets)
+    # Named ranges del usuario — best-effort, [] si falla.
+    named_ranges = _read_named_ranges(p)
+
+    wb = WorkbookData(filename=p.name, sheets=sheets, named_ranges=named_ranges)
 
     # Optional AI inspector: ONLY runs when the parser detected confusion AND
     # the caller provided an api_key. Best-effort: any failure is swallowed.
@@ -274,6 +286,205 @@ def _looks_numeric(s: str) -> bool:
         return False
 
 
+# Unidades habituales que aparecen en headers entre paréntesis o sufijos.
+# Conservador: sólo lo "evidente" para no inventar señales.
+_UNIT_RE = __import__("re").compile(
+    r"\(\s*("
+    r"USD|EUR|COP|MXN|CLP|ARS|BRL|GBP|JPY|CNY|"      # monedas
+    r"kg|g|mg|t|ton|lb|"                                # peso
+    r"km|m|cm|mm|mi|"                                    # distancia
+    r"l|ml|gal|"                                         # volumen
+    r"%|pct|"                                            # porcentaje
+    r"hab|personas|usuarios|registros|unidades|"        # conteos
+    r"hr|h|min|seg|s|días|dias|day|days"                # tiempo
+    r")\s*\)",
+    flags=__import__("re").IGNORECASE,
+)
+# Sufijo libre: "Ventas USD" → "USD". Sólo evaluar al FINAL del header.
+_UNIT_SUFFIX_RE = __import__("re").compile(
+    r"\s+(USD|EUR|COP|MXN|kg|Ton|TON|t|%|hab|km)$"
+)
+
+
+def _detect_unit(header: str, number_format: Any = None) -> Any:
+    """Inferir la unidad de la columna a partir del header y/o del cell format.
+    Retorna string normalizado (e.g. "USD", "%", "kg") o None."""
+    if header:
+        h = str(header).strip()
+        m = _UNIT_RE.search(h)
+        if m:
+            raw = m.group(1).strip()
+            return _normalize_unit(raw)
+        m = _UNIT_SUFFIX_RE.search(h)
+        if m:
+            return _normalize_unit(m.group(1))
+    if number_format:
+        nf = str(number_format)
+        if "%" in nf:
+            return "%"
+        # Cell format con currency code embebido: "[$USD-409]" / "[$EUR-407]"
+        cur = __import__("re").search(r"\[\$([A-Z]{3})", nf)
+        if cur:
+            return cur.group(1)
+    return None
+
+
+def _normalize_unit(raw: str) -> str:
+    """Normaliza variantes habituales (TON/Ton/t → 't'; pct/% → '%')."""
+    s = (raw or "").strip()
+    low = s.lower()
+    if low in ("ton", "t"):
+        return "t"
+    if low in ("pct", "porcentaje"):
+        return "%"
+    if low in ("hab", "habitantes"):
+        return "hab"
+    if low in ("dias", "días", "day", "days"):
+        return "días"
+    if low in ("seg", "s"):
+        return "s"
+    # Currency codes y símbolos las dejamos en mayúscula
+    if len(s) == 3 and s.isalpha():
+        return s.upper()
+    return s
+
+
+def _read_named_ranges(path: Path) -> List[dict]:
+    """Lee defined_names del workbook openpyxl. Cada named range es una
+    señal semántica explícita ("Ventas2024", "TotalGeneral", etc.). El AI
+    los puede usar para anclar slides a datos importantes para el usuario.
+    Best-effort — un workbook sin defined_names devuelve [].
+    """
+    if not str(path).lower().endswith((".xlsx", ".xlsm")):
+        return []
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(filename=str(path), read_only=True,
+                            data_only=True, keep_links=False)
+    except Exception:
+        return []
+    out: List[dict] = []
+    try:
+        defined = getattr(wb, "defined_names", None)
+        if not defined:
+            return out
+        # openpyxl 3.x: defined_names is a DefinedNameDict
+        try:
+            items = defined.items()
+        except AttributeError:
+            items = []
+        for name, dn in items:
+            try:
+                # dn.value es algo como "Hoja1!$A$1:$B$10"
+                value = getattr(dn, "value", None) or ""
+                # Skip prints/criterias internos de Excel
+                if name.startswith("_xlnm."):
+                    continue
+                # Parse "SheetName!$A$1:$B$10"
+                if "!" in str(value):
+                    sheet, rng = str(value).split("!", 1)
+                    sheet = sheet.strip("'\"")
+                else:
+                    sheet, rng = "", str(value)
+                out.append({
+                    "name": str(name),
+                    "sheet": sheet,
+                    "range": rng,
+                })
+            except Exception:
+                continue
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+    return out
+
+
+def _compose_two_row_headers(xls, sheet_name: str, df: pd.DataFrame
+                                ) -> pd.DataFrame:
+    """Detect and collapse a 2-row header into a single composite header.
+
+    Heuristic real-world (informe ejecutivo / financiero):
+      Row 0 (df.columns): supercategorías como 'Ventas', 'Costos', 'Margen'
+                            con varias columnas seguidas con el mismo valor
+                            (o la 1ra con valor + 2 'Unnamed:' a la derecha).
+      Row 1 (df.iloc[0]):  encabezados reales por celda — todos strings,
+                            mayoría diferentes ('Q1', 'Q2', 'Q3'...).
+
+    Si esto pinta así, componemos `'Ventas > Q1'`, `'Ventas > Q2'`, etc.,
+    eliminamos la fila 1 (que pasa a ser header) y devolvemos el df
+    re-headerizado. Caso contrario devolvemos df sin cambios.
+    """
+    if df.empty or len(df) < 2:
+        return df
+
+    cols = [str(c) for c in df.columns]
+    n = len(cols)
+    if n < 2:
+        return df
+
+    # Señal A: ≥40% de columnas son 'Unnamed:' adyacentes a una columna nombrada
+    # (típico de super-headers — pandas asigna 'Unnamed' a las celdas vacías
+    # de la fila 0 que están a la derecha de un super-encabezado).
+    unnamed_after_named = 0
+    last_named = None
+    for c in cols:
+        if c.startswith("Unnamed:"):
+            if last_named:
+                unnamed_after_named += 1
+        else:
+            last_named = c
+    if unnamed_after_named < max(2, n * 0.25):
+        return df
+
+    # Señal B: la fila 0 (que sería la 2da fila de headers) es mayormente
+    # strings cortos no numéricos, casi todos distintos entre sí.
+    try:
+        row0 = df.iloc[0].tolist()
+    except Exception:
+        return df
+    str_cells = [v for v in row0 if isinstance(v, str) and v.strip()]
+    if len(str_cells) < max(3, int(n * 0.6)):
+        return df
+    if any(_looks_numeric(s) for s in str_cells):
+        return df
+    # Diversidad mínima — si todos son iguales no es un sub-header útil
+    uniq_ratio = len(set(s.strip().lower() for s in str_cells)) / max(1, len(str_cells))
+    if uniq_ratio < 0.6:
+        return df
+
+    # Componer headers: forward-fill el supercategoría sobre los Unnamed
+    super_filled: List[str] = []
+    last = ""
+    for c in cols:
+        if not c.startswith("Unnamed:") and c.lower() != "nan":
+            last = c
+        super_filled.append(last)
+
+    new_headers: List[str] = []
+    for i, super_h in enumerate(super_filled):
+        sub = ""
+        try:
+            v = row0[i]
+            if v is not None and str(v).strip():
+                sub = str(v).strip()
+        except Exception:
+            pass
+        if super_h and sub:
+            new_headers.append(f"{super_h} > {sub}")
+        elif super_h:
+            new_headers.append(super_h)
+        elif sub:
+            new_headers.append(sub)
+        else:
+            new_headers.append(f"Col {i + 1}")
+
+    new_df = df.iloc[1:].reset_index(drop=True).copy()
+    new_df.columns = new_headers
+    return new_df
+
+
 def _resolve_merged_headers(df: pd.DataFrame, path: Path, sheet_name: str,
                               header_row: int = 1) -> pd.DataFrame:
     """If the sheet has merged cells in/around the header row, replicate the
@@ -388,9 +599,10 @@ def _summarize_column(name: Any, series: pd.Series,
     n_unique = int(series.nunique(dropna=True))
     dtype = _infer_dtype(name_str, series, excel_format=excel_format)
     samples = series.dropna().head(8).tolist()
+    unit = _detect_unit(name_str, number_format=excel_format)
 
     col = ColumnData(name=name_str, dtype=dtype, n_unique=n_unique,
-                     fill_ratio=fill, samples=_jsonify(samples))
+                     fill_ratio=fill, samples=_jsonify(samples), unit=unit)
 
     if dtype in ("numeric", "currency", "percent", "year", "score"):
         nums = pd.to_numeric(series, errors="coerce")

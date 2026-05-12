@@ -607,6 +607,54 @@ def _add_footer(slide, tagline: str, page: int, total: int) -> None:
 
 # ──────────────────── Charts (matplotlib) ────────────────────
 
+def _annotate_peak_valley_line(ax, values: list) -> None:
+    """Highlight peak y valley visualmente en una línea cuando NO son los
+    endpoints (que ya tienen anotación) y la diferencia con el endpoint es
+    significativa (≥10% del rango). Marca con punto dorado y label corto.
+    """
+    if not values or len(values) < 4:
+        return
+    try:
+        max_v = max(values)
+        min_v = min(values)
+        rng = max_v - min_v
+        if rng <= 0:
+            return
+        max_idx = values.index(max_v)
+        min_idx = values.index(min_v)
+        last_idx = len(values) - 1
+
+        def _is_significant(idx: int) -> bool:
+            # No re-anotamos el endpoint
+            if idx == last_idx:
+                return False
+            # Si el extremo está "cerca" del endpoint (mismo orden de
+            # magnitud que el endpoint y a 1-2 puntos de distancia), skip.
+            return abs(values[idx] - values[last_idx]) >= rng * 0.10
+
+        if _is_significant(max_idx):
+            ax.plot([max_idx], [max_v], marker="o", markersize=11,
+                     markerfacecolor="#C9A227", markeredgecolor="#1B3B2F",
+                     markeredgewidth=1.5, zorder=5)
+            ax.annotate(f"▲ {_format_value_short(max_v)}",
+                          xy=(max_idx, max_v),
+                          xytext=(0, 14), textcoords="offset points",
+                          ha="center", fontsize=9, fontfamily="Calibri",
+                          fontweight="bold", color="#1B3B2F")
+        if _is_significant(min_idx) and min_idx != max_idx:
+            ax.plot([min_idx], [min_v], marker="o", markersize=11,
+                     markerfacecolor="#B85042", markeredgecolor="#1B3B2F",
+                     markeredgewidth=1.5, zorder=5)
+            ax.annotate(f"▼ {_format_value_short(min_v)}",
+                          xy=(min_idx, min_v),
+                          xytext=(0, -22), textcoords="offset points",
+                          ha="center", fontsize=9, fontfamily="Calibri",
+                          fontweight="bold", color="#1B3B2F")
+    except Exception:
+        # Anotación es polish — nunca debe romper el render.
+        pass
+
+
 def _build_chart_png(data: dict, width_in: float = 7.5,
                        height_in: float = 4.0) -> io.BytesIO:
     chart_type = data.get("chart_type", "bar")
@@ -690,6 +738,9 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
                           xytext=(8, 8), textcoords="offset points",
                           fontsize=10, fontfamily="Calibri",
                           color="#1B3B2F", fontweight="bold")
+        # Peak / valley callouts — sólo si NO coinciden con el endpoint
+        # (que ya tiene anotación) y si la diferencia es significativa.
+        _annotate_peak_valley_line(ax, values)
 
     elif chart_type == "barh":
         # Horizontal bars: top of chart = leader, bottom = smallest / "Otros".
@@ -728,13 +779,25 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
         ax.tick_params(axis="x", rotation=rotate, labelsize=10)
         _style_axes(ax, integer_y=_all_integers(values))
         max_v = max(values) if values else 1
-        for b, v in zip(bars, values):
+        peak_idx = values.index(max_v) if values else -1
+        for i, (b, v) in enumerate(zip(bars, values)):
             ax.text(b.get_x() + b.get_width() / 2,
                       b.get_height() + max_v * 0.015,
                       _format_value_short(v),
                       ha="center", va="bottom", fontsize=11,
                       fontfamily="Calibri", color="#1B3B2F", fontweight="bold")
-        ax.set_ylim(0, max_v * 1.15)
+            # Highlight visual del peak — corona pequeña y borde reforzado.
+            # Sólo cuando hay ≥4 barras (en menos no aporta).
+            if i == peak_idx and len(values) >= 4:
+                b.set_edgecolor("#C9A227")
+                b.set_linewidth(2.5)
+                ax.text(b.get_x() + b.get_width() / 2,
+                          b.get_height() + max_v * 0.085,
+                          "★ MÁX",
+                          ha="center", va="bottom", fontsize=8.5,
+                          fontfamily="Calibri", fontweight="bold",
+                          color="#C9A227")
+        ax.set_ylim(0, max_v * 1.18)
 
     try:
         plt.tight_layout(pad=0.6)
