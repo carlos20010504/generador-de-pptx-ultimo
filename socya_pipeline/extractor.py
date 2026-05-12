@@ -12,19 +12,38 @@ import math
 from pathlib import Path
 from typing import List, Tuple, Optional
 import pandas as pd
-from socya_pipeline.parser import WorkbookData, promote_real_headers
+from socya_pipeline.parser import WorkbookData, promote_real_headers, strip_total_rows
+from socya_pipeline import insights
 
-UGLY_LITERALS_LOWER = {"nan", "none", "null", "nat", "???", "—", "s/d", "n/a", "na"}
+UGLY_LITERALS_LOWER = insights.UGLY_LITERALS  # back-compat alias
 MAX_TABLE_COLS = 6
 
 
+def _build_dtype_map(wb: WorkbookData) -> dict:
+    """(sheet_name, col_name) → dtype. Built once per pipeline run."""
+    return {(s.name, c.name): c.dtype for s in wb.sheets for c in s.columns}
+
+
 def extract_for_render(validated_slides, inventory, wb: WorkbookData,
-                        file_path) -> Tuple[List[dict], List[dict]]:
+                        file_path,
+                        xls: Optional[pd.ExcelFile] = None,
+                        sheets_cache: Optional[dict] = None,
+                        dtype_map: Optional[dict] = None,
+                        ) -> Tuple[List[dict], List[dict]]:
     """Returns (rendered_slides, dropped_slides). Dropped entries are
-    {type, reason, block_ref?, title?} for transparency in audit.json."""
+    {type, reason, block_ref?, title?} for transparency in audit.json.
+
+    `xls`, `sheets_cache`, and `dtype_map` can be supplied by the caller to
+    avoid re-opening the Excel and re-deriving the dtype map between
+    `extract_for_render` and `auto_complete_slides` (the two are typically
+    invoked back-to-back from cli.py). When omitted they are built locally."""
     blocks_by_id = {b.id: b for b in inventory}
-    xls = pd.ExcelFile(Path(file_path))
-    sheets_cache = {}
+    if xls is None:
+        xls = pd.ExcelFile(Path(file_path))
+    if sheets_cache is None:
+        sheets_cache = {}
+    if dtype_map is None:
+        dtype_map = _build_dtype_map(wb)
 
     rendered: List[dict] = []
     dropped: List[dict] = []
@@ -59,23 +78,45 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
                 dropped.append({"type": stype, "reason": "no_valid_kpis"})
             continue
 
-        # Load source sheet (cached)
+        # Load source sheet (cached). Apply the same cleaning the parser used
+        # at inventory time so totals/headers stay consistent across stages.
         sheet_name = block.provenance.sheet
         if sheet_name not in sheets_cache:
-            raw = xls.parse(sheet_name)
-            sheets_cache[sheet_name] = promote_real_headers(xls, sheet_name, raw)
+            try:
+                raw = xls.parse(sheet_name)
+            except (ValueError, KeyError) as e:
+                # Sheet referenced by the plan no longer exists in the file
+                # (cache mismatch / renamed sheet). Drop the slide cleanly
+                # rather than crashing the whole pipeline.
+                dropped.append({"type": stype, "reason": "sheet_not_found",
+                                "block_ref": block.id, "sheet": sheet_name,
+                                "details": str(e)[:120]})
+                continue
+            cleaned = promote_real_headers(xls, sheet_name, raw)
+            cleaned = strip_total_rows(cleaned)
+            sheets_cache[sheet_name] = cleaned
         df = sheets_cache[sheet_name]
 
         if stype == "chart":
             chart_data = _build_chart_data(block, df, slide.get("chart_type", "bar"))
             if chart_data:
-                rendered.append({**slide, "data": chart_data})
+                # Anti-hallucination: if the AI's narrative contains numbers
+                # that don't exist in the chart's real data, replace with an
+                # auto-narrative built from chart_data itself.
+                ai_narr = (slide.get("narrative") or "").strip()
+                col_name = (block.provenance.columns[0]
+                              if block.provenance.columns else "")
+                honest_narr = _validate_or_replace_narrative(
+                    ai_narr, chart_data, col_name)
+                rendered.append({**slide, "narrative": honest_narr,
+                                  "data": chart_data})
             else:
                 dropped.append({"type": stype, "reason": "chart_data_empty",
                                 "block_ref": block.id})
 
         elif stype == "table":
-            table_data = _build_table_data(slide, block, df)
+            table_data = _build_table_data(slide, block, df,
+                                             dtype_map=dtype_map)
             if table_data:
                 rendered.append({**slide, "data": table_data})
             else:
@@ -94,12 +135,19 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
 
 
 def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
-                          file_path, target_count: int = 7) -> List[dict]:
-    """If `rendered` has fewer than target_count slides, add high-quality
-    slides from inventory blocks the planner didn't use. Editorial-grade
-    fallback so the user always gets a substantive deck."""
+                          file_path, target_count: int = 7,
+                          xls: Optional[pd.ExcelFile] = None,
+                          sheets_cache: Optional[dict] = None,
+                          dtype_map: Optional[dict] = None,
+                          ) -> List[dict]:
+    """Add high-quality slides from unused inventory blocks when `rendered`
+    is short. `xls` / `sheets_cache` / `dtype_map` should be the same objects
+    passed to `extract_for_render` to avoid re-opening the Excel."""
     if len(rendered) >= target_count:
         return rendered
+
+    if dtype_map is None:
+        dtype_map = _build_dtype_map(wb)
 
     used_block_ids = set()
     used_chart_columns = set()  # column names already charted (avoid duplicates by semantics)
@@ -122,13 +170,22 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
                 used_table_sheets.add(sheet)
 
     blocks_by_id = {b.id: b for b in inventory}
-    xls = pd.ExcelFile(Path(file_path))
-    sheets_cache = {}
+    if xls is None:
+        xls = pd.ExcelFile(Path(file_path))
+    if sheets_cache is None:
+        sheets_cache = {}
 
     def get_df(sheet_name):
         if sheet_name not in sheets_cache:
-            raw = xls.parse(sheet_name)
-            sheets_cache[sheet_name] = promote_real_headers(xls, sheet_name, raw)
+            try:
+                raw = xls.parse(sheet_name)
+            except (ValueError, KeyError):
+                # Cache None so we don't keep retrying the missing sheet
+                sheets_cache[sheet_name] = None
+                return None
+            cleaned = promote_real_headers(xls, sheet_name, raw)
+            cleaned = strip_total_rows(cleaned)
+            sheets_cache[sheet_name] = cleaned
         return sheets_cache[sheet_name]
 
     extra: List[dict] = []
@@ -139,11 +196,20 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
                    if b.kind == "kpi_candidate"
                    and b.id not in used_block_ids
                    and b.extra.get("value") is not None]
-    # Prefer currency KPIs first
-    unused_kpis.sort(key=lambda b: (
-        0 if b.extra.get("agg") == "sum" else 1,
-        -(b.extra.get("value") or 0)
-    ))
+    # Prefer: derived ratios first (always interesting),
+    # then non-subsumed currency totals (the headline numbers),
+    # then everything else by magnitude.
+    def _kpi_priority(b):
+        is_derived = "derived" in b.quality_flags
+        is_subsumed = "subsumed_by_total" in b.quality_flags
+        is_sum = b.extra.get("agg") == "sum"
+        return (
+            0 if is_derived else 1,
+            1 if is_subsumed else 0,
+            0 if is_sum else 1,
+            -(b.extra.get("value") or 0),
+        )
+    unused_kpis.sort(key=_kpi_priority)
     if unused_kpis and not any(s.get("type") == "kpi_row" for s in rendered):
         top = unused_kpis[:4]
         kpi_data = _extract_kpi_row(
@@ -168,6 +234,14 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
         for bad in BAD_CHART_NAMES:
             if bad in col_name:
                 return False
+        # Skip "Unnamed: N" / single-symbol columns — bad slide titles
+        if (col_name.startswith("unnamed:")
+                or sum(1 for c in col_name if c.isalnum()) <= 1):
+            return False
+        # Skip when every category has count=1 (no aggregation, just a list)
+        top = b.extra.get("top_values") or []
+        if top and all(int(c) <= 1 for _, c in top):
+            return False
         return True
 
     unused_cats = [b for b in inventory
@@ -192,6 +266,8 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
         if _col_norm(col_name) in used_chart_columns:
             continue  # avoid duplicate chart for the same semantic column
         df = get_df(cat.provenance.sheet)
+        if df is None:
+            continue  # source sheet missing — skip silently
         chart_data = _build_chart_data(cat, df, chart_types[chart_idx % len(chart_types)])
         if chart_data:
             chart_idx += 1
@@ -207,12 +283,16 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
         if chart_idx >= 3:  # cap auto charts at 3
             break
 
-    # 3. Add a detail table from the largest unused table block
-    unused_tables = [b for b in inventory
-                     if b.kind == "table"
-                     and b.id not in used_block_ids
-                     and "low_fill_ratio" not in b.quality_flags
-                     and "too_few_rows" not in b.quality_flags]
+    # 3. Add a detail table from the largest unused table block. Skip
+    # redundant sheets unless we have no alternative.
+    candidates = [b for b in inventory
+                   if b.kind == "table"
+                   and b.id not in used_block_ids
+                   and "low_fill_ratio" not in b.quality_flags
+                   and "too_few_rows" not in b.quality_flags]
+    non_redundant = [b for b in candidates
+                      if "redundant_sheet" not in b.quality_flags]
+    unused_tables = non_redundant if non_redundant else candidates
     unused_tables.sort(key=lambda b: -(b.extra.get("shape", [0])[0]))
     for tbl in unused_tables:
         if len(rendered) + len(extra) >= target_count:
@@ -220,7 +300,10 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
         if tbl.provenance.sheet in used_table_sheets:
             continue  # avoid duplicate table from the same sheet
         df = get_df(tbl.provenance.sheet)
-        table_data = _build_table_data({"max_rows": 10}, tbl, df)
+        if df is None:
+            continue  # source sheet missing
+        table_data = _build_table_data({"max_rows": 10}, tbl, df,
+                                         dtype_map=dtype_map)
         if table_data and len(table_data.get("headers", [])) >= 2:
             used_table_sheets.add(tbl.provenance.sheet)
             extra.append({
@@ -245,6 +328,7 @@ def _col_norm(s: str) -> str:
 
 def _extract_kpi_row(slide: dict, blocks_by_id: dict) -> Optional[dict]:
     kpis = []
+    used_blocks = []
     for ref in slide.get("block_refs", []):
         b = blocks_by_id.get(ref)
         if not b or b.kind != "kpi_candidate":
@@ -254,27 +338,90 @@ def _extract_kpi_row(slide: dict, blocks_by_id: dict) -> Optional[dict]:
             continue
         description = ""
         agg = b.extra.get("agg")
-        if agg == "sum":
-            description = "Acumulado total"
+        mean = b.extra.get("mean")
+        unit = b.extra.get("display_unit")
+        # Percent display takes precedence: a percent KPI must always render
+        # with the % suffix, regardless of how it was computed (ratio derived
+        # vs. mean of a percent column).
+        if unit == "%":
+            v = float(value)
+            display_pct = v * 100 if -1 <= v <= 1 else v
+            display_value = f"{display_pct:.1f}%"
+            if agg == "ratio":
+                description = "Indicador derivado (ratio)"
+            elif b.extra.get("min") is not None and b.extra.get("max") is not None:
+                lo = b.extra["min"]
+                hi = b.extra["max"]
+                lo_d = lo * 100 if -1 <= lo <= 1 else lo
+                hi_d = hi * 100 if -1 <= hi <= 1 else hi
+                # Skip the description if it's a trivial "0% – 100%" — that's
+                # the theoretical full range of any percent column and gives
+                # the reader nothing useful.
+                trivial = (lo_d <= 0.5 and hi_d >= 99.5)
+                if not trivial:
+                    description = f"Rango: {lo_d:.1f}% – {hi_d:.1f}%"
+        elif agg == "sum" and mean is not None:
+            display_value = _format_kpi_value(value)
+            description = f"Promedio por registro: {_format_kpi_value(mean)}"
         elif agg == "mean" and b.extra.get("min") is not None:
+            display_value = _format_kpi_value(value)
             description = (f"Rango: {_format_kpi_value(b.extra.get('min'))} – "
                             f"{_format_kpi_value(b.extra.get('max'))}")
+        else:
+            display_value = _format_kpi_value(value)
         kpis.append({"label": b.label,
-                      "value": _format_kpi_value(value),
+                      "value": display_value,
                       "description": description})
+        used_blocks.append(b)
     if not kpis:
         return None
+    # Disambiguate duplicate labels by appending the source sheet — two cards
+    # called 'Total Solicitado' from sheets 'Master' and 'Hoja1' would
+    # otherwise look identical to the reader.
+    _disambiguate_kpi_labels(kpis, used_blocks)
     return {"kpis": kpis}
 
 
-def _build_table_data(slide: dict, block, df: pd.DataFrame) -> Optional[dict]:
+def _disambiguate_kpi_labels(kpis: List[dict], blocks: List) -> None:
+    """In-place: when two KPIs have the same label, suffix the source sheet
+    name in parentheses. No-op when all labels are already unique."""
+    label_counts: dict = {}
+    for k in kpis:
+        label_counts[k["label"]] = label_counts.get(k["label"], 0) + 1
+    if all(v == 1 for v in label_counts.values()):
+        return
+    for k, b in zip(kpis, blocks):
+        if label_counts[k["label"]] > 1:
+            sheet = (b.provenance.sheet or "").strip()
+            if sheet and sheet not in k["label"]:
+                k["label"] = f"{k['label']} ({sheet})"
+
+
+def _build_table_data(slide: dict, block, df: pd.DataFrame,
+                       dtype_map: Optional[dict] = None) -> Optional[dict]:
     """Build {headers, rows} for a table slide. Auto-picks the 6 best columns
-    when AI didn't specify columns_subset (or specified ones that don't match)."""
+    when AI didn't specify columns_subset; samples diverse rows (not just
+    head); formats cells using the parser-inferred dtype when available
+    ($1,234,567 for currency, 12.3% for percent, 2024 for year, etc.).
+    Excludes ID-like columns unless explicitly requested."""
+    dtype_map = dtype_map or {}
+    sheet_name = block.provenance.sheet
     requested = slide.get("columns_subset") or []
-    cols = [c for c in requested if c in df.columns]
+    # Resolve requested columns with case-insensitive / whitespace tolerance —
+    # AI sometimes emits "Ciudad_Destino" when the actual header is
+    # "Ciudad_destino" or "ciudad_destino ". Without this, the slide gets
+    # auto-picked columns instead of the ones the planner intended.
+    cols = []
+    for c in requested:
+        resolved = _resolve_column(str(c), df) if c is not None else None
+        if resolved is not None and resolved not in cols:
+            cols.append(resolved)
     if not cols:
-        # Auto-pick: top 6 columns by fill ratio, prefer mix of categorical+numeric
         cols = _auto_pick_columns(block, df, max_cols=MAX_TABLE_COLS)
+    # Always filter ID-like columns (even if AI requested them — they're noise
+    # for the reader). Exception: if filtering would leave us with nothing.
+    filtered = [c for c in cols if not _looks_id_column(c, df[c])]
+    cols = filtered if filtered else cols
     cols = cols[:MAX_TABLE_COLS]
     if not cols:
         return None
@@ -282,23 +429,218 @@ def _build_table_data(slide: dict, block, df: pd.DataFrame) -> Optional[dict]:
     sub = df[cols].copy()
     cleaned = _clean_dataframe(sub)
     if cleaned.empty or len(cleaned.columns) < 1:
-        # Fall back to lightly cleaned (no fill-ratio drops, just ugly literal stripping)
         cleaned = sub.copy().map(_simple_clean)
     if cleaned.empty or len(cleaned.columns) < 1:
         return None
 
-    max_rows = int(slide.get("max_rows") or 12)
-    cleaned = cleaned.head(max_rows)
+    max_rows = int(slide.get("max_rows") or 10)
+    sampled = _diverse_sample(cleaned, df, max_rows)
+
+    # Detect PII columns once per table — cheaper than per-cell checks
+    pii_kinds = _detect_pii_columns(df, list(sampled.columns))
+
+    # Per-column formatting based on source dtype + PII masking
+    formatted_rows = []
+    for _, row in sampled.iterrows():
+        out_row = []
+        for col_name in sampled.columns:
+            raw_val = row[col_name]
+            source_col = df[col_name] if col_name in df.columns else None
+            kind = pii_kinds.get(col_name)
+            if kind:
+                out_row.append(insights.mask_pii(raw_val, kind) if raw_val else "")
+            else:
+                col_dtype = dtype_map.get((sheet_name, col_name))
+                out_row.append(_format_table_cell(raw_val, source_col,
+                                                   col_name, col_dtype))
+        formatted_rows.append(out_row)
+
     return {
-        "headers": [_clean_header(h) or f"Col {i+1}" for i, h in enumerate(cleaned.columns)],
-        "rows": cleaned.values.tolist(),
+        "headers": [_humanize_header(h) or f"Col {i+1}" for i, h in enumerate(sampled.columns)],
+        "rows": formatted_rows,
     }
+
+
+def _humanize_header(value) -> str:
+    """Display-form column name (delegates to insights.humanize_header)."""
+    return insights.humanize_header(value)
+
+
+def _detect_pii_columns(df: pd.DataFrame, cols: list) -> dict:
+    """Return {col_name: pii_kind} for columns whose sampled values are
+    dominantly PII. Conservative: doc_id requires the column name to also
+    hint at identification (cédula/documento/dni) — never enmascarar a
+    column whose name screams 'valor' or 'monto' even if digits look ID-like."""
+    out = {}
+    for c in cols:
+        if c not in df.columns:
+            continue
+        try:
+            samples = df[c].dropna().head(30).tolist()
+        except Exception:
+            continue
+        kind = insights.is_pii_column(samples, col_name=str(c))
+        if kind:
+            out[c] = kind
+    return out
+
+
+def _looks_id_column(col_name: str, series: pd.Series) -> bool:
+    """An 'ID column' is one whose name matches an identifier pattern AND whose
+    cardinality ≈ row count (each row a unique value). Currency is never ID."""
+    name = str(col_name).strip().lower()
+    if pd.api.types.is_numeric_dtype(series):
+        # currency-like names should not be considered IDs
+        for token in ("total", "valor", "monto", "precio", "costo", "ingreso",
+                       "salario", "importe"):
+            if token in name:
+                return False
+    for token in ("id ", " id", "id_", "_id", "código", "codigo", "número",
+                   "numero", "n°", "no.", "folio", "consecutivo", "uuid", "key"):
+        if token in name or name == token.strip():
+            try:
+                ratio = float(series.nunique(dropna=True)) / max(1, len(series.dropna()))
+                if ratio >= 0.85:
+                    return True
+            except Exception:
+                return True
+    return False
+
+
+def _diverse_sample(cleaned: pd.DataFrame, source_df: pd.DataFrame,
+                     max_rows: int) -> pd.DataFrame:
+    """Pick `max_rows` rows that are diverse on the most-populated string
+    column (so a table about Comisiones doesn't show 9 rows of the same
+    Solicitante). Falls back to head() when no string column has good cardinality.
+    """
+    if len(cleaned) <= max_rows:
+        return cleaned
+
+    # Pick a "diversity column" — the first string column with reasonable cardinality
+    div_col = None
+    for c in cleaned.columns:
+        if c not in source_df.columns:
+            continue
+        s = source_df[c]
+        if pd.api.types.is_numeric_dtype(s):
+            continue
+        n_unique = s.nunique(dropna=True)
+        if 3 <= n_unique <= max(50, len(s) * 0.5):
+            div_col = c
+            break
+
+    if div_col is None:
+        return cleaned.head(max_rows)
+
+    # 1 row per unique value of div_col, up to max_rows
+    seen = set()
+    picked_idx = []
+    for idx, val in cleaned[div_col].items():
+        key = str(val).strip().lower()
+        if key in seen or not key:
+            continue
+        seen.add(key)
+        picked_idx.append(idx)
+        if len(picked_idx) >= max_rows:
+            break
+    if len(picked_idx) < max_rows:
+        # Top-up with sequential rows we haven't picked
+        for idx in cleaned.index:
+            if idx not in picked_idx:
+                picked_idx.append(idx)
+                if len(picked_idx) >= max_rows:
+                    break
+    return cleaned.loc[picked_idx[:max_rows]]
+
+
+def _format_table_cell(value, source_series, col_name: str,
+                         col_dtype: Optional[str] = None) -> str:
+    """Format a cell based on the source column's inferred dtype.
+        currency → $1,234,567
+        percent  → 12.3%
+        year     → 2024 (no thousand separator)
+        score    → 4.5
+        numeric  → 1,234,567 (or 1.5K/1.5M for big magnitudes)
+        date     → ISO
+        text     → trimmed and de-shouted
+
+    When `col_dtype` is provided (from parser), uses it as the authoritative
+    signal. Falls back to name-based heuristics only when dtype is missing."""
+    if value is None or value == "":
+        return ""
+
+    dt_hint = (col_dtype or "").lower()
+
+    # Date columns get formatted before any other coercion. Pandas Timestamps
+    # stringify as "2024-06-12 09:21:25.987000" by default which is unreadable
+    # in a deck table — we strip to ISO date or short datetime.
+    if dt_hint == "date":
+        try:
+            ts = pd.to_datetime(value, errors="raise")
+            # If time portion is meaningless (midnight), show date only
+            if ts.hour == 0 and ts.minute == 0 and ts.second == 0:
+                return ts.strftime("%Y-%m-%d")
+            return ts.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+    # Try numeric coercion first
+    try:
+        num = float(str(value).replace(",", "").replace("$", "")
+                      .replace("%", "").strip())
+        if math.isnan(num):
+            return ""
+
+        dt = dt_hint
+        if dt == "currency":
+            return _format_currency_compact(num)
+        if dt == "percent":
+            # Decimal form (e.g. 0.22, -0.22) → scale to %; otherwise assume
+            # already on 0..100 scale.
+            display = num * 100 if -1 <= num <= 1 else num
+            return f"{display:.1f}%"
+        if dt == "year":
+            return str(int(num)) if num.is_integer() else f"{num:.0f}"
+        if dt == "score":
+            return f"{num:.1f}" if not num.is_integer() else str(int(num))
+
+        # No explicit dtype: fallback to name-based heuristics (i18n vocabulary)
+        if not dt:
+            if insights.looks_money_by_name(col_name):
+                return _format_currency_compact(num)
+
+        if num.is_integer() and abs(num) < 100_000:
+            return f"{int(num):,}"
+        if abs(num) >= 1_000:
+            return f"{num:,.0f}" if num.is_integer() else f"{num:,.1f}"
+        return str(int(num)) if num.is_integer() else f"{num:.2f}"
+    except (ValueError, AttributeError):
+        pass
+
+    # Non-numeric cell
+    s = str(value).strip()
+    if len(s) > 38:
+        s = s[:36] + "…"
+    if s.isupper() and len(s) > 6:
+        s = s.title()
+    return s
+
+
+def _format_currency_compact(num: float) -> str:
+    return insights.format_compact(num, prefix="$")
 
 
 def _auto_pick_columns(block, df: pd.DataFrame, max_cols: int) -> List[str]:
     """Pick the top columns from a block by fill ratio, biasing toward
     a useful mix of identifying-name + categorical + numeric columns."""
-    candidate_cols = [c for c in block.provenance.columns if c in df.columns]
+    # Tolerate case/whitespace mismatches between block.provenance.columns
+    # (recorded at inventory time) and the live df.columns (could have been
+    # re-headered by promote_real_headers).
+    candidate_cols = []
+    for c in block.provenance.columns:
+        resolved = _resolve_column(str(c), df) if c is not None else None
+        if resolved is not None and resolved not in candidate_cols:
+            candidate_cols.append(resolved)
     if not candidate_cols:
         candidate_cols = list(df.columns)
 
@@ -347,19 +689,7 @@ def _simple_clean(v):
 
 
 def _format_kpi_value(value):
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    if math.isnan(f):
-        return "—"
-    if abs(f) >= 1_000_000:
-        return f"{f/1_000_000:.1f}M"
-    if abs(f) >= 1_000:
-        return f"{f/1_000:.1f}K"
-    if f.is_integer():
-        return str(int(f))
-    return f"{f:.2f}"
+    return insights.format_compact(value)
 
 
 def _build_chart_data(block, df, chart_type):
@@ -368,33 +698,131 @@ def _build_chart_data(block, df, chart_type):
         if not col:
             return None
         vc = df[col].dropna().astype(str).str.strip()
-        # Drop ugly literals from string values
         vc = vc[~vc.str.lower().isin(UGLY_LITERALS_LOWER)]
-        vc = vc.value_counts().head(8)
+        vc = vc.value_counts().head(15)  # take a few extra so Top-N has room
         if len(vc) < 2:
+            return None
+        labels = vc.index.tolist()
+        values = [int(v) for v in vc.values.tolist()]
+        labels, values, is_chrono = _maybe_sort_chronologically(labels, values)
+        # Don't roll a chronological series into "Otros" — the order matters.
+        if not is_chrono:
+            labels, values = _consolidate_long_tail(labels, values, max_categories=10)
+        else:
+            labels = labels[:12]
+            values = values[:12]
+        labels, values = _drop_non_finite_pairs(labels, values)
+        if len(values) < 2:
             return None
         return {
             "chart_type": chart_type,
             "name": col,
-            "labels": vc.index.tolist(),
-            "values": [int(v) for v in vc.values.tolist()],
+            "labels": labels,
+            "values": values,
+            "chronological": is_chrono,
         }
     if block.kind == "time_series_candidate":
         x_col = _resolve_column(block.extra.get("x"), df)
         y_col = _resolve_column(block.extra.get("y"), df)
         if not x_col or not y_col:
             return None
-        sub = df[[x_col, y_col]].dropna()
+        sub = df[[x_col, y_col]].dropna().copy()
         if len(sub) < 2:
             return None
-        sub = sub.sort_values(x_col).head(20)
+        # Coerce to datetime + numeric. Aggregate by month so we get a clean
+        # ~12-point trend instead of N raw rows with timestamps.
+        sub[x_col] = pd.to_datetime(sub[x_col], errors="coerce")
+        sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
+        # Drop ±inf along with NaN before aggregations — otherwise sums
+        # inherit the inf and the chart blows up.
+        sub[y_col] = sub[y_col].replace([float("inf"), float("-inf")], pd.NA)
+        sub = sub.dropna()
+        if len(sub) < 2:
+            return None
+        # Decide aggregation granularity by date span
+        span_days = (sub[x_col].max() - sub[x_col].min()).days
+        if span_days > 365:
+            sub["__period"] = sub[x_col].dt.to_period("Q").astype(str)
+        elif span_days > 60:
+            sub["__period"] = sub[x_col].dt.to_period("M").astype(str)
+        elif span_days > 14:
+            sub["__period"] = sub[x_col].dt.to_period("W").astype(str)
+        else:
+            sub["__period"] = sub[x_col].dt.strftime("%Y-%m-%d")
+        agg = sub.groupby("__period")[y_col].sum().reset_index()
+        agg = agg.sort_values("__period").head(24)
+        if len(agg) < 2:
+            return None
+        labels = [str(x) for x in agg["__period"]]
+        values = [float(v) for v in agg[y_col]]
+        labels, values = _drop_non_finite_pairs(labels, values)
+        if len(values) < 2:
+            return None
         return {
             "chart_type": "line",
             "name": y_col,
-            "labels": [str(x) for x in sub[x_col]],
-            "values": [float(v) for v in pd.to_numeric(sub[y_col], errors="coerce").fillna(0)],
+            "labels": labels,
+            "values": values,
         }
     return None
+
+
+def _drop_non_finite_pairs(labels, values):
+    """Remove (label, value) pairs where value isn't a finite number. Some
+    sheets sneak NaN/Inf past upstream cleanups via aggregations; if any
+    survives into matplotlib it crashes silently and the slide renders blank.
+    """
+    out_l, out_v = [], []
+    for l, v in zip(labels, values):
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(fv):
+            continue
+        out_l.append(l)
+        out_v.append(fv)
+    return out_l, out_v
+
+
+def _consolidate_long_tail(labels, values, max_categories: int = 10):
+    """Group the long tail of small categories into one 'Otros' slice when a
+    chart has more than `max_categories` categories. Bar/donut/pie charts
+    with >12 slices become unreadable; collapsing the long tail keeps the
+    leaders legible without losing total magnitude.
+    Assumes labels/values are already sorted high-to-low (vc.value_counts()).
+    """
+    if len(labels) <= max_categories:
+        return labels, values
+    head_l = list(labels[: max_categories - 1])
+    head_v = list(values[: max_categories - 1])
+    tail_v = sum(values[max_categories - 1 :])
+    head_l.append("Otros")
+    head_v.append(tail_v)
+    return head_l, head_v
+
+
+def _maybe_sort_chronologically(labels, values):
+    """If labels look like month names (any supported language) or weekdays,
+    sort chronologically. Returns (labels, values, is_chronological).
+    Delegates language detection to insights.month_index/weekday_index."""
+    if not labels:
+        return labels, values, False
+    months = [insights.month_index(l) for l in labels]
+    if sum(1 for m in months if m is not None) / len(labels) >= 0.7:
+        indexed = sorted(enumerate(months),
+                          key=lambda t: t[1] if t[1] is not None else 999)
+        return ([labels[i] for i, _ in indexed],
+                [values[i] for i, _ in indexed],
+                True)
+    weekdays = [insights.weekday_index(l) for l in labels]
+    if sum(1 for d in weekdays if d is not None) / len(labels) >= 0.7:
+        indexed = sorted(enumerate(weekdays),
+                          key=lambda t: t[1] if t[1] is not None else 999)
+        return ([labels[i] for i, _ in indexed],
+                [values[i] for i, _ in indexed],
+                True)
+    return labels, values, False
 
 
 def _resolve_column(name: str, df: pd.DataFrame) -> Optional[str]:
@@ -416,28 +844,149 @@ def _resolve_column(name: str, df: pd.DataFrame) -> Optional[str]:
 
 
 def _auto_chart_narrative(chart_data: dict, col_name: str) -> str:
+    """Build an honest narrative ENTIRELY from chart_data — every number
+    cited here is guaranteed to be in the chart itself.
+
+    Adds insight layers (degrade gracefully if `insights` isn't useful):
+      - For chronological / line data: peak, valley, growth, *seasonality*.
+      - For ranked data: leader, runners-up, *Pareto concentration* of top-3,
+        and outlier callout when one value dominates the average.
+    """
     labels = chart_data.get("labels", [])
     values = chart_data.get("values", [])
     if len(labels) < 2:
         return ""
-    parts = [f"{labels[0]} concentra {values[0]} registros"]
-    if len(labels) >= 2:
-        parts.append(f"seguido por {labels[1]} con {values[1]}")
+    chart_type = chart_data.get("chart_type", "bar")
+    is_chrono = bool(chart_data.get("chronological"))
+    total = sum(float(v) for v in values) or 1
+
+    if chart_type == "line" or is_chrono:
+        first_v = values[0]
+        last_v = values[-1]
+        max_idx = max(range(len(values)), key=lambda i: values[i])
+        min_idx = min(range(len(values)), key=lambda i: values[i])
+        peak = (labels[max_idx], values[max_idx])
+        valley = (labels[min_idx], values[min_idx])
+        delta = last_v - first_v
+        delta_pct = (delta / first_v * 100) if first_v else 0
+        direction = ("creció" if delta > 0
+                     else ("decreció" if delta < 0 else "se mantuvo"))
+        body = (f"El máximo se registró en {peak[0]} con {_fmt_n(peak[1])}, "
+                f"el mínimo en {valley[0]} con {_fmt_n(valley[1])}. "
+                f"Entre {labels[0]} y {labels[-1]} el indicador {direction} "
+                f"un {abs(delta_pct):.0f}%.")
+        # Optional seasonality hint
+        try:
+            hint = insights.seasonality_hint(labels, values)
+            if hint:
+                body += " " + hint
+        except Exception:
+            pass
+        return body
+
+    # Ranking-style — first label IS the leader by sort
+    lead_pct = values[0] / total * 100
+    parts = [f"{labels[0]} lidera con {_fmt_n(values[0])} ({lead_pct:.0f}% del total)"]
     if len(labels) >= 3:
-        parts.append(f"y {labels[2]} con {values[2]}")
-    total = sum(values)
-    pct = (values[0] / total * 100) if total else 0
-    return ", ".join(parts) + f". El líder representa el {pct:.0f}% del total observado."
+        parts.append(f"seguido por {labels[1]} ({_fmt_n(values[1])}) "
+                      f"y {labels[2]} ({_fmt_n(values[2])})")
+    elif len(labels) >= 2:
+        parts.append(f"seguido por {labels[1]} con {_fmt_n(values[1])}")
+    body = ", ".join(parts) + "."
+
+    # Pareto-style insight: top-3 share of total
+    try:
+        share = insights.pareto_share(values, top_n=3)
+        if share is not None and len(values) >= 5 and share >= 0.6:
+            body += f" Top 3 concentra el {share*100:.0f}% del total."
+    except Exception:
+        pass
+
+    if len(labels) > 4:
+        body += (f" Las {len(labels) - 3} categorías restantes acumulan "
+                  f"{_fmt_n(total - sum(values[:3]))}.")
+
+    # Outlier callout: when leader is >5x the median of the rest
+    try:
+        rest = sorted([float(v) for v in values[1:]], reverse=True)
+        if rest:
+            median_rest = rest[len(rest) // 2]
+            if median_rest > 0 and values[0] / median_rest >= 5:
+                ratio = values[0] / median_rest
+                body += (f" {labels[0]} es {ratio:.0f}x la mediana del resto, "
+                          f"un outlier marcado.")
+    except Exception:
+        pass
+
+    return body
+
+
+def _fmt_n(v):
+    """Compact number formatter for narratives — matches what charts show."""
+    return insights.format_compact(v)
+
+
+_NUM_RE_NARR = __import__("re").compile(r"\d{1,3}(?:[\.,]\d{3})*(?:[\.,]\d+)?|\d+")
+
+
+def _validate_or_replace_narrative(ai_narr: str, chart_data: dict,
+                                     col_name: str) -> str:
+    """If `ai_narr` mentions any integer that doesn't exist in chart_data
+    (or a close fuzzy match), replace it with an auto-generated narrative
+    built only from real chart values."""
+    if not ai_narr:
+        return _auto_chart_narrative(chart_data, col_name)
+
+    chart_values = [float(v) for v in chart_data.get("values", []) if v is not None]
+    chart_total = sum(chart_values)
+    valid_nums = set(chart_values) | {chart_total}
+    # Allow rounded versions: int, /1000, /1000000
+    expanded = set(valid_nums)
+    for v in valid_nums:
+        expanded.add(round(v))
+        expanded.add(round(v / 1_000, 1))
+        expanded.add(round(v / 1_000_000, 1))
+    # Allow %s of values vs total
+    if chart_total > 0:
+        for v in chart_values:
+            expanded.add(round(v / chart_total * 100))
+
+    found = _NUM_RE_NARR.findall(ai_narr)
+    for token in found:
+        try:
+            n = float(token.replace(".", "").replace(",", "."))
+        except ValueError:
+            try:
+                n = float(token.replace(",", ""))
+            except ValueError:
+                continue
+        # Match if any chart value is within 2% relative tolerance
+        ok = False
+        for h in expanded:
+            if h == 0:
+                if n == 0:
+                    ok = True; break
+                continue
+            if abs(n - h) <= max(1.0, abs(h) * 0.02):
+                ok = True; break
+        if not ok:
+            return _auto_chart_narrative(chart_data, col_name)
+    return ai_narr
 
 
 def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip ugly placeholders cell-by-cell, then drop sparse rows/cols.
+    Vectorized — no Python `apply(axis=1)` per-row scan."""
     cleaned = df.map(_simple_clean)
-    # Drop rows with <50% filled
-    row_fill = cleaned.apply(lambda r: sum(1 for v in r if v != "") / max(1, len(r)),
-                               axis=1)
+    if cleaned.empty:
+        return cleaned
+    n_cols = cleaned.shape[1] or 1
+    # Vectorized fill ratio per row: count non-empty cells with `.ne("")`
+    row_fill = cleaned.ne("").sum(axis=1) / n_cols
     cleaned = cleaned[row_fill >= 0.5]
-    # Drop columns with <30% filled
-    col_fill = cleaned.apply(lambda c: sum(1 for v in c if v != "") / max(1, len(c)),
-                               axis=0)
+    if cleaned.empty:
+        return cleaned
+    n_rows = cleaned.shape[0] or 1
+    col_fill = cleaned.ne("").sum(axis=0) / n_rows
     cleaned = cleaned.loc[:, col_fill >= 0.3]
     return cleaned

@@ -1,6 +1,7 @@
 """CLI entry: `python -m socya_pipeline {analyze|generate} <args>`."""
 import argparse
 import json
+import re
 import sys
 import os
 from pathlib import Path
@@ -12,8 +13,26 @@ from socya_pipeline.validator import validate_plan
 from socya_pipeline.extractor import extract_for_render, auto_complete_slides
 from socya_pipeline.ai_chain import AIProfile
 
+# Strip absolute paths (Windows + POSIX) and home dirs from any user-facing
+# error message. They leak filesystem layout and are useless to the user.
+_PATH_REDACTORS = (
+    re.compile(r"[A-Za-z]:\\[^\s'\"]+"),    # C:\foo\bar
+    re.compile(r"/(?:home|Users|tmp|var)/[^\s'\"]+"),  # /home/x, /Users/x, etc.
+)
+
+
+def _sanitize_details(text) -> str:
+    s = str(text or "")
+    for pat in _PATH_REDACTORS:
+        s = pat.sub("[ruta]", s)
+    return s[:300]
+
+
 def _emit_error(err: PipelineError):
-    sys.stdout.write(json.dumps({"error": err.to_dict()}, ensure_ascii=False))
+    payload = err.to_dict()
+    if isinstance(payload, dict) and payload.get("details"):
+        payload["details"] = _sanitize_details(payload["details"])
+    sys.stdout.write(json.dumps({"error": payload}, ensure_ascii=True))
     sys.exit(2)
 
 def _load_request(raw: str) -> dict:
@@ -29,7 +48,7 @@ def cmd_plan(args):
                                        .lower() == "patient")
                  else AIProfile.FAST)
     try:
-        wb = parse_workbook(args.input)
+        wb = parse_workbook(args.input, api_key=api_key)
         inv = build_inventory(wb)
         plan = plan_presentation(
             wb, inv,
@@ -50,11 +69,19 @@ def cmd_plan(args):
                 f"descartados: {len(outcome.dropped)}.",
                 user_action="improve_excel_or_change_prompt",
             )
+        import pandas as pd
+        from socya_pipeline.extractor import _build_dtype_map
+        xls = pd.ExcelFile(Path(args.input))
+        sheets_cache: dict = {}
+        dtype_map = _build_dtype_map(wb)
+
         rendered, extraction_dropped = extract_for_render(
-            outcome.slides, inv, wb, args.input)
+            outcome.slides, inv, wb, args.input,
+            xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
         before_complete = len(rendered)
-        rendered = auto_complete_slides(rendered, inv, wb, args.input,
-                                          target_count=7)
+        rendered = auto_complete_slides(
+            rendered, inv, wb, args.input, target_count=7,
+            xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
         result = {
             "presentation_meta": plan.get("presentation_meta", {}),
             "slides": rendered,
@@ -70,7 +97,7 @@ def cmd_plan(args):
                 "bullets_dropped": outcome.bullets_dropped,
             },
         }
-        sys.stdout.write(json.dumps(result, ensure_ascii=False, default=str))
+        sys.stdout.write(json.dumps(result, ensure_ascii=True, default=str))
     except PipelineError as e:
         _emit_error(e)
     except Exception as e:
@@ -83,7 +110,7 @@ def cmd_generate(args):
     api_key = _resolve_api_key()
     profile = AIProfile.PATIENT
     try:
-        wb = parse_workbook(args.input)
+        wb = parse_workbook(args.input, api_key=api_key)
         inv = build_inventory(wb)
         plan = plan_presentation(
             wb, inv,
@@ -102,11 +129,33 @@ def cmd_generate(args):
                 details=f"Descartados: {len(outcome.dropped)}.",
                 user_action="improve_excel_or_change_prompt",
             )
+        # Open the Excel ONCE and share state between extraction phases
+        # (without this, the file is parsed up to 4 times per request).
+        import pandas as pd
+        from socya_pipeline.extractor import _build_dtype_map
+        xls = pd.ExcelFile(Path(args.input))
+        sheets_cache: dict = {}
+        dtype_map = _build_dtype_map(wb)
+
         rendered, extraction_dropped = extract_for_render(
-            outcome.slides, inv, wb, args.input)
+            outcome.slides, inv, wb, args.input,
+            xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
         before_complete = len(rendered)
-        rendered = auto_complete_slides(rendered, inv, wb, args.input,
-                                          target_count=7)
+        rendered = auto_complete_slides(
+            rendered, inv, wb, args.input, target_count=7,
+            xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
+
+        # Optional user-driven filter: drop the slides the UI marked off in
+        # the preview step. Indices are 0-based positions in the final list.
+        # The title slide (index 0) is always kept regardless of input.
+        excluded_raw = request.get("excludeSlideIndices") or []
+        excluded = {int(i) for i in excluded_raw if isinstance(i, (int, float))}
+        excluded.discard(0)  # title slide is mandatory
+        excluded_count = 0
+        if excluded:
+            kept = [s for i, s in enumerate(rendered) if i not in excluded]
+            excluded_count = len(rendered) - len(kept)
+            rendered = kept
 
         from socya_pipeline.renderer import render_pptx
         template = Path(args.template)
@@ -121,6 +170,7 @@ def cmd_generate(args):
             "slides_planned": len(plan.get("slides", [])),
             "slides_validated": len(outcome.slides),
             "slides_dropped": outcome.dropped,
+            "slides_excluded_by_user": excluded_count,
             "extraction_dropped": extraction_dropped,
             "slides_auto_added": len(rendered) - before_complete,
             "slides_final": len(rendered),
@@ -131,7 +181,7 @@ def cmd_generate(args):
         audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2),
                                 encoding="utf-8")
 
-        sys.stdout.write(json.dumps({"ok": True, "audit": audit}, ensure_ascii=False))
+        sys.stdout.write(json.dumps({"ok": True, "audit": audit}, ensure_ascii=True))
     except PipelineError as e:
         _emit_error(e)
     except Exception as e:
@@ -140,16 +190,39 @@ def cmd_generate(args):
                                     details=str(e)[:300]))
 
 def _resolve_api_key() -> str:
+    """Look up the OpenRouter API key from env or .env files.
+
+    Operate-then-handle (no os.path.exists pre-check) — TOCTOU-safe and one
+    syscall less per file probed."""
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if key:
         return key
     for env_file in (".env", ".env.local"):
-        if os.path.exists(env_file):
+        try:
             with open(env_file, "r", encoding="utf-8") as f:
                 for line in f:
                     if line.startswith("OPENROUTER_API_KEY="):
                         return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError:
+            continue
     return ""
+
+def cmd_quick_summary(args):
+    """Deterministic onboarding summary — ZERO AI calls. Fast (<1s for 10K
+    rows). Used by /api/quick-summary to power the upload preview UI."""
+    try:
+        wb = parse_workbook(args.input)  # no api_key → no inspector AI
+        inv = build_inventory(wb)
+        from socya_pipeline.onboarding import quick_summary
+        result = quick_summary(wb, inv)
+        sys.stdout.write(json.dumps(result, ensure_ascii=True, default=str))
+    except PipelineError as e:
+        _emit_error(e)
+    except Exception as e:
+        _emit_error(PipelineError(ErrorCode.PYTHON_RUNTIME_ERROR,
+                                    "Error inesperado en el resumen.",
+                                    details=str(e)[:300]))
+
 
 def main():
     p = argparse.ArgumentParser()
@@ -164,6 +237,10 @@ def main():
     gen_p.add_argument("--template", required=True)
     gen_p.add_argument("--request", default="{}")
     gen_p.set_defaults(func=cmd_generate)
+    sum_p = sub.add_parser("quick-summary",
+                             help="Deterministic onboarding summary (no AI)")
+    sum_p.add_argument("--input", required=True)
+    sum_p.set_defaults(func=cmd_quick_summary)
     args = p.parse_args()
     args.func(args)
 

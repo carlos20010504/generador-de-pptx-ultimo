@@ -11,7 +11,7 @@ Layout system inspired by SIG_Revision_Direccion_2025 (the 'good' reference deck
 """
 import io
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -54,6 +54,14 @@ SUBTITLE_Y = 1.85
 CONTENT_TOP = 2.45
 CONTENT_BOTTOM = 6.30
 PAGINATION_Y = 7.05
+
+# ── Chart layout heuristics (named so the intent is clear in code review)
+_DOMINANT_RATIO        = 5.0   # leader / second-place — single-dominant pivot
+_DONUT_PIE_DOMINANT    = 0.50  # one slice >50% → donut becomes barh
+_LONG_TAIL_LEADER_X    = 10    # leader / median(rest) — aggressive grouping
+_LONG_TAIL_HEAD_TIGHT  = 5     # top-N kept when leader dominates
+_LONG_TAIL_HEAD_LOOSE  = 6     # top-N kept normally
+_LONG_TAIL_MAX_RATIO   = 0.20  # tail ≤20% of total → group into "Otros"
 
 
 def render_pptx(slides: List[dict], presentation_meta: dict,
@@ -110,64 +118,102 @@ def render_pptx(slides: List[dict], presentation_meta: dict,
 
 def _add_title_slide(slide, slide_def: dict, deck_title: str, deck_subtitle: str,
                      page: int, total: int) -> None:
-    """Cover slide: dark forest background, gold accent, big white title."""
+    """Cover slide: dark forest BG, gold left accent strip, top eyebrow,
+    big serif title, subtitle, divider line, and a date band at the foot.
+    Designed to feel like a published report cover."""
     bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0,
                                   Inches(SLIDE_W), Inches(SLIDE_H))
     bg.line.fill.background()
     bg.fill.solid(); bg.fill.fore_color.rgb = FOREST_DARK
 
+    # Left accent strip — a thin gold column that anchors the layout
+    strip = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,
+                                     Inches(0), Inches(0),
+                                     Inches(0.18), Inches(SLIDE_H))
+    strip.line.fill.background()
+    strip.fill.solid(); strip.fill.fore_color.rgb = GOLD
+
     eyebrow = slide_def.get("eyebrow") or "PRESENTACIÓN EJECUTIVA"
-    _put_text(slide, eyebrow.upper(), Inches(MARGIN), Inches(0.7),
+    _put_text(slide, eyebrow.upper(), Inches(MARGIN + 0.4), Inches(0.75),
               Inches(CONTENT_W), Inches(0.4),
               font=BODY_FONT, font_size=12, bold=True, color=GOLD,
-              letter_spacing_em=0.15)
+              letter_spacing_em=0.18)
 
     bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,
-                                   Inches(MARGIN), Inches(1.2),
-                                   Inches(0.6), Inches(0.10))
+                                   Inches(MARGIN + 0.4), Inches(1.30),
+                                   Inches(0.8), Inches(0.08))
     bar.line.fill.background()
     bar.fill.solid(); bar.fill.fore_color.rgb = GOLD
 
     title_text = slide_def.get("data", {}).get("title") or deck_title or "Presentación"
-    _put_text(slide, title_text, Inches(MARGIN), Inches(2.2),
-              Inches(CONTENT_W), Inches(2.5),
-              font=HEADING_FONT, font_size=54, bold=True, color=WHITE,
+    # Title size shrinks for long titles so they never overflow
+    title_size = 56 if len(title_text) <= 38 else (46 if len(title_text) <= 56 else 38)
+    _put_text(slide, title_text, Inches(MARGIN + 0.4), Inches(2.0),
+              Inches(CONTENT_W - 0.4), Inches(3.0),
+              font=HEADING_FONT, font_size=title_size, bold=True, color=WHITE,
               line_spacing=1.05)
 
     subtitle_text = slide_def.get("data", {}).get("subtitle") or deck_subtitle
     if subtitle_text:
-        _put_text(slide, subtitle_text, Inches(MARGIN), Inches(5.0),
+        _put_text(slide, subtitle_text, Inches(MARGIN + 0.4), Inches(5.2),
                   Inches(CONTENT_W * 0.85), Inches(1.0),
-                  font=BODY_FONT, font_size=18, color=RGBColor(0xCF, 0xD7, 0xCB),
-                  line_spacing=1.3)
+                  font=BODY_FONT, font_size=18,
+                  color=RGBColor(0xCF, 0xD7, 0xCB),
+                  line_spacing=1.35)
+
+    # Bottom hairline divider — gives the cover that 'report' rhythm
+    hr = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,
+                                  Inches(MARGIN + 0.4), Inches(SLIDE_H - 0.95),
+                                  Inches(CONTENT_W - 0.4), Inches(0.02))
+    hr.line.fill.background()
+    hr.fill.solid(); hr.fill.fore_color.rgb = RGBColor(0x35, 0x55, 0x47)
+
+    # Date — today's date, computed at render time
+    import datetime as _dt
+    today = _dt.date.today().strftime("%d.%m.%Y").upper()
+    _put_text(slide, today,
+              Inches(MARGIN + 0.4), Inches(SLIDE_H - 0.75),
+              Inches(3.0), Inches(0.4),
+              font=BODY_FONT, font_size=11, bold=True, color=GOLD,
+              letter_spacing_em=0.12)
 
     _put_text(slide, f"{page:02d} / {total:02d}",
-              Inches(SLIDE_W - 1.8), Inches(SLIDE_H - 0.7),
+              Inches(SLIDE_W - 1.8), Inches(SLIDE_H - 0.75),
               Inches(1.3), Inches(0.4),
               font=BODY_FONT, font_size=11, bold=True, color=GOLD,
               align="right")
 
 
 def _add_kpi_row(slide, slide_def: dict) -> None:
-    """3 or 4 big KPI cards across the slide."""
-    kpis = slide_def.get("data", {}).get("kpis", [])[:4]
+    """KPI cards. 1-3 KPIs → single row big cards. 4 KPIs → 2x2 grid (each
+    card wider, numbers stay readable). Numbers shrink-to-fit so they NEVER wrap."""
+    kpis = slide_def.get("data", {}).get("kpis", [])[:6]
     if not kpis:
         return
 
     n = len(kpis)
-    gap = 0.25
-    total_gap = gap * (n - 1)
-    card_w = (CONTENT_W - total_gap) / n
-    card_h = 3.6
-    card_y = CONTENT_TOP
+    gap = 0.28
+    available_h = CONTENT_BOTTOM - CONTENT_TOP - 0.15
 
-    use_big_numbers = n <= 3
-    number_size = 96 if use_big_numbers else 56
+    if n <= 3:
+        cols = n
+        rows = 1
+    else:
+        cols = 2
+        rows = (n + 1) // 2  # 4→2 rows, 5→3, 6→3
+
+    card_w = (CONTENT_W - gap * (cols - 1)) / cols
+    card_h = (available_h - gap * (rows - 1)) / rows
+    card_h = min(card_h, 3.6)
+    number_size = 88 if (cols <= 3 and card_w >= 3.5) else 64
 
     for i, k in enumerate(kpis):
-        x = MARGIN + i * (card_w + gap)
+        col_i = i % cols
+        row_i = i // cols
+        x = MARGIN + col_i * (card_w + gap)
+        y = CONTENT_TOP + row_i * (card_h + gap)
         accent = KPI_COLORS[i % len(KPI_COLORS)]
-        _add_kpi_card(slide, x, card_y, card_w, card_h,
+        _add_kpi_card(slide, x, y, card_w, card_h,
                       header=k.get("label", ""),
                       value=k.get("value", ""),
                       description=k.get("description", ""),
@@ -178,7 +224,9 @@ def _add_kpi_row(slide, slide_def: dict) -> None:
 def _add_kpi_card(slide, x: float, y: float, w: float, h: float,
                   header: str, value: str, description: str,
                   accent_color: RGBColor, number_size: int) -> None:
-    """KPI card: white body + colored top band + huge number + description."""
+    """KPI card: white body + colored top band + huge number + (optional)
+    description. Layout is computed proportionally so it works for both tall
+    cards (1 row × N cards, h~3.6") and short ones (2-row grid, h~1.78")."""
     card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
                                     Inches(x), Inches(y), Inches(w), Inches(h))
     card.adjustments[0] = 0.04
@@ -186,7 +234,8 @@ def _add_kpi_card(slide, x: float, y: float, w: float, h: float,
     card.line.color.rgb = RGBColor(0xE5, 0xE5, 0xDF)
     card.line.width = Pt(0.5)
 
-    header_h = 0.5
+    # Header band: proportional to card height, capped
+    header_h = max(0.36, min(0.5, h * 0.22))
     band = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,
                                     Inches(x), Inches(y),
                                     Inches(w), Inches(header_h))
@@ -197,22 +246,52 @@ def _add_kpi_card(slide, x: float, y: float, w: float, h: float,
         _put_text(slide, header.upper(),
                   Inches(x + 0.2), Inches(y),
                   Inches(w - 0.4), Inches(header_h),
-                  font=BODY_FONT, font_size=11, bold=True, color=WHITE,
-                  align="left", anchor="middle", letter_spacing_em=0.08)
+                  font=BODY_FONT, font_size=10 if h < 2.0 else 11, bold=True,
+                  color=WHITE, align="left", anchor="middle",
+                  letter_spacing_em=0.08)
 
+    # Decide whether description fits. For short cards (grid 2x2), use a tight
+    # footer line; for tall cards (single-row, n≤3), use a roomier description.
+    show_desc = bool(description) and h >= 1.5
+    if show_desc:
+        desc_h = 0.45 if h < 2.4 else 0.7
+    else:
+        desc_h = 0.0
+
+    # Value box gets all remaining vertical space below the header.
+    value_y = y + header_h + 0.05
+    value_h = max(0.5, h - header_h - desc_h - 0.1)
+    fitted_size = _fit_kpi_font(str(value), max_pt=number_size,
+                                 card_w_in=w - 0.4)
+    # Also cap by available height: an em ~ 1.0 line height. Don't exceed value_h.
+    height_cap_pt = int(value_h * 72 * 0.85)
+    fitted_size = min(fitted_size, height_cap_pt)
+    fitted_size = max(28, fitted_size)
     _put_text(slide, str(value),
-              Inches(x + 0.2), Inches(y + header_h + 0.3),
-              Inches(w - 0.4), Inches(h - header_h - 1.4),
-              font=HEADING_FONT, font_size=number_size, bold=True,
+              Inches(x + 0.2), Inches(value_y),
+              Inches(w - 0.4), Inches(value_h),
+              font=HEADING_FONT, font_size=fitted_size, bold=True,
               color=accent_color, align="center", anchor="middle",
               line_spacing=1.0)
 
-    if description:
+    if show_desc:
+        desc_font = 10 if h < 2.4 else 11
         _put_text(slide, description,
-                  Inches(x + 0.3), Inches(y + h - 1.0),
-                  Inches(w - 0.6), Inches(0.9),
-                  font=BODY_FONT, font_size=11, color=TEXT_GRAY,
-                  align="center", anchor="top", line_spacing=1.25)
+                  Inches(x + 0.3), Inches(y + h - desc_h - 0.05),
+                  Inches(w - 0.6), Inches(desc_h),
+                  font=BODY_FONT, font_size=desc_font, color=TEXT_GRAY,
+                  align="center", anchor="middle", line_spacing=1.2)
+
+
+def _fit_kpi_font(value: str, max_pt: float, card_w_in: float) -> int:
+    """Find the largest integer font size (in pt) for `value` (Georgia bold)
+    that fits in `card_w_in` inches without wrapping. Georgia bold uppercase
+    'M' and digits average ~0.78em — generous so we never overflow."""
+    char_em_avg = 0.78
+    available_pt = card_w_in * 72.0
+    n_chars = max(1, len(value))
+    fit = available_pt / (char_em_avg * n_chars)
+    return int(max(28, min(int(max_pt), int(fit))))
 
 
 def _add_chart_slide(slide, slide_def: dict) -> None:
@@ -225,9 +304,16 @@ def _add_chart_slide(slide, slide_def: dict) -> None:
     chart_x = MARGIN
     chart_y = CONTENT_TOP
 
+    # Polished PNG includes a transparent padding ring for the drop shadow
+    # (matplotlib dpi=160 → padding in inches = pad_px / 160). We expand the
+    # picture box to match so the chart itself stays at its original size.
     img = _build_chart_png(data, width_in=chart_w, height_in=chart_h)
-    slide.shapes.add_picture(img, Inches(chart_x), Inches(chart_y),
-                              Inches(chart_w), Inches(chart_h))
+    pad_in = CHART_POLISH_PADDING_PX / 160.0
+    slide.shapes.add_picture(
+        img,
+        Inches(chart_x - pad_in), Inches(chart_y - pad_in),
+        Inches(chart_w + 2 * pad_in), Inches(chart_h + 2 * pad_in),
+    )
 
     if narrative:
         card_x = MARGIN + chart_w + 0.3
@@ -387,17 +473,33 @@ def _add_eyebrow(slide, text: str) -> None:
 
 def _add_title_block(slide, title: str, subtitle: str) -> None:
     if title:
-        _put_text(slide, title,
+        _put_text(slide, _ellipsize(title, 110),
                   Inches(MARGIN), Inches(TITLE_Y),
                   Inches(CONTENT_W), Inches(0.95),
                   font=HEADING_FONT, font_size=28, bold=True, color=FOREST_DARK,
                   line_spacing=1.1)
     if subtitle:
-        _put_text(slide, subtitle,
+        _put_text(slide, _ellipsize(subtitle, 220),
                   Inches(MARGIN), Inches(SUBTITLE_Y),
                   Inches(CONTENT_W), Inches(0.55),
                   font=BODY_FONT, font_size=12, color=TEXT_GRAY,
                   line_spacing=1.3)
+
+
+def _ellipsize(text, max_chars: int) -> str:
+    """Trim long titles/subtitles with a visible ellipsis instead of letting
+    python-pptx truncate them silently to whatever fits the placeholder.
+    Honest truncation > stealth clipping."""
+    if text is None:
+        return ""
+    s = str(text).strip()
+    if len(s) <= max_chars:
+        return s
+    # Cut on a word boundary if reasonable
+    cutoff = s.rfind(" ", 0, max_chars - 1)
+    if cutoff < max_chars - 20:
+        cutoff = max_chars - 1
+    return s[:cutoff].rstrip(",.;:- ") + "…"
 
 
 def _add_footer(slide, tagline: str, page: int, total: int) -> None:
@@ -426,66 +528,133 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
                        height_in: float = 4.0) -> io.BytesIO:
     chart_type = data.get("chart_type", "bar")
     raw_labels = [str(l) for l in data.get("labels", [])]
-    # Truncate long labels so they don't blow up the layout
-    labels = [(l if len(l) <= 22 else l[:20] + "…") for l in raw_labels]
     values = list(data.get("values", []))
-    name = data.get("name", "")
+    is_chronological = bool(data.get("chronological"))
 
-    fig, ax = plt.subplots(figsize=(width_in, height_in), dpi=150,
+    # Detect single-dominant on RAW values (before "Otros" grouping inflates the
+    # 2nd bar). This is the key signal for pivoting layout.
+    nums_for_check = [float(v) for v in values if v is not None]
+    raw_dominant = (chart_type in ("bar", "pie") and not is_chronological
+                     and _is_single_dominant(nums_for_check))
+
+    # A pie/donut where one slice dominates (>50%) is visually unhelpful —
+    # the small slices become slivers. Convert to horizontal bar where each
+    # category gets its own readable line.
+    if chart_type == "pie" and nums_for_check:
+        total = sum(nums_for_check) or 1
+        if max(nums_for_check) / total > _DONUT_PIE_DOMINANT:
+            chart_type = "barh"
+            raw_dominant = False  # already pivoted; skip the bar→barh path
+
+    if not is_chronological:
+        raw_labels, values = _group_long_tail(raw_labels, values, chart_type)
+
+    if raw_dominant:
+        chart_type = "barh"
+    if chart_type == "bar" and is_chronological:
+        # Chronological "bar": only 2-4 periods → bar (single points read poorly
+        # on a line chart). 5+ periods → line trend.
+        if len(values) >= 5:
+            chart_type = "line"
+
+    # Truncate long labels (less aggressive for horizontal: more horizontal room)
+    label_max = 36 if chart_type == "barh" else 18
+    labels = [(l if len(l) <= label_max else l[:label_max - 1] + "…") for l in raw_labels]
+
+    fig, ax = plt.subplots(figsize=(width_in, height_in), dpi=160,
                              facecolor="#FAFAF5")
     ax.set_facecolor("#FAFAF5")
 
     n = len(labels)
-    colors = (CHART_PALETTE * ((n // len(CHART_PALETTE)) + 1))[:n]
+    colors = _build_chart_colors(n, chart_type, chronological=is_chronological)
 
     if chart_type == "pie":
-        # Donut style + legend on the side keeps labels readable
         wedges, _texts = ax.pie(
             values, labels=None,
             colors=colors, startangle=90, counterclock=False,
-            wedgeprops={"linewidth": 2, "edgecolor": "#FAFAF5", "width": 0.45},
+            wedgeprops={"linewidth": 2, "edgecolor": "#FAFAF5", "width": 0.42},
         )
         total = sum(values) or 1
-        legend_labels = [f"{lbl} — {int(v)} ({v/total*100:.0f}%)"
+        legend_labels = [f"{lbl}  ·  {_format_value_short(v)}  ·  {v/total*100:.0f}%"
                           for lbl, v in zip(labels, values)]
         ax.legend(wedges, legend_labels, loc="center left",
-                  bbox_to_anchor=(1.0, 0.5), frameon=False,
-                  fontsize=10, prop={"family": "Calibri"})
-        ax.set_title(name, fontsize=13, fontfamily="Georgia",
-                     color="#1B3B2F", pad=12, loc="center", fontweight="bold")
+                  bbox_to_anchor=(1.05, 0.5), frameon=False,
+                  fontsize=11, labelcolor="#333333",
+                  prop={"family": "Calibri"})
+        # Center total in the donut hole
+        ax.text(0, 0, _format_value_short(total),
+                ha="center", va="center",
+                fontsize=22, fontfamily="Georgia", fontweight="bold",
+                color="#1B3B2F")
+        ax.text(0, -0.18, "TOTAL",
+                ha="center", va="center",
+                fontsize=8.5, fontfamily="Calibri",
+                color="#6B6B6B")
+
     elif chart_type == "line":
         ax.plot(labels, values, marker="o", color=CHART_PALETTE[0],
-                 linewidth=2.5, markersize=7, markerfacecolor=CHART_PALETTE[2],
+                 linewidth=3.0, markersize=8, markerfacecolor=CHART_PALETTE[2],
                  markeredgecolor=CHART_PALETTE[0], markeredgewidth=2)
-        ax.set_title(name, fontsize=12, fontfamily="Georgia",
-                     color="#1B3B2F", pad=12, loc="left", fontweight="bold")
-        ax.tick_params(axis="x", rotation=35, labelsize=9, colors="#6B6B6B")
-        ax.tick_params(axis="y", labelsize=9, colors="#6B6B6B")
+        # Soft fill under the line for visual weight
+        ax.fill_between(range(len(labels)), values, alpha=0.08,
+                          color=CHART_PALETTE[0])
+        _style_axes(ax, integer_y=_all_integers(values))
+        ax.tick_params(axis="x", rotation=25, labelsize=10)
+        # Endpoint annotation
+        if values:
+            ax.annotate(_format_value_short(values[-1]),
+                          xy=(len(values) - 1, values[-1]),
+                          xytext=(8, 8), textcoords="offset points",
+                          fontsize=10, fontfamily="Calibri",
+                          color="#1B3B2F", fontweight="bold")
+
+    elif chart_type == "barh":
+        # Horizontal bars: top of chart = leader, bottom = smallest / "Otros".
+        ypos = list(range(len(labels)))
+        bars = ax.barh(ypos, values, color=colors, edgecolor="#FAFAF5",
+                          linewidth=1.5, height=0.7)
+        ax.set_yticks(ypos)
+        ax.set_yticklabels(labels, fontfamily="Calibri", fontsize=10,
+                            color="#333333")
+        ax.invert_yaxis()  # so labels[0] (the leader) shows at the top
+        # Move y-axis to right? No — keep left. Hide x ticks/labels — values shown next to bars.
+        ax.tick_params(axis="x", colors="#FAFAF5", labelcolor="#FAFAF5",
+                          labelsize=1, length=0)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
+        ax.spines["bottom"].set_visible(False)
         ax.spines["left"].set_color("#D5D5CD")
-        ax.spines["bottom"].set_color("#D5D5CD")
-        ax.grid(axis="y", linestyle="--", linewidth=0.5, color="#D5D5CD", alpha=0.7)
-    else:  # bar
-        bars = ax.bar(labels, values, color=colors, edgecolor="#FAFAF5",
-                       linewidth=1.5, width=0.65)
-        ax.set_title(name, fontsize=12, fontfamily="Georgia",
-                     color="#1B3B2F", pad=12, loc="left", fontweight="bold")
-        ax.tick_params(axis="x", rotation=25, labelsize=9, colors="#6B6B6B")
-        ax.tick_params(axis="y", labelsize=9, colors="#6B6B6B")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_color("#D5D5CD")
-        ax.spines["bottom"].set_color("#D5D5CD")
-        ax.grid(axis="y", linestyle="--", linewidth=0.5, color="#D5D5CD", alpha=0.7)
+        max_v = max(values) if values else 1
         for b, v in zip(bars, values):
-            ax.text(b.get_x() + b.get_width() / 2, b.get_height(),
-                     _format_value_short(v),
-                     ha="center", va="bottom", fontsize=9,
-                     fontfamily="Calibri", color="#333333", fontweight="bold")
+            ax.text(b.get_width() + max_v * 0.012,
+                      b.get_y() + b.get_height() / 2,
+                      _format_value_short(v),
+                      ha="left", va="center", fontsize=11,
+                      fontfamily="Calibri", color="#1B3B2F", fontweight="bold")
+        # Add headroom on x for labels
+        ax.set_xlim(0, max_v * 1.18)
+
+    else:  # vertical bar
+        x_pos = list(range(len(labels)))
+        bars = ax.bar(x_pos, values, color=colors, edgecolor="#FAFAF5",
+                       linewidth=1.5, width=0.62)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(labels, fontfamily="Calibri", fontsize=10,
+                            color="#333333")
+        rotate = 25 if any(len(l) > 8 for l in labels) else 0
+        ax.tick_params(axis="x", rotation=rotate, labelsize=10)
+        _style_axes(ax, integer_y=_all_integers(values))
+        max_v = max(values) if values else 1
+        for b, v in zip(bars, values):
+            ax.text(b.get_x() + b.get_width() / 2,
+                      b.get_height() + max_v * 0.015,
+                      _format_value_short(v),
+                      ha="center", va="bottom", fontsize=11,
+                      fontfamily="Calibri", color="#1B3B2F", fontweight="bold")
+        ax.set_ylim(0, max_v * 1.15)
 
     try:
-        plt.tight_layout()
+        plt.tight_layout(pad=0.6)
     except Exception:
         pass
     buf = io.BytesIO()
@@ -493,30 +662,198 @@ def _build_chart_png(data: dict, width_in: float = 7.5,
                  facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
-    return buf
+    # Apply Pillow polish (rounded corners + soft drop shadow). If Pillow
+    # fails for any reason we just use the raw matplotlib PNG.
+    polished, _padding_px = _apply_chart_polish(buf)
+    return polished
+
+
+# ──── Pillow post-processing ────
+
+# Padding (in matplotlib output px) added around the chart for the shadow.
+# Charts are saved at dpi=160 inside _build_chart_png. 30 px ≈ 0.19" of slack.
+CHART_POLISH_PADDING_PX = 30
+
+
+def _apply_chart_polish(buf: io.BytesIO,
+                          radius_px: int = 14,
+                          shadow_blur: int = 18,
+                          shadow_offset=(0, 8),
+                          shadow_opacity: float = 0.18,
+                          padding_px: int = CHART_POLISH_PADDING_PX
+                          ) -> Tuple[io.BytesIO, int]:
+    """Take a chart PNG (matplotlib output), return a polished version with
+    rounded corners and a soft drop shadow on a transparent canvas.
+
+    The output canvas is `padding_px` larger on every side to fit the shadow
+    spill. Returns (buffer, padding_px) so the caller can adjust the picture
+    insertion box accordingly. If Pillow fails, returns the original buffer
+    with padding_px=0 so downstream geometry stays correct."""
+    try:
+        from PIL import Image, ImageFilter, ImageDraw
+    except Exception:
+        buf.seek(0)
+        return buf, 0
+    try:
+        img = Image.open(buf).convert("RGBA")
+        w, h = img.size
+
+        # Rounded-corner mask applied to the chart's alpha channel
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, w, h), radius=radius_px, fill=255)
+        img.putalpha(mask)
+
+        # Final canvas accommodates shadow spill in every direction
+        canvas_w = w + 2 * padding_px
+        canvas_h = h + 2 * padding_px
+        canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+
+        # Build shadow on its own layer so we can blur it without touching the chart
+        shadow = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(shadow)
+        sx = padding_px + shadow_offset[0]
+        sy = padding_px + shadow_offset[1]
+        alpha = max(0, min(255, int(255 * shadow_opacity)))
+        sd.rounded_rectangle(
+            (sx, sy, sx + w, sy + h),
+            radius=radius_px,
+            fill=(0, 0, 0, alpha),
+        )
+        shadow = shadow.filter(ImageFilter.GaussianBlur(shadow_blur))
+        canvas = Image.alpha_composite(canvas, shadow)
+
+        # Paste the rounded chart on top
+        canvas.paste(img, (padding_px, padding_px), img)
+
+        out = io.BytesIO()
+        canvas.save(out, format="PNG", optimize=True)
+        out.seek(0)
+        return out, padding_px
+    except Exception:
+        buf.seek(0)
+        return buf, 0
+
+
+# ──── Chart helpers ────
+
+def _is_single_dominant(values) -> bool:
+    """Leader is ≥_DOMINANT_RATIO× the second-place. Vertical bar would
+    show invisible slivers; horizontal layout reads better."""
+    nums = [float(v) for v in values if v is not None]
+    if len(nums) < 2:
+        return False
+    s = sorted(nums, reverse=True)
+    if s[1] <= 0:
+        return True
+    return s[0] / s[1] >= _DOMINANT_RATIO
+
+
+def _all_integers(values) -> bool:
+    try:
+        return all(float(v).is_integer() for v in values if v is not None)
+    except (TypeError, ValueError):
+        return False
+
+
+def _group_long_tail(labels, values, chart_type):
+    """Collapse the long tail of a distribution into 'Otros' so the chart
+    stays readable.
+
+    Two strategies:
+      - Standard: >7 cats and tail ≤20% of total → keep top 6, group rest
+      - Aggressive: top value >10x the others' median → keep top 5 plus
+        'Otros'. Without this, charts with one massive bar show the others
+        as invisible slivers (e.g. CONTABILIZADO=1500 vs ESPERA=8).
+    """
+    if len(labels) <= 5:
+        return labels, values
+    nums = [float(v) for v in values]
+    total = sum(nums) or 1
+
+    # Aggressive grouping when the leader dwarfs the rest
+    rest = sorted(nums[1:], reverse=True)
+    median_rest = rest[len(rest) // 2] if rest else 0
+    leader_dominates = (median_rest > 0
+                          and nums[0] / median_rest >= _LONG_TAIL_LEADER_X)
+
+    head_n = _LONG_TAIL_HEAD_TIGHT if (leader_dominates and len(labels) > _LONG_TAIL_HEAD_TIGHT) else _LONG_TAIL_HEAD_LOOSE
+    if len(labels) <= head_n:
+        return labels, values
+
+    head_labels = labels[:head_n]
+    head_vals = nums[:head_n]
+    tail_vals = nums[head_n:]
+    if not tail_vals:
+        return labels, values
+    tail_total = sum(tail_vals)
+    tail_pct = tail_total / total
+    if leader_dominates or tail_pct < _LONG_TAIL_MAX_RATIO or chart_type == "pie":
+        return head_labels + ["Otros"], head_vals + [tail_total]
+    return labels, values
+
+
+def _build_chart_colors(n: int, chart_type: str, chronological: bool = False):
+    """For categorical (ranked) bars: highlight #1, fade the rest. For chronological
+    bars (months/quarters): use the same primary color for ALL — there's no
+    'leader' in a time series. For pies/lines: rotate full palette."""
+    if chart_type in ("bar", "barh") and n >= 2 and not chronological:
+        primary = CHART_PALETTE[0]
+        secondary = CHART_PALETTE[1]
+        muted = "#A9B7A1"
+        return [primary] + [secondary if i == 1 else muted for i in range(1, n)]
+    if chart_type in ("bar", "barh") and chronological:
+        return [CHART_PALETTE[0]] * n
+    return (CHART_PALETTE * ((n // len(CHART_PALETTE)) + 1))[:n]
+
+
+def _style_axes(ax, integer_y: bool = False) -> None:
+    ax.tick_params(axis="x", labelsize=10, colors="#6B6B6B")
+    ax.tick_params(axis="y", labelsize=10, colors="#6B6B6B")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#D5D5CD")
+    ax.spines["bottom"].set_color("#D5D5CD")
+    ax.grid(axis="y", linestyle="--", linewidth=0.5, color="#D5D5CD", alpha=0.6)
+    if integer_y:
+        from matplotlib.ticker import MaxNLocator
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    # Suppress matplotlib's "1e7" offset/scientific notation; format K/M/B.
+    from matplotlib.ticker import FuncFormatter
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: _format_value_short(v)))
+    try:
+        ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+    except Exception:
+        pass
+    ax.yaxis.get_offset_text().set_visible(False)
 
 
 def _format_value_short(v) -> str:
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return str(v)
-    if abs(f) >= 1_000_000:
-        return f"{f / 1_000_000:.1f}M"
-    if abs(f) >= 1_000:
-        return f"{f / 1_000:.1f}K"
-    if f.is_integer():
-        return str(int(f))
-    return f"{f:.1f}"
+    """Compact axis/annotation formatter (delegates to insights.format_compact)."""
+    from socya_pipeline import insights
+    return insights.format_compact(v, fallback="0")
 
 
 # ──────────────────── Helpers ────────────────────
 
 def _pick_blank_layout(prs):
+    """Find a truly empty layout for our hand-built slides. We CANNOT fall
+    back to the last layout blindly — many templates put rich placeholders on
+    the last layout, which then bleed onto our generated slides as ghost
+    titles/footers. Strategy:
+      1. Layout named "Blank"/"blanco" → use it.
+      2. Else the layout with the FEWEST placeholders (closest to blank).
+    """
     for layout in prs.slide_layouts:
-        if "Blank" in layout.name or "blanco" in layout.name.lower():
+        name = (getattr(layout, "name", "") or "").lower()
+        if "blank" in name or "blanco" in name or "vacío" in name or "vacio" in name:
             return layout
-    return prs.slide_layouts[-1]
+    # Fallback: pick the layout with the smallest placeholder count (often
+    # zero or just a title placeholder we'll override anyway).
+    try:
+        return min(prs.slide_layouts, key=lambda lay: len(list(lay.placeholders)))
+    except Exception:
+        return prs.slide_layouts[-1]
 
 
 def _eyebrow_from_type(stype: str, idx: int) -> str:

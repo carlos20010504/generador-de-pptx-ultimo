@@ -94,10 +94,30 @@ class AIChain:
             if cycle < self.settings["max_cycles"] - 1:
                 time.sleep(min(30 * (cycle + 1), 60))
 
+        # Build a richer details payload so the user (and our logs) can see
+        # WHICH models tried, WHICH reason dominated (rate-limit vs network
+        # vs invalid response), and WHETHER it's likely a transient saturation
+        # or a real outage.
+        n_models = len(models_to_try)
+        n_attempts = len(fallback_steps)
+        n_cycles = self.settings["max_cycles"]
+        # Tally reasons for a quick diagnosis
+        reason_counts: dict = {}
+        for step in fallback_steps:
+            r = step.get("reason", "unknown")
+            reason_counts[r] = reason_counts.get(r, 0) + 1
+        reasons_str = ", ".join(
+            f"{r}:{n}" for r, n in sorted(reason_counts.items(), key=lambda kv: -kv[1])
+        ) or "unknown"
+        details = (
+            f"Último error: {last_error}. "
+            f"Modelos probados: {n_models}, ciclos: {n_cycles}, intentos totales: {n_attempts}. "
+            f"Razones: {reasons_str}."
+        )
         raise PipelineError(
             ErrorCode.AI_SATURATED,
             "Todos los modelos IA disponibles están saturados ahora mismo.",
-            details=f"Último error: {last_error}. Intentos: {len(fallback_steps)}.",
+            details=details,
             user_action="retry_later",
             retry_after_seconds=300,
         )
