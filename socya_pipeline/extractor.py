@@ -882,6 +882,23 @@ def _auto_chart_narrative(chart_data: dict, col_name: str) -> str:
                 body += " " + hint
         except Exception:
             pass
+        # Trend acceleration / deceleration — only when there's a clear shift
+        # in slope between the first and second halves of the series.
+        try:
+            accel = insights.trend_acceleration(values)
+            if accel == "accelerating":
+                body += " La tendencia se acelera en el último tramo."
+            elif accel == "decelerating":
+                body += " El crecimiento pierde fuerza en el último tramo."
+        except Exception:
+            pass
+        # Volatility callout — useful for "esto va en zigzag, no tendencia clara"
+        try:
+            vol = insights.volatility_score(values)
+            if vol is not None and vol >= 0.55 and len(values) >= 6:
+                body += f" Serie volátil (CV ≈ {vol*100:.0f}%); promedios suavizan más que la línea."
+        except Exception:
+            pass
         return body
 
     # Ranking-style — first label IS the leader by sort
@@ -906,17 +923,38 @@ def _auto_chart_narrative(chart_data: dict, col_name: str) -> str:
         body += (f" Las {len(labels) - 3} categorías restantes acumulan "
                   f"{_fmt_n(total - sum(values[:3]))}.")
 
-    # Outlier callout: when leader is >5x the median of the rest
+    # IQR outliers — catches BOTH high and low outliers, anywhere in the
+    # ranking (not just the leader), and is robust to skewed distributions.
+    # We keep the leader-vs-median heuristic as a backup when IQR finds none.
     try:
-        rest = sorted([float(v) for v in values[1:]], reverse=True)
-        if rest:
-            median_rest = rest[len(rest) // 2]
-            if median_rest > 0 and values[0] / median_rest >= 5:
-                ratio = values[0] / median_rest
-                body += (f" {labels[0]} es {ratio:.0f}x la mediana del resto, "
-                          f"un outlier marcado.")
+        outliers = insights.iqr_outliers(values, k=1.5)
+        # Filter to "meaningful" — skip outliers that are within the natural
+        # leader gap (which the leader callout already covers).
+        high = [(i, v) for i, v, side in outliers if side == "high"]
+        low = [(i, v) for i, v, side in outliers if side == "low"]
+        callouts = []
+        if high:
+            top = sorted(high, key=lambda t: -t[1])[:2]
+            names = " y ".join(f"{labels[i]} ({_fmt_n(v)})" for i, v in top)
+            callouts.append(f"sobresalen {names}")
+        if low and len(values) >= 6:
+            bot = sorted(low, key=lambda t: t[1])[:2]
+            names = " y ".join(f"{labels[i]} ({_fmt_n(v)})" for i, v in bot)
+            callouts.append(f"quedan rezagados {names}")
+        if callouts:
+            body += " Como casos atípicos, " + " y ".join(callouts) + "."
     except Exception:
-        pass
+        # Fallback to the simple ratio callout
+        try:
+            rest = sorted([float(v) for v in values[1:]], reverse=True)
+            if rest:
+                median_rest = rest[len(rest) // 2]
+                if median_rest > 0 and values[0] / median_rest >= 5:
+                    ratio = values[0] / median_rest
+                    body += (f" {labels[0]} es {ratio:.0f}x la mediana del resto, "
+                              f"un outlier marcado.")
+        except Exception:
+            pass
 
     return body
 

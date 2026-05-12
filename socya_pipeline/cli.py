@@ -241,6 +241,15 @@ def main():
                              help="Deterministic onboarding summary (no AI)")
     sum_p.add_argument("--input", required=True)
     sum_p.set_defaults(func=cmd_quick_summary)
+    # PPTX → PNG preview rendering. Best-effort; fails soft if PowerPoint
+    # is not available so the caller can still serve the download.
+    from socya_pipeline.preview import cmd_preview_pptx
+    prev_p = sub.add_parser("preview-pptx",
+                              help="Render PNG previews of each slide in a PPTX")
+    prev_p.add_argument("--input", required=True)
+    prev_p.add_argument("--output-dir", required=True)
+    prev_p.add_argument("--width", type=int, default=None)
+    prev_p.set_defaults(func=cmd_preview_pptx)
     args = p.parse_args()
     args.func(args)
 

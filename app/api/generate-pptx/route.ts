@@ -25,6 +25,10 @@ type PendingEntry = {
   tempDir: string;
   filename: string;
   expires: number;
+  // PPTX→PNG previews generated alongside the deck. Best-effort:
+  // empty array means no previews available (e.g. PowerPoint not installed).
+  previewSlides?: string[];   // filenames (no path), inside `previewDir`
+  previewDir?: string;        // absolute path to the dir holding the PNGs
 };
 
 // In-memory pending downloads (token → file paths + expiry).
@@ -216,12 +220,44 @@ export async function POST(req: NextRequest) {
         audit = JSON.parse(auditText);
       } catch { /* audit is best-effort */ }
 
+      // Best-effort PPTX → PNG previews. Fails soft on Linux / non-Office
+      // boxes. Done synchronously so the SSE 'done' carries the count.
+      send({ phase: 'rendering', message: 'Generando vista previa…' });
+      const previewDir = path.join(tempDir, 'previews');
+      let previewSlides: string[] = [];
+      try {
+        const previewArgs = [
+          '-X', 'utf8', '-m', 'socya_pipeline', 'preview-pptx',
+          '--input', outputPath,
+          '--output-dir', previewDir,
+        ];
+        const { stdout } = await execFileAsync('python', previewArgs, {
+          encoding: 'utf8',
+          timeout: 120 * 1000,
+          maxBuffer: 4 * 1024 * 1024,
+          windowsHide: true,
+          env: { ...process.env, PYTHONUTF8: '1' },
+        });
+        const parsed = JSON.parse(stdout) as {
+          ok: boolean;
+          slides?: { index: number; filename: string }[];
+        };
+        if (parsed.ok && Array.isArray(parsed.slides)) {
+          previewSlides = parsed.slides.map(s => s.filename);
+        }
+      } catch {
+        // Preview failed — that's OK, the user can still download blind.
+        previewSlides = [];
+      }
+
       const token = randomUUID();
       PENDING.set(token, {
         outputPath,
         tempDir,
         filename: path.basename(outputPath),
         expires: Date.now() + 5 * 60_000,
+        previewSlides,
+        previewDir,
       });
 
       send({
@@ -231,6 +267,7 @@ export async function POST(req: NextRequest) {
           downloadToken: token,
           filename: path.basename(outputPath),
           audit,
+          previewCount: previewSlides.length,
         },
       });
     } catch (err: unknown) {

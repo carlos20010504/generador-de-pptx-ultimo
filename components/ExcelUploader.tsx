@@ -14,9 +14,10 @@ import GenerationProgress from './GenerationProgress';
 import AuditModal from './AuditModal';
 import PreparePanel from './PreparePanel';
 import AdvancedDrawer from './AdvancedDrawer';
+import PreviewPanel from './PreviewPanel';
 import { formatErrorForUser, isPipelineError, PipelineErrorPayload } from '@/utils/error-codes';
 
-type Status = 'idle' | 'processing' | 'success' | 'organized' | 'error';
+type Status = 'idle' | 'processing' | 'previewing' | 'success' | 'organized' | 'error';
 
 interface GenerationStats {
   duration: number;
@@ -114,6 +115,11 @@ export default function ExcelUploader() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showOrganizer, setShowOrganizer] = useState(false);
   const [showHealth, setShowHealth] = useState(false);
+  // Preview-flow state — populated cuando el SSE 'done' incluye previewCount>0.
+  const [previewToken, setPreviewToken] = useState<string | null>(null);
+  const [previewCount, setPreviewCount] = useState(0);
+  const [previewFilename, setPreviewFilename] = useState('');
+  const [isDownloadingPreview, setIsDownloadingPreview] = useState(false);
 
   useEffect(() => {
     if (status !== 'processing') return;
@@ -277,7 +283,26 @@ export default function ExcelUploader() {
           if (payload.message) setProgressMessage(payload.message);
 
           if (payload.phase === 'done') {
-            const data = payload.data as { downloadToken?: string; filename?: string; audit?: unknown } | undefined;
+            const data = payload.data as {
+              downloadToken?: string;
+              filename?: string;
+              audit?: unknown;
+              previewCount?: number;
+            } | undefined;
+
+            // Si tenemos preview rasterizado, dejamos que el usuario lo
+            // revise antes de descargar. Si no (PowerPoint no instalado /
+            // preview falló), seguimos el flujo viejo: descarga inmediata.
+            if (data?.downloadToken && (data?.previewCount ?? 0) > 0) {
+              if (data?.audit) setAudit(data.audit);
+              setPreviewToken(data.downloadToken);
+              setPreviewCount(data.previewCount!);
+              setPreviewFilename(data.filename || 'presentacion.pptx');
+              setStatus('previewing');
+              setTimeout(() => setProgressPhase(null), 400);
+              return;
+            }
+
             if (data?.downloadToken) {
               const dlRes = await fetch(`/api/generate-pptx?token=${encodeURIComponent(data.downloadToken)}`);
               if (dlRes.ok) {
@@ -336,6 +361,63 @@ export default function ExcelUploader() {
       setProgressPhase(null);
       setStatus('error');
     }
+  };
+
+  // ── Preview-flow handlers ─────────────────────────────────────────
+  // El usuario revisó las miniaturas y aprueba: vamos por el .pptx.
+  const handleConfirmDownload = async () => {
+    if (!previewToken) return;
+    setIsDownloadingPreview(true);
+    try {
+      const dlRes = await fetch(
+        `/api/generate-pptx?token=${encodeURIComponent(previewToken)}`,
+      );
+      if (!dlRes.ok) {
+        setRetryError({
+          code: 'PYTHON_RUNTIME_ERROR',
+          message: `No se pudo descargar el archivo (HTTP ${dlRes.status}).`,
+          user_action: 'retry',
+        });
+        setStatus('error');
+        return;
+      }
+      const blob = await dlRes.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = previewFilename || 'presentacion.pptx';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+      setStatus('success');
+      setStats({ duration: 0, mode: orgMode, fileName: file?.name || previewFilename });
+      setPreviewToken(null);
+      setPreviewCount(0);
+      setPreviewFilename('');
+    } catch (err: unknown) {
+      console.error('[generate-pptx] error al descargar tras preview:', err);
+      setRetryError({
+        code: 'PYTHON_RUNTIME_ERROR',
+        message: err instanceof Error
+          ? `Error al descargar: ${err.message}`
+          : 'Algo salió mal al descargar.',
+        user_action: 'retry',
+      });
+      setStatus('error');
+    } finally {
+      setIsDownloadingPreview(false);
+    }
+  };
+
+  // El usuario quiere ajustar antes de descargar — descarta el preview
+  // (el tempDir del server expira solo en 5 min) y vuelve al PreparePanel.
+  const handleBackFromPreview = () => {
+    setPreviewToken(null);
+    setPreviewCount(0);
+    setPreviewFilename('');
+    setStatus('idle');
   };
 
   const handleOrganize = async () => {
@@ -565,8 +647,23 @@ export default function ExcelUploader() {
             </button>
           )}
 
+          {/* Preview rasterizado (PowerPoint disponible) — el usuario revisa
+              antes de descargar. Cuando confirma → handleConfirmDownload.
+              Cuando vuelve → handleBackFromPreview reinicia status a 'idle'. */}
+          {status === 'previewing' && previewToken && previewCount > 0 && (
+            <PreviewPanel
+              token={previewToken}
+              count={previewCount}
+              filename={previewFilename}
+              onConfirm={handleConfirmDownload}
+              onBack={handleBackFromPreview}
+              isDownloading={isDownloadingPreview}
+            />
+          )}
+
           {/* PreparePanel — fused onboarding + plan preview */}
-          {file && !isLoading && status !== 'success' && status !== 'organized' && (
+          {file && !isLoading && status !== 'success' && status !== 'organized'
+              && status !== 'previewing' && (
             <PreparePanel
               file={file}
               userPrompt={userPrompt}
@@ -677,6 +774,15 @@ export default function ExcelUploader() {
 
           {/* Tiny system row at the very bottom — collapsed by default */}
           <div className="upl-syslink-row">
+            <a
+              href="/status"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="upl-syslink"
+            >
+              Estado del sistema ↗
+            </a>
+            <span className="upl-syslink-sep" aria-hidden>·</span>
             <button
               type="button"
               onClick={() => setShowHealth(h => !h)}
@@ -1134,14 +1240,19 @@ export default function ExcelUploader() {
         .upl-btn-ghost:hover { background: var(--c-accent-green); color: var(--c-primary-dark); }
 
         /* ── System link row ── */
-        .upl-syslink-row { display: flex; justify-content: flex-end; }
+        .upl-syslink-row {
+          display: flex; justify-content: flex-end;
+          gap: 0.45rem; align-items: center;
+        }
         .upl-syslink {
           background: none; border: none; padding: 0;
           color: var(--c-text-muted);
           font-size: 0.68rem; cursor: pointer;
+          text-decoration: none;
           transition: color var(--t-base) var(--ease-out);
         }
         .upl-syslink:hover { color: var(--c-primary); text-decoration: underline; }
+        .upl-syslink-sep { color: var(--c-text-faint); font-size: 0.6rem; }
 
         .upl-health-row {
           display: flex; align-items: center; justify-content: space-between;

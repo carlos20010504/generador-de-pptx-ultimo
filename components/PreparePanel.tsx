@@ -25,6 +25,10 @@ interface QuickSummary {
   warnings: Array<{ severity: 'info' | 'warn' | 'error'; icon: string; title: string; detail: string }>;
   suggestions: Array<{ id: string; label: string; prompt: string; why: string }>;
   deck_estimate: { min_slides: number; max_slides: number; expected_sections: string[] };
+  // PII detected at parse time (emails, doc IDs, phones, etc.). Already
+  // exposed by the warnings list; surfaced separately here so we can give
+  // it dedicated UX (icon + count + per-column list).
+  pii_findings?: Array<{ sheet: string; column: string; kind: string; label: string }>;
 }
 
 interface SlidePreview {
