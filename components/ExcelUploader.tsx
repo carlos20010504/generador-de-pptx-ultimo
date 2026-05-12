@@ -94,12 +94,12 @@ export default function ExcelUploader() {
     audience: 'ejecutivos',
     language: 'Español',
     theme: {
-      key: 'analitica-moderna',
-      name: 'Analitica Moderna',
-      primary_hex: '#0F172A',
-      accent_hex: '#2563EB',
-      text_hex: '#E5E7EB',
-      bg_hex: '#F8FAFC',
+      key: 'socya-institucional',
+      name: 'Socya Institucional',
+      primary_hex: '#087062',   // teal Socya
+      accent_hex: '#69BE28',    // logo-green
+      text_hex: '#1A1A1A',
+      bg_hex: '#FFFFFF',
     },
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -163,10 +163,15 @@ export default function ExcelUploader() {
       setStats(null);
       setExcludedSlideIndices([]);
       setShowOrganizer(false);
-    } catch {
+    } catch (err: unknown) {
+      // Pasamos el error original al usuario en vez de un genérico — así puede
+      // distinguir entre archivo corrupto, password-protected, etc.
+      const detail = err instanceof Error && err.message
+        ? `: ${err.message}`
+        : '.';
       setFile(null);
       setStatus('error');
-      setErrorMessage('Error validando el contenido del archivo.');
+      setErrorMessage(`No pudimos leer el contenido del Excel${detail}`);
     }
   }, []);
 
@@ -215,11 +220,36 @@ export default function ExcelUploader() {
           const j = await res.json();
           if (j?.error && isPipelineError(j.error)) errPayload = j.error;
         } catch { /* ignore */ }
-        setRetryError(errPayload ?? {
-          code: 'PYTHON_RUNTIME_ERROR' as const,
-          message: 'Error inesperado al iniciar la generación.',
-          user_action: 'retry' as const,
-        });
+        // Si el server no nos dio un PipelineError tipado, hacemos uno con
+        // contexto del status code para que el usuario sepa qué hacer.
+        const fallback: PipelineErrorPayload = (() => {
+          if (res.status === 503) return {
+            code: 'PYTHON_RUNTIME_ERROR',
+            message: 'El servicio está temporalmente no disponible (Python no responde).',
+            user_action: 'retry',
+          };
+          if (res.status === 413) return {
+            code: 'EXCEL_INVALID',
+            message: 'El archivo Excel es demasiado grande para procesar.',
+            user_action: 'upload_smaller',
+          };
+          if (res.status === 400) return {
+            code: 'EXCEL_INVALID',
+            message: 'El archivo Excel no es válido o falta información.',
+            user_action: 'upload_again',
+          };
+          if (res.status >= 500) return {
+            code: 'PYTHON_RUNTIME_ERROR',
+            message: `Error del servidor (HTTP ${res.status}). Inténtalo de nuevo.`,
+            user_action: 'retry',
+          };
+          return {
+            code: 'PYTHON_RUNTIME_ERROR',
+            message: `No se pudo iniciar la generación (HTTP ${res.status}).`,
+            user_action: 'retry',
+          };
+        })();
+        setRetryError(errPayload ?? fallback);
         setProgressPhase(null);
         setStatus('error');
         return;
@@ -259,7 +289,9 @@ export default function ExcelUploader() {
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
-                URL.revokeObjectURL(url);
+                // Defer revoke — Safari/Firefox necesitan que la URL siga
+                // viva unos ms para que el download inicie correctamente.
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
               }
             }
             if (data?.audit) setAudit(data.audit);
@@ -286,10 +318,19 @@ export default function ExcelUploader() {
           }
         }
       }
-    } catch {
+    } catch (err: unknown) {
+      // TypeError es típicamente fallo de red o conexión cortada;
+      // otros errores (parser SSE, etc.) son del cliente — siempre logueamos
+      // el detalle a consola para debug y damos un mensaje útil al usuario.
+      console.error('[generate-pptx] error en cliente:', err);
+      const isNetwork = err instanceof TypeError;
       setRetryError({
         code: 'PYTHON_RUNTIME_ERROR' as const,
-        message: 'Algo salió mal en el navegador.',
+        message: isNetwork
+          ? 'Se perdió la conexión con el servidor. Verifica tu red e inténtalo de nuevo.'
+          : err instanceof Error && err.message
+            ? `Error en el navegador: ${err.message}`
+            : 'Algo salió mal en el navegador.',
         user_action: 'retry' as const,
       });
       setProgressPhase(null);
@@ -320,7 +361,9 @@ export default function ExcelUploader() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // Defer revoke — algunos navegadores cancelan la descarga si la URL
+      // se revoca demasiado pronto tras el click.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err: unknown) {
       console.error('Error organizing Excel:', err);
       setStatus('error');

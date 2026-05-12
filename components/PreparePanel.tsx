@@ -106,8 +106,16 @@ export default function PreparePanel({
   const fileKey = `${file.name}|${file.size}|${file.lastModified}`;
   const promptKey = `${fileKey}|${userPrompt}`;
 
+  // Timeouts client-side: si el AI cuelga, abortamos en vez de dejar al
+  // usuario esperando indefinidamente. quick-summary es determinístico
+  // (rápido); preview-plan puede llamar al modelo (puede tardar).
+  const QUICK_SUMMARY_TIMEOUT_MS = 30_000;
+  const PREVIEW_PLAN_TIMEOUT_MS = 90_000;
+
   // Quick-summary: refetches only when file changes.
   useEffect(() => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), QUICK_SUMMARY_TIMEOUT_MS);
     let cancelled = false;
     (async () => {
       setSummaryLoading(true);
@@ -115,7 +123,9 @@ export default function PreparePanel({
       try {
         const fd = new FormData();
         fd.append('file', file);
-        const res = await fetch('/api/quick-summary', { method: 'POST', body: fd });
+        const res = await fetch('/api/quick-summary', {
+          method: 'POST', body: fd, signal: ctrl.signal,
+        });
         if (cancelled) return;
         if (!res.ok) {
           const j = await res.json().catch(() => null);
@@ -125,18 +135,25 @@ export default function PreparePanel({
         const data: QuickSummary = await res.json();
         if (!cancelled) setSummary(data);
       } catch (err: unknown) {
-        if (!cancelled) setSummaryError((err as Error).message || 'No se pudo analizar el archivo.');
+        if (cancelled) return;
+        const isAbort = err instanceof DOMException && err.name === 'AbortError';
+        setSummaryError(isAbort
+          ? 'El análisis tardó demasiado. Verifica tu conexión y vuelve a intentar.'
+          : (err as Error).message || 'No se pudo analizar el archivo.');
       } finally {
+        clearTimeout(timer);
         if (!cancelled) setSummaryLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; clearTimeout(timer); ctrl.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileKey]);
 
   // Preview-plan: refetches when file or prompt change. Cache hit on backend
   // for same (file, prompt) — safe to re-run without quota cost.
   useEffect(() => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PREVIEW_PLAN_TIMEOUT_MS);
     let cancelled = false;
     (async () => {
       setPlanLoading(true);
@@ -147,7 +164,9 @@ export default function PreparePanel({
         if (userPrompt.trim()) fd.append('userPrompt', userPrompt.trim());
         fd.append('audience', audience);
         fd.append('language', language);
-        const res = await fetch('/api/preview-plan', { method: 'POST', body: fd });
+        const res = await fetch('/api/preview-plan', {
+          method: 'POST', body: fd, signal: ctrl.signal,
+        });
         if (cancelled) return;
         if (!res.ok) {
           const j = await res.json().catch(() => null);
@@ -157,12 +176,17 @@ export default function PreparePanel({
         const data: PreviewResponse = await res.json();
         if (!cancelled) setPlan(data);
       } catch (err: unknown) {
-        if (!cancelled) setPlanError((err as Error).message || 'No se pudo generar el plan.');
+        if (cancelled) return;
+        const isAbort = err instanceof DOMException && err.name === 'AbortError';
+        setPlanError(isAbort
+          ? 'La IA está tardando demasiado en responder. Inténtalo de nuevo en unos segundos.'
+          : (err as Error).message || 'No se pudo generar el plan.');
       } finally {
+        clearTimeout(timer);
         if (!cancelled) setPlanLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; clearTimeout(timer); ctrl.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [promptKey, audience, language]);
 

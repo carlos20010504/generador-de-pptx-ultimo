@@ -81,7 +81,9 @@ export async function generatePowerPointFromExcel(
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // Defer revoke — algunos navegadores cancelan la descarga si la URL
+    // se revoca demasiado pronto tras el click.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 
   } catch (err: unknown) {
     console.error('[PPTX Helper] Error:', err);

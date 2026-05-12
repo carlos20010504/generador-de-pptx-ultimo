@@ -28,17 +28,20 @@ interface AIControlPanelProps {
 }
 
 const FOCUS_OPTIONS = [
-  { id: 'mixed' as const, label: 'Auto', icon: LayoutDashboard, color: '#A78BFA' },
-  { id: 'tables' as const, label: 'Tablas', icon: Table2, color: '#34D399' },
-  { id: 'charts' as const, label: 'Gráficas', icon: BarChart2, color: '#60A5FA' },
+  { id: 'mixed' as const, label: 'Auto', icon: LayoutDashboard, color: '#087062' },
+  { id: 'tables' as const, label: 'Tablas', icon: Table2, color: '#69BE28' },
+  { id: 'charts' as const, label: 'Gráficas', icon: BarChart2, color: '#00A0DF' },
   { id: 'text' as const, label: 'Texto', icon: FileText, color: '#F9A8D4' },
 ];
 
+// Themes para el PPT generado. Default Socya Institucional usa la paleta
+// oficial (teal #087062 + logo-green #69BE28); el resto son alternativas
+// para audiencias específicas.
 const THEME_OPTIONS = [
-  { key: 'analitica-moderna', name: 'Analitica Moderna', primary_hex: '#0F172A', accent_hex: '#2563EB', text_hex: '#E5E7EB', bg_hex: '#F8FAFC' },
-  { key: 'comite-ejecutivo', name: 'Comite Ejecutivo', primary_hex: '#0B1F3A', accent_hex: '#C0841A', text_hex: '#E2E8F0', bg_hex: '#F8FAFC' },
-  { key: 'impacto-nocturno', name: 'Impacto Nocturno', primary_hex: '#111827', accent_hex: '#7C3AED', text_hex: '#F3F4F6', bg_hex: '#030712' },
-  { key: 'socya-verde', name: 'Socya Verde', primary_hex: '#14532D', accent_hex: '#16A34A', text_hex: '#E8F5EC', bg_hex: '#F7FCF8' },
+  { key: 'socya-institucional', name: 'Socya Institucional', primary_hex: '#087062', accent_hex: '#69BE28', text_hex: '#1A1A1A', bg_hex: '#FFFFFF' },
+  { key: 'socya-comite',        name: 'Socya Comité',        primary_hex: '#123C49', accent_hex: '#F3C400', text_hex: '#1A1A1A', bg_hex: '#FFFFFF' },
+  { key: 'socya-impacto',       name: 'Socya Impacto',       primary_hex: '#087062', accent_hex: '#FF8300', text_hex: '#1A1A1A', bg_hex: '#FFFFFF' },
+  { key: 'analitica-moderna',   name: 'Analítica Moderna',   primary_hex: '#0F172A', accent_hex: '#2563EB', text_hex: '#E5E7EB', bg_hex: '#F8FAFC' },
 ];
 
 interface RecommendedSlide {
@@ -300,15 +303,15 @@ export default function AIControlPanel({
       `}</style>
       {/* Header */}
       <div style={{
-        background: 'rgba(124,58,237,0.08)',
-        border: '1px solid rgba(124,58,237,0.2)',
+        background: 'rgba(8,112,98,0.06)',
+        border: '1px solid rgba(8,112,98,0.20)',
         borderRadius: '16px',
         padding: '0.85rem 0.9rem',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', marginBottom: '0.35rem' }}>
           <div style={{
             padding: '0.38rem',
-            background: 'rgba(124,58,237,0.18)',
+            background: 'rgba(8,112,98,0.18)',
             borderRadius: '9px',
             display: 'flex',
             flexShrink: 0,
@@ -321,9 +324,9 @@ export default function AIControlPanel({
             </p>
             <p style={{
               color: aiStatus
-                ? (aiStatusBadge(aiStatus).tone === 'cache' ? '#86EFAC'
-                   : aiStatusBadge(aiStatus).tone === 'warn' ? '#FCD34D'
-                   : '#A78BFA')
+                ? (aiStatusBadge(aiStatus).tone === 'cache' ? '#69BE28'
+                   : aiStatusBadge(aiStatus).tone === 'warn' ? '#8A6800'
+                   : '#087062')
                 : 'rgba(26,26,26,0.45)',
               fontSize: '0.62rem', margin: 0,
             }}>
@@ -343,10 +346,10 @@ export default function AIControlPanel({
             marginTop: '0.55rem',
             padding: '0.5rem 0.6rem',
             borderRadius: '10px',
-            background: isOrganizedFile ? 'rgba(74,222,128,0.12)' : '#FFFFFF',
-            border: isOrganizedFile ? '1px solid rgba(74,222,128,0.22)' : '1px solid rgba(26,26,26,0.10)',
+            background: isOrganizedFile ? 'rgba(105,190,40,0.12)' : '#FFFFFF',
+            border: isOrganizedFile ? '1px solid rgba(105,190,40,0.30)' : '1px solid rgba(26,26,26,0.10)',
           }}>
-            <p style={{ color: isOrganizedFile ? '#86EFAC' : '#4D4F53', fontSize: '0.64rem', fontWeight: 700, margin: '0 0 0.15rem' }}>
+            <p style={{ color: isOrganizedFile ? '#69BE28' : '#4D4F53', fontSize: '0.64rem', fontWeight: 700, margin: '0 0 0.15rem' }}>
               {isOrganizedFile ? 'Excel organizado listo para IA' : 'Excel cargado para análisis'}
             </p>
             <p style={{ color: '#4D4F53', fontSize: '0.62rem', margin: 0, lineHeight: 1.35 }}>
@@ -453,7 +456,7 @@ export default function AIControlPanel({
               boxSizing: 'border-box',
               cursor: hasFile ? 'text' : 'not-allowed',
             }}
-            onFocus={(e) => { e.currentTarget.style.borderColor = 'rgba(124,58,237,0.4)'; }}
+            onFocus={(e) => { e.currentTarget.style.borderColor = 'rgba(8,112,98,0.40)'; }}
             onBlur={(e) => { e.currentTarget.style.borderColor = 'rgba(26,26,26,0.15)'; }}
           />
           {/* Send / Clear buttons row */}
@@ -488,11 +491,11 @@ export default function AIControlPanel({
               disabled={!hasFile || !prompt.trim()}
               title="Confirmar instrucciones"
               style={{
-                background: promptSent ? 'rgba(74,222,128,0.2)' : 'rgba(124,58,237,0.25)',
-                border: `1px solid ${promptSent ? 'rgba(74,222,128,0.4)' : 'rgba(124,58,237,0.4)'}`,
+                background: promptSent ? 'rgba(105,190,40,0.22)' : 'rgba(8,112,98,0.22)',
+                border: `1px solid ${promptSent ? 'rgba(105,190,40,0.40)' : 'rgba(8,112,98,0.40)'}`,
                 borderRadius: '6px',
                 padding: '0.25rem 0.38rem',
-                color: promptSent ? '#4ADE80' : '#A78BFA',
+                color: promptSent ? '#69BE28' : '#087062',
                 cursor: (!hasFile || !prompt.trim()) ? 'not-allowed' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
@@ -576,8 +579,8 @@ export default function AIControlPanel({
                   lineHeight: 1.35,
                 }}
                 onMouseOver={(e) => {
-                  e.currentTarget.style.background = 'rgba(124,58,237,0.1)';
-                  e.currentTarget.style.borderColor = 'rgba(124,58,237,0.25)';
+                  e.currentTarget.style.background = 'rgba(8,112,98,0.10)';
+                  e.currentTarget.style.borderColor = 'rgba(8,112,98,0.22)';
                   e.currentTarget.style.color = 'white';
                 }}
                 onMouseOut={(e) => {
@@ -586,7 +589,7 @@ export default function AIControlPanel({
                   e.currentTarget.style.color = '#4D4F53';
                 }}
               >
-                <ChevronRight size={11} style={{ marginTop: '2px', flexShrink: 0, color: '#A78BFA' }} />
+                <ChevronRight size={11} style={{ marginTop: '2px', flexShrink: 0, color: '#087062' }} />
                 {s}
               </button>
             ))}
@@ -751,8 +754,8 @@ export default function AIControlPanel({
                         marginTop: '0.4rem',
                         padding: '0.32rem 0.48rem',
                         borderRadius: '8px',
-                        border: '1px solid rgba(124,58,237,0.24)',
-                        background: 'rgba(124,58,237,0.12)',
+                        border: '1px solid rgba(8,112,98,0.25)',
+                        background: 'rgba(8,112,98,0.10)',
                         color: '#C4B5FD',
                         cursor: 'pointer',
                         fontSize: '0.6rem',

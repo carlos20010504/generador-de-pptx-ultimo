@@ -18,7 +18,7 @@ interface Props {
 export default function GenerationProgress({ currentPhase, message }: Props) {
   const idx = PHASES.findIndex(p => p.key === currentPhase);
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
       {PHASES.map((p, i) => {
         const done = idx > i || currentPhase === 'done';
         const active = idx === i;
@@ -26,15 +26,40 @@ export default function GenerationProgress({ currentPhase, message }: Props) {
         return (
           <div key={p.key} style={{
             display: 'flex', alignItems: 'center', gap: '0.6rem',
-            padding: '0.5rem 0.7rem', borderRadius: '8px',
-            background: active ? 'rgba(124,58,237,0.12)' : 'transparent',
-            color: done ? '#86EFAC' : active ? '#A78BFA' : 'rgba(255,255,255,0.35)',
+            padding: '0.55rem 0.75rem',
+            borderRadius: 'var(--r-md)',
+            background: active
+              ? 'rgba(8, 112, 98, 0.08)'
+              : done
+                ? 'rgba(105, 190, 40, 0.06)'
+                : 'transparent',
+            border: active
+              ? '1px solid rgba(8, 112, 98, 0.25)'
+              : done
+                ? '1px solid rgba(105, 190, 40, 0.20)'
+                : '1px solid transparent',
+            color: done
+              ? 'var(--c-logo-green)'
+              : active
+                ? 'var(--c-primary)'
+                : 'var(--c-text-muted)',
             fontSize: '0.78rem',
+            fontWeight: active || done ? 700 : 500,
+            transition: 'all 0.22s',
           }}>
-            {active ? <Loader2 size={14} className="spin" /> : <Icon size={14} />}
+            {active
+              ? <Loader2 size={14} className="spin" style={{ animation: 'spin 1s linear infinite' }} />
+              : done
+                ? <Check size={14} strokeWidth={3} />
+                : <Icon size={14} />}
             <span>{p.label}</span>
             {active && message && (
-              <span style={{ marginLeft: 'auto', opacity: 0.7, fontSize: '0.7rem' }}>
+              <span style={{
+                marginLeft: 'auto',
+                color: 'var(--c-text-tertiary)',
+                fontSize: '0.7rem',
+                fontWeight: 500,
+              }}>
                 {message}
               </span>
             )}
