@@ -156,11 +156,16 @@ export default function PreparePanel({
     return Array.from({ length: total }, (_, i) => i);
   }, [customOrder, plan?.slides?.length]);
 
-  // Timeouts client-side: si el AI cuelga, abortamos en vez de dejar al
-  // usuario esperando indefinidamente. quick-summary es determinístico
-  // (rápido); preview-plan puede llamar al modelo (puede tardar).
-  const QUICK_SUMMARY_TIMEOUT_MS = 30_000;
-  const PREVIEW_PLAN_TIMEOUT_MS = 90_000;
+  // Timeouts client-side: deben ser >= al budget del backend, sino abortamos
+  // requests que iban a responder bien. Backend actual:
+  //   - quick-summary maxDuration = 60s (determinístico pero Python tiene
+  //     cold-start lento en Windows con archivos grandes).
+  //   - preview-plan maxDuration = 300s, AIChain.PATIENT.total_budget = 200s.
+  // Damos buffer encima para que el backend gane la carrera de abortar
+  // primero (con mensaje útil) en vez del cliente — antes ambos timeouts
+  // estaban POR DEBAJO del budget, abortando requests que iban a responder.
+  const QUICK_SUMMARY_TIMEOUT_MS = 70_000;       // 60s backend + 10s buffer
+  const PREVIEW_PLAN_TIMEOUT_MS = 240_000;       // 200s budget + 40s buffer
 
   // Quick-summary: refetches only when file changes.
   useEffect(() => {
@@ -188,7 +193,7 @@ export default function PreparePanel({
         if (cancelled) return;
         const isAbort = err instanceof DOMException && err.name === 'AbortError';
         setSummaryError(isAbort
-          ? 'El análisis tardó demasiado. Verifica tu conexión y vuelve a intentar.'
+          ? 'El análisis del Excel tardó más de 70 segundos. Esto suele pasar con archivos muy grandes o con muchas hojas. Probá con uno más pequeño.'
           : (err as Error).message || 'No se pudo analizar el archivo.');
       } finally {
         clearTimeout(timer);
@@ -229,7 +234,7 @@ export default function PreparePanel({
         if (cancelled) return;
         const isAbort = err instanceof DOMException && err.name === 'AbortError';
         setPlanError(isAbort
-          ? 'La IA está tardando demasiado en responder. Inténtalo de nuevo en unos segundos.'
+          ? 'La IA está saturada (todos los modelos free tier tardaron más de 4 minutos en responder). Esperá un par de minutos y volvé a intentar.'
           : (err as Error).message || 'No se pudo generar el plan.');
       } finally {
         clearTimeout(timer);
