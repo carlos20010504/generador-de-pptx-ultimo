@@ -17,6 +17,12 @@ export const maxDuration = 300;
 // commits to rendering the .pptx. Subsequent /api/generate-pptx calls with
 // the same file + prompt will hit the plan cache → zero extra AI tokens.
 export async function POST(req: NextRequest) {
+  // Pre-warm: ver comentario en /api/quick-summary/route.ts.
+  const url = new URL(req.url);
+  if (url.searchParams.get('warmup') === '1') {
+    return NextResponse.json({ ok: true, warmup: true }, { status: 200 });
+  }
+
   const contentLength = req.headers.get('content-length');
   if (contentLength && Number(contentLength) > MAX_EXCEL_UPLOAD_BYTES * 1.5) {
     return NextResponse.json(

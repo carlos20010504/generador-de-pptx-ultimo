@@ -149,6 +149,98 @@ Datos disponibles:
 {payload_json}
 """
 
+def _deterministic_plan_fallback(wb: WorkbookData, blocks,
+                                   audience: str, language: str) -> dict:
+    """Plan determinístico derivado del inventory cuando la AI satura o
+    devuelve garbage. Antes esto causaba un error AI_SATURATED que dejaba
+    al usuario sin deck. Ahora generamos un deck SIMPLE pero completamente
+    funcional — el usuario puede elegir entre esto o reintentar más tarde
+    para conseguir el plan rico de la AI.
+
+    NO incluye text_bullets — esos requieren provenance check estricta del
+    validator y construirlos sin la AI implicaría duplicar la lógica narrativa.
+    Mejor 5 slides limpios que 7 slides de los cuales 2 dropean."""
+    kpi_blocks = [b for b in blocks if b.kind == "kpi_candidate"][:4]
+    chart_cats = [b for b in blocks if b.kind == "categorical_distribution"]
+    chart_ts = [b for b in blocks if b.kind == "time_series_candidate"]
+    tables = [b for b in blocks if b.kind == "table"]
+
+    base_name = (wb.filename or "Reporte").rsplit(".", 1)[0]
+    slides: list = [
+        {"type": "title",
+         "data": {"title": f"Reporte: {base_name}",
+                  "subtitle": "Análisis automático del archivo cargado"}},
+    ]
+
+    if kpi_blocks:
+        slides.append({
+            "type": "kpi_row",
+            "title": "Indicadores Clave",
+            "block_refs": [b.id for b in kpi_blocks],
+        })
+
+    if chart_cats:
+        b = chart_cats[0]
+        col = b.provenance.columns[0] if b.provenance.columns else "categorías"
+        slides.append({
+            "type": "chart",
+            "chart_type": "bar",
+            "title": f"Distribución por {col}",
+            "block_ref": b.id,
+            "narrative": "",  # Extractor genera narrativa honesta automática
+        })
+
+    if chart_ts:
+        b = chart_ts[0]
+        slides.append({
+            "type": "chart",
+            "chart_type": "line",
+            "title": "Evolución temporal",
+            "block_ref": b.id,
+            "narrative": "",
+        })
+
+    if len(chart_cats) > 1:
+        b = chart_cats[1]
+        col = b.provenance.columns[0] if b.provenance.columns else "categorías"
+        slides.append({
+            "type": "chart",
+            "chart_type": "pie",
+            "title": f"Composición de {col}",
+            "block_ref": b.id,
+            "narrative": "",
+        })
+
+    if tables:
+        b = tables[0]
+        slides.append({
+            "type": "table",
+            "title": "Detalle Operativo",
+            "block_ref": b.id,
+            "max_rows": 10,
+        })
+
+    return {
+        "presentation_meta": {
+            "title": f"Reporte: {base_name}",
+            "subtitle": "Generado automáticamente desde Excel",
+        },
+        "slides": slides,
+        "prompt_suggestions": [
+            "Detalla el análisis por categoría principal",
+            "Compara métricas por período",
+            "Resalta los hallazgos más relevantes",
+        ],
+        "_meta": {
+            "model": "deterministic_fallback",
+            "cache_hit": False,
+            "fallback_steps": [],
+            "planner_version": PLANNER_VERSION,
+            "deterministic_fallback": True,
+        },
+    }
+
+
 def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
                        language: str, api_key: str,
                        profile: AIProfile = AIProfile.PATIENT,
@@ -174,27 +266,39 @@ def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
     payload_json = json.dumps(payload, ensure_ascii=False, default=str)
     prompt = PROMPT_TEMPLATE.format(payload_json=payload_json)
 
+    # AI con fallback determinístico: si la AI satura o devuelve garbage,
+    # devolvemos un plan derivado del inventory en vez de un error que deja
+    # al usuario bloqueado. NO cacheamos el fallback — queremos reintentar
+    # AI en el próximo request por si vuelve a estar disponible.
     chain = AIChain(api_key=api_key, profile=profile)
-    result = chain.call(prompt)
-
-    parsed = insights.parse_loose_json(result.content)
-    if not isinstance(parsed, dict) or "slides" not in parsed:
-        raise PipelineError(
-            ErrorCode.AI_RESPONSE_INVALID,
-            "El planificador devolvió un JSON sin la forma esperada.",
-            details=str(result.content)[:300],
-            user_action="retry",
-        )
-    # Some models emit `"slides": null` or `"slides": "TBD"` when they
-    # think the input is too small / ambiguous. Without this guard we'd
-    # crash later in `validate_plan` with a TypeError on iteration.
-    if not isinstance(parsed.get("slides"), list) or not parsed.get("slides"):
-        raise PipelineError(
-            ErrorCode.AI_RESPONSE_INVALID,
-            "El planificador no devolvió slides utilizables.",
-            details=f"slides={type(parsed.get('slides')).__name__}",
-            user_action="retry",
-        )
+    try:
+        result = chain.call(prompt)
+        parsed = insights.parse_loose_json(result.content)
+        if not isinstance(parsed, dict) or "slides" not in parsed:
+            raise PipelineError(
+                ErrorCode.AI_RESPONSE_INVALID,
+                "El planificador devolvió un JSON sin la forma esperada.",
+                details=str(result.content)[:300],
+                user_action="retry",
+            )
+        # Some models emit `"slides": null` or `"slides": "TBD"` when they
+        # think the input is too small / ambiguous. Without this guard we'd
+        # crash later in `validate_plan` with a TypeError on iteration.
+        if not isinstance(parsed.get("slides"), list) or not parsed.get("slides"):
+            raise PipelineError(
+                ErrorCode.AI_RESPONSE_INVALID,
+                "El planificador no devolvió slides utilizables.",
+                details=f"slides={type(parsed.get('slides')).__name__}",
+                user_action="retry",
+            )
+    except PipelineError as e:
+        if e.code in (ErrorCode.AI_SATURATED, ErrorCode.AI_RESPONSE_INVALID):
+            plan = _deterministic_plan_fallback(wb, blocks, audience, language)
+            plan["_meta"]["fallback_reason"] = (
+                e.code.value if hasattr(e.code, "value") else str(e.code)
+            )
+            return plan
+        raise
 
     parsed["_meta"] = {
         "model": result.model,

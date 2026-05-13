@@ -184,7 +184,24 @@ function PreviewTile({ token, idx, onZoom }: {
   token: string; idx: number; onZoom: () => void;
 }) {
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
-  const src = `/api/pptx-preview?token=${encodeURIComponent(token)}&slide=${idx}`;
+  // Cache-buster por mount para evitar que el browser sirva una respuesta
+  // de prueba cacheada de un token previo expirado.
+  const [src] = useState(
+    () => `/api/pptx-preview?token=${encodeURIComponent(token)}&slide=${idx}&t=${Date.now()}`
+  );
+
+  // Timeout duro: si el server no responde en 20s o el browser se cuelga
+  // en lazy-load, marcamos error para que el usuario vea "Sin vista previa"
+  // en vez de un spinner infinito. Antes loading="lazy" + tiles fuera del
+  // viewport en mobile podían quedarse cargando para siempre.
+  useEffect(() => {
+    if (state !== 'loading') return;
+    const timer = setTimeout(() => {
+      setState((current) => (current === 'loading' ? 'error' : current));
+    }, 20_000);
+    return () => clearTimeout(timer);
+  }, [state]);
+
   return (
     <button type="button" onClick={onZoom} className={`prv-tile is-${state}`}>
       {state === 'loading' && (
@@ -201,7 +218,10 @@ function PreviewTile({ token, idx, onZoom }: {
       <img
         src={src}
         alt={`Slide ${idx + 1}`}
-        loading="lazy"
+        // loading="eager" — antes era "lazy" pero en mobile o viewports
+        // chicos los tiles fuera de pantalla nunca disparaban onLoad y se
+        // quedaban con el spinner indefinidamente.
+        loading="eager"
         decoding="async"
         onLoad={() => setState('ready')}
         onError={() => setState('error')}

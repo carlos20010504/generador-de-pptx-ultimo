@@ -16,6 +16,15 @@ export const maxDuration = 60;
 // ZERO AI calls — fast (<2s on 10K rows). Used to power the upload preview UI
 // before the user commits to a full PowerPoint generation.
 export async function POST(req: NextRequest) {
+  // Pre-warm short-circuit: el cliente dispara `?warmup=1` al cargar la
+  // página para forzar a Next a compilar esta route en dev mode antes de que
+  // el usuario suba algo. Antes hacíamos POST vacío y la route corría TODA
+  // la lógica (runtime check + formData) y devolvía 500, polucionando logs.
+  const url = new URL(req.url);
+  if (url.searchParams.get('warmup') === '1') {
+    return NextResponse.json({ ok: true, warmup: true }, { status: 200 });
+  }
+
   // Content-Length guard — reject before parsing the formData
   const contentLength = req.headers.get('content-length');
   if (contentLength && Number(contentLength) > MAX_EXCEL_UPLOAD_BYTES * 1.5) {

@@ -158,17 +158,18 @@ export default function ExcelUploader() {
     };
   }, []);
 
-  // Pre-warm en mount: ataca el problema #1 del primer upload en npm run dev.
-  // Sin esto, el primer POST a /api/quick-summary o /api/preview-plan paga:
-  //   1. Compilación on-demand de la API route por Next (5-10s en dev)
-  //   2. Cold start de Python + import pandas/openpyxl/python-pptx (3-5s)
-  // Total: 8-15s de latencia "fantasma" en el primer request, después siempre rápido.
-  // /api/health hace `python -c 'import socya_pipeline...'` lo que sirve de
-  // warmup REAL para los módulos pesados. POSTs vacíos a las otras dos rutas
-  // las fuerzan a compilar (Next devuelve 400 al instante pero la ruta queda hot).
+  // Pre-warm en mount: ataca el cold-start de dev mode (Next compila routes
+  // on-demand + Python tarda ~5s en importar pandas/openpyxl).
+  //
+  // /api/health hace `python -c 'import socya_pipeline...'` que valida deps
+  // y de paso warm-loadea los módulos pesados de Python.
+  // /api/quick-summary y /api/preview-plan reciben `?warmup=1` que las hace
+  // retornar 200 instantáneo (las routes detectan el query param y short-
+  // circuitean ANTES de spawnear Python o validar nada). Eso fuerza a Next
+  // a compilarlas. Antes hacíamos POST vacío que devolvía 500 pollucionando
+  // logs y hasta podía interferir con uploads concurrentes del usuario.
   useEffect(() => {
     const ctrl = new AbortController();
-    // Health: warm Python module cache + valida deps en el mismo viaje.
     fetch('/api/health', { method: 'GET', cache: 'no-store', signal: ctrl.signal })
       .then(r => r.json().catch(() => null))
       .then(payload => {
@@ -177,11 +178,9 @@ export default function ExcelUploader() {
           message: String(payload?.message || 'Backend operativo.'),
         });
       })
-      .catch(() => { /* sin red, no rompemos UX — el upload mostrará el error */ });
-    // Compila las rutas críticas con POST vacío (devuelven 400 instantáneo
-    // pero Next deja la ruta compilada para el primer upload real).
-    fetch('/api/quick-summary', { method: 'POST', signal: ctrl.signal }).catch(() => undefined);
-    fetch('/api/preview-plan',  { method: 'POST', signal: ctrl.signal }).catch(() => undefined);
+      .catch(() => undefined);
+    fetch('/api/quick-summary?warmup=1', { method: 'POST', signal: ctrl.signal }).catch(() => undefined);
+    fetch('/api/preview-plan?warmup=1',  { method: 'POST', signal: ctrl.signal }).catch(() => undefined);
     return () => ctrl.abort();
   }, []);
 

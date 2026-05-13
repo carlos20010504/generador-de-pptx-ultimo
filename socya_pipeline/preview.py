@@ -83,14 +83,23 @@ def generate_previews(pptx_path: str, out_dir: str,
                 "error": "Preview no disponible en este sistema (requiere Windows + PowerPoint)."}
     try:
         paths = _render_with_powerpoint(pptx_path, out_dir, width)
+        # Verifica que cada PNG efectivamente exista en disco. PowerPoint COM
+        # a veces reporta éxito antes de que Windows termine de flush'ear el
+        # archivo — sin este check el route /api/pptx-preview servía 404 y
+        # el frontend mostraba spinner infinito.
+        verified = []
+        for i, p in enumerate(paths):
+            try:
+                if Path(p).is_file() and Path(p).stat().st_size > 100:
+                    verified.append({"index": i, "filename": os.path.basename(p)})
+            except OSError:
+                continue
         return {
-            "ok": True,
+            "ok": len(verified) > 0,
             "renderer": "powerpoint",
-            "slides": [
-                {"index": i, "filename": os.path.basename(p)}
-                for i, p in enumerate(paths)
-            ],
-            "error": None,
+            "slides": verified,
+            "error": (None if verified
+                       else "PowerPoint exportó pero no se encontraron PNGs válidos en disco."),
         }
     except ImportError as e:
         return {"ok": False, "renderer": None, "slides": [],
