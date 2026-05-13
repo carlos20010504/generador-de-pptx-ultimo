@@ -9,8 +9,13 @@ export default defineConfig({
   expect: { timeout: 5_000 },
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  // Reintenta una vez localmente también — con 4 workers en paralelo el pre-warm
+  // de la página dispara N llamadas concurrentes a /api/health que spawnean Python
+  // simultáneamente. En máquinas con poca CPU eso puede causar timeouts intermitentes.
+  retries: 1,
+  // Cap de 2 workers locales (CI ya usa 1). Evita la tormenta de Python spawns
+  // concurrentes del pre-warm que hacían tests flakeys con default workers=4.
+  workers: process.env.CI ? 1 : 2,
   reporter: process.env.CI ? [['github'], ['list']] : 'list',
   use: {
     baseURL: BASE_URL,
