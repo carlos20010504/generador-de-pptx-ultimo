@@ -67,3 +67,10 @@ next-env.d.ts
 /ppt_review_*/
 __pycache__/
 *.pyc
+
+# AI tooling state — these are auto-synced from global skill registries
+# and shouldn't pollute the repo (every clone would re-sync them anyway).
+.agents/
+.trae/
+.claude/scheduled_tasks.lock
+.claude/skills/
