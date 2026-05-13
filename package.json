@@ -1,0 +1,34 @@
+{
+  "name": "pptxgen",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build --webpack",
+    "start": "next start -p 3001",
+    "lint": "eslint",
+    "test": "node --test __tests__/*.test.js",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install chromium --with-deps"
+  },
+  "dependencies": {
+    "lucide-react": "^1.6.0",
+    "next": "16.2.4",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "babel-plugin-react-compiler": "1.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.4",
+    "playwright-core": "^1.59.1",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

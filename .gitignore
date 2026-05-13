@@ -12,6 +12,10 @@
 
 # testing
 /coverage
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/
 
 # next.js
 /.next/
@@ -46,6 +50,9 @@ next-env.d.ts
 !__tests__/fixtures/*.xlsx
 *.pptx
 *.json
+!package.json
+!package-lock.json
+!tsconfig.json
 *.pdf
 *.txt
 !requirements-dev.txt

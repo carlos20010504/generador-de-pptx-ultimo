@@ -208,6 +208,8 @@ def main():
                           encoding="utf-8")
     print(f"\nReporte JSON: {out_json}")
 
+    return 0 if n_fail == 0 else 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

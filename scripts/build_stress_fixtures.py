@@ -479,13 +479,17 @@ def main():
         fx_pathological,
         fx_with_units,
     ]
+    failures = []
     for fn in fixtures:
         try:
             fn()
         except Exception as e:
             print(f"  [FAIL] {fn.__name__}: {e}")
-    print(f"\n{len(fixtures)} fixtures generados.")
+            failures.append(fn.__name__)
+    print(f"\n{len(fixtures) - len(failures)}/{len(fixtures)} fixtures generados.")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main() or 0)
