@@ -110,26 +110,32 @@ def _build_payload(wb: WorkbookData, issues: List[Tuple[str, List[str]]],
     """Pack a compact JSON describing the problematic sheets — first
     MAX_SAMPLE_ROWS rows, first MAX_SAMPLE_COLS cols only."""
     import pandas as pd
+    # Cierra explícitamente — sin esto el handle queda abierto hasta GC y en
+    # Windows bloquea el archivo entre uploads.
     xls = pd.ExcelFile(Path(file_path))
-    payload: dict = {"problematic_sheets": []}
-    for sheet_name, reasons in issues:
-        try:
-            raw = xls.parse(sheet_name, header=None, nrows=MAX_SAMPLE_ROWS)
-        except Exception:
-            continue
-        rows = raw.iloc[:, :MAX_SAMPLE_COLS].fillna("").astype(str).values.tolist()
-        # Trim each cell to keep tokens low
-        rows = [[v[:40] for v in row] for row in rows]
-        sheet = next((s for s in wb.sheets if s.name == sheet_name), None)
-        payload["problematic_sheets"].append({
-            "name": sheet_name,
-            "issues_detected": reasons,
-            "current_columns_detected_by_parser": (
-                [c.name for c in sheet.columns] if sheet else []
-            ),
-            "first_rows_raw": rows,
-        })
-    return payload
+    try:
+        payload: dict = {"problematic_sheets": []}
+        for sheet_name, reasons in issues:
+            try:
+                raw = xls.parse(sheet_name, header=None, nrows=MAX_SAMPLE_ROWS)
+            except Exception:
+                continue
+            rows = raw.iloc[:, :MAX_SAMPLE_COLS].fillna("").astype(str).values.tolist()
+            # Trim each cell to keep tokens low
+            rows = [[v[:40] for v in row] for row in rows]
+            sheet = next((s for s in wb.sheets if s.name == sheet_name), None)
+            payload["problematic_sheets"].append({
+                "name": sheet_name,
+                "issues_detected": reasons,
+                "current_columns_detected_by_parser": (
+                    [c.name for c in sheet.columns] if sheet else []
+                ),
+                "first_rows_raw": rows,
+            })
+        return payload
+    finally:
+        try: xls.close()
+        except Exception: pass
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -22,20 +22,28 @@ SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "http://localhost")
 
 class AIProfile(str, Enum):
     FAST = "fast"      # 25s timeout, 1 model only, raise if it fails
-    PATIENT = "patient"  # full chain, multiple cycles, up to ~16 min worst-case (slow models + retries)
+    PATIENT = "patient"  # full chain, hasta ~3 min cap duro
 
+# `total_budget_seconds` es el techo absoluto del tiempo que la cadena puede
+# bloquear el request — antes podía sumar 90s × 5 modelos × 4 ciclos = 30 min
+# de sleeps si todos los modelos volvían 429 con retry_after grande. La API
+# route tiene maxDuration=280s; superarlo solo desperdicia recursos del server
+# y frustra al usuario con un freeze más largo del que ya iba a romperse.
 PROFILE_SETTINGS = {
     AIProfile.FAST: {
         "timeout_per_call": 25,
         "max_models_to_try": 1,
         "max_cycles": 1,
         "retry_within_model": 0,
+        "total_budget_seconds": 60,
     },
     AIProfile.PATIENT: {
         "timeout_per_call": 60,
         "max_models_to_try": len(MODEL_CHAIN),
         "max_cycles": 4,
         "retry_within_model": 1,
+        # 200s deja ~80s de margen antes del maxDuration=280s del API route.
+        "total_budget_seconds": 200,
     },
 }
 
@@ -70,8 +78,22 @@ class AIChain:
         last_error = "unknown"
         models_to_try = MODEL_CHAIN[: self.settings["max_models_to_try"]]
 
+        # Techo duro: si superamos este budget, abortamos con AI_SATURATED.
+        # Ver comentario en PROFILE_SETTINGS sobre por qué 200s.
+        budget = self.settings.get("total_budget_seconds", 200)
+        start = time.monotonic()
+
+        def _budget_left() -> float:
+            return max(0.0, budget - (time.monotonic() - start))
+
         for cycle in range(self.settings["max_cycles"]):
+            if _budget_left() <= 0:
+                last_error = "budget_exhausted"
+                break
             for model in models_to_try:
+                if _budget_left() <= 0:
+                    last_error = "budget_exhausted"
+                    break
                 try:
                     content = self._call_one(model, prompt, system_msg, temperature)
                     return AIChainResult(model=model, content=content,
@@ -83,7 +105,10 @@ class AIChain:
                     })
                     last_error = exc.reason
                     if exc.retry_after and self.profile == AIProfile.PATIENT:
-                        time.sleep(min(exc.retry_after, 90))
+                        # Respeta el budget — nunca dormir más de lo que queda.
+                        nap = min(exc.retry_after, 90, _budget_left())
+                        if nap > 0:
+                            time.sleep(nap)
                 except _Fatal as exc:
                     raise PipelineError(
                         ErrorCode.AI_RESPONSE_INVALID,
@@ -92,7 +117,9 @@ class AIChain:
                         user_action="retry",
                     )
             if cycle < self.settings["max_cycles"] - 1:
-                time.sleep(min(30 * (cycle + 1), 60))
+                cycle_nap = min(30 * (cycle + 1), 60, _budget_left())
+                if cycle_nap > 0:
+                    time.sleep(cycle_nap)
 
         # Build a richer details payload so the user (and our logs) can see
         # WHICH models tried, WHICH reason dominated (rate-limit vs network

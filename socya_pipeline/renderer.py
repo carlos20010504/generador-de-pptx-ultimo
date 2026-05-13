@@ -807,12 +807,47 @@ def _annotate_peak_valley_line(ax, values: list) -> None:
         pass
 
 
+def _build_empty_chart_placeholder(width_in: float, height_in: float) -> io.BytesIO:
+    """Renderiza un placeholder limpio cuando el chart no tiene datos válidos.
+    Antes esto era una slide en blanco que el usuario ni notaba."""
+    fig, ax = plt.subplots(figsize=(width_in, height_in), dpi=160,
+                             facecolor="#FAFAF5")
+    ax.set_facecolor("#FAFAF5")
+    ax.text(0.5, 0.55, "Sin datos suficientes",
+            ha="center", va="center",
+            fontfamily="Calibri", fontsize=18, fontweight="bold",
+            color="#6B7280", transform=ax.transAxes)
+    ax.text(0.5, 0.42,
+            "El bloque de origen quedó vacío tras el filtrado",
+            ha="center", va="center",
+            fontfamily="Calibri", fontsize=11,
+            color="#9CA3AF", transform=ax.transAxes)
+    ax.set_xticks([]); ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight",
+                  facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    polished, _ = _apply_chart_polish(buf)
+    return polished
+
+
 def _build_chart_png(data: dict, width_in: float = 7.5,
                        height_in: float = 4.0) -> io.BytesIO:
     chart_type = data.get("chart_type", "bar")
     raw_labels = [str(l) for l in data.get("labels", [])]
     values = list(data.get("values", []))
     is_chronological = bool(data.get("chronological"))
+
+    # Guard: si el extractor (o el AI) nos pasó un chart sin datos válidos,
+    # antes esto generaba slides en blanco silenciosos. Ahora renderizamos
+    # un placeholder honesto en vez de un fantasma.
+    finite_values = [v for v in values if v is not None
+                       and not (isinstance(v, float) and (v != v))]  # filtra NaN
+    if not finite_values or not raw_labels:
+        return _build_empty_chart_placeholder(width_in, height_in)
 
     # Detect single-dominant on RAW values (before "Otros" grouping inflates the
     # 2nd bar). This is the key signal for pivoting layout.

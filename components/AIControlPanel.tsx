@@ -163,11 +163,19 @@ export default function AIControlPanel({
       formData.append('language', 'Español');
       formData.append('theme', JSON.stringify(defaultTheme));
       const res = await fetch('/api/excel-intelligence', { method: 'POST', body: formData });
-      const data = (await res.json()) as IntelligenceResponse;
-
+      // Antes parseábamos JSON ANTES de chequear res.ok — un 500 con HTML
+      // hacía que res.json() reventara y el catch silencioso dejaba al usuario
+      // sin feedback. Ahora intentamos JSON con tolerancia y damos un mensaje
+      // útil cuando el body no es JSON.
       if (!res.ok) {
-        throw new Error(String((data as { error?: string })?.error || 'No se pudo analizar el Excel.'));
+        let serverMsg = `No se pudo analizar el Excel (HTTP ${res.status}).`;
+        try {
+          const errBody = (await res.json()) as { error?: string } | null;
+          if (errBody?.error) serverMsg = String(errBody.error);
+        } catch { /* respuesta no-JSON, mantenemos el mensaje genérico */ }
+        throw new Error(serverMsg);
       }
+      const data = (await res.json()) as IntelligenceResponse;
 
       if (Array.isArray(data.suggestions) && data.suggestions.length > 0) {
         setSuggestions(data.suggestions);

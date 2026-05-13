@@ -73,18 +73,24 @@ def parse_workbook(path, api_key: str = None) -> WorkbookData:
     fmt_map = _read_cell_formats(p)
 
     sheets: List[SheetData] = []
-    for sheet_name in xls.sheet_names:
-        try:
-            df = xls.parse(sheet_name)
-        except Exception:
-            continue
-        df = _resolve_merged_headers(df, p, sheet_name)
-        df = _promote_real_headers(xls, sheet_name, df)
-        df = _compose_two_row_headers(xls, sheet_name, df)
-        df = _strip_total_rows(df)
-        df = _filter_formula_errors(df)
-        sheets.append(_summarize_sheet(sheet_name, df,
-                                         column_formats=fmt_map.get(sheet_name, {})))
+    try:
+        for sheet_name in xls.sheet_names:
+            try:
+                df = xls.parse(sheet_name)
+            except Exception:
+                continue
+            df = _resolve_merged_headers(df, p, sheet_name)
+            df = _promote_real_headers(xls, sheet_name, df)
+            df = _compose_two_row_headers(xls, sheet_name, df)
+            df = _strip_total_rows(df)
+            df = _filter_formula_errors(df)
+            sheets.append(_summarize_sheet(sheet_name, df,
+                                             column_formats=fmt_map.get(sheet_name, {})))
+    finally:
+        # Cierra el ExcelFile aunque alguna hoja reviente al parsear. Sin
+        # esto, en Windows el archivo queda bloqueado hasta que el GC pase.
+        try: xls.close()
+        except Exception: pass
 
     if not sheets:
         raise PipelineError(

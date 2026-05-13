@@ -165,16 +165,25 @@ def _bullet_has_provenance(bullet: str, block, wb: WorkbookData) -> bool:
     # Match cada número del bullet con tolerancia 5% (suficiente para
     # narrativas con sufijos K/M/B redondeados). Para magnitudes pequeñas
     # (<100) requerimos exact match.
+    # _parse_narrative_number puede devolver MÚLTIPLES candidatos cuando el
+    # mismo token aparece varias veces con sufijos distintos en el bullet
+    # (ej: "1.5% generó 1.5M" → [1.5, 1500000]). Aceptamos si CUALQUIER
+    # candidato matchea — sino dropearíamos bullets válidos.
     for n in nums:
         try:
-            n_val = _parse_narrative_number(n, text)
+            n_candidates = _parse_narrative_number(n, text)
         except ValueError:
             continue
-        if n_val is None:
+        if not n_candidates:
             continue
-        tolerance = (max(1.0, abs(n_val) * 0.05) if abs(n_val) >= 100
-                       else 0.5)
-        if not any(abs(n_val - h) <= tolerance for h in haystack_nums):
+        matched = False
+        for n_val in n_candidates:
+            tolerance = (max(1.0, abs(n_val) * 0.05) if abs(n_val) >= 100
+                           else 0.5)
+            if any(abs(n_val - h) <= tolerance for h in haystack_nums):
+                matched = True
+                break
+        if not matched:
             return False
 
     for name in names:
@@ -185,28 +194,42 @@ def _bullet_has_provenance(bullet: str, block, wb: WorkbookData) -> bool:
 
 
 def _parse_narrative_number(token: str, full_text: str):
-    """Convierte un token numérico considerando sufijos K/M/B/MM cercanos
-    en el texto. 'El total es 1.5M' → 1500000. Devuelve float o None si
-    no se puede parsear."""
+    """Convierte un token numérico considerando sufijos K/M/B/MM cercanos.
+
+    Importante: devuelve TODOS los valores candidatos cuando el token aparece
+    múltiples veces (ej: 'El crecimiento del 1.5% generó 1.5M en ventas' →
+    [1.5, 1500000] porque el primer 1.5 va sin sufijo y el segundo con M).
+    Si solo aparece una vez, devuelve [valor_único]. Antes esto solo miraba
+    la PRIMERA ocurrencia y dropeaba bullets cuyo número aparecía dos veces
+    con distintos sufijos.
+
+    Devuelve [] si el token no se puede parsear como float, o lista de floats
+    (con al menos 1 elemento) en cualquier otro caso.
+    """
     try:
         base = float(token.replace(",", "."))
     except ValueError:
-        return None
-    # Buscar sufijo inmediatamente después del token en el texto
-    pos = full_text.find(token)
-    if pos < 0:
-        return base
-    suffix_area = full_text[pos + len(token): pos + len(token) + 3].upper().strip()
-    if suffix_area.startswith("MM"):  # millones (ES algunos contextos)
-        return base * 1_000_000
-    if suffix_area.startswith("M"):
-        # 'M' puede ser millones o millones — usamos millones
-        return base * 1_000_000
-    if suffix_area.startswith("K") or suffix_area.startswith("MIL"):
-        return base * 1_000
-    if suffix_area.startswith("B"):
-        return base * 1_000_000_000
-    return base
+        return []
+    candidates: list[float] = []
+    start = 0
+    tlen = len(token)
+    while True:
+        pos = full_text.find(token, start)
+        if pos < 0:
+            break
+        suffix_area = full_text[pos + tlen: pos + tlen + 3].upper().strip()
+        if suffix_area.startswith("MM"):  # millones (ES algunos contextos)
+            candidates.append(base * 1_000_000)
+        elif suffix_area.startswith("M"):
+            candidates.append(base * 1_000_000)
+        elif suffix_area.startswith("K") or suffix_area.startswith("MIL"):
+            candidates.append(base * 1_000)
+        elif suffix_area.startswith("B"):
+            candidates.append(base * 1_000_000_000)
+        else:
+            candidates.append(base)
+        start = pos + tlen
+    return candidates if candidates else [base]
 
 
 def _clean_bullet(text: str) -> str:

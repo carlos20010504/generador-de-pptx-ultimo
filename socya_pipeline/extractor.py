@@ -38,6 +38,10 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
     `extract_for_render` and `auto_complete_slides` (the two are typically
     invoked back-to-back from cli.py). When omitted they are built locally."""
     blocks_by_id = {b.id: b for b in inventory}
+    # Si el caller no nos pasó un ExcelFile, lo abrimos nosotros — y SOMOS
+    # responsables de cerrarlo al final. En Windows un ExcelFile sin cerrar
+    # mantiene un lock sobre el archivo que impide re-uploads.
+    xls_owned = xls is None
     if xls is None:
         xls = pd.ExcelFile(Path(file_path))
     if sheets_cache is None:
@@ -131,6 +135,9 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
                 dropped.append({"type": stype, "reason": "bullets_empty",
                                 "block_ref": block.id})
 
+    if xls_owned:
+        try: xls.close()
+        except Exception: pass
     return rendered, dropped
 
 
@@ -170,6 +177,7 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
                 used_table_sheets.add(sheet)
 
     blocks_by_id = {b.id: b for b in inventory}
+    xls_owned = xls is None
     if xls is None:
         xls = pd.ExcelFile(Path(file_path))
     if sheets_cache is None:
@@ -318,6 +326,9 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
     # Merge: keep the title slide first, then alternate richness.
     title_slides = [s for s in rendered if s.get("type") == "title"]
     other = [s for s in rendered if s.get("type") != "title"]
+    if xls_owned:
+        try: xls.close()
+        except Exception: pass
     return title_slides + other + extra
 
 

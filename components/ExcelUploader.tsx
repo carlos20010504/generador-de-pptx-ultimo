@@ -106,6 +106,10 @@ export default function ExcelUploader() {
     },
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Aborta el fetch SSE de /api/generate-pptx si el usuario desmonta el
+  // componente o navega antes de que termine. Antes el reader se quedaba
+  // consumiendo bytes en background hasta que el server cerraba la conexión.
+  const generateAbortRef = useRef<AbortController | null>(null);
 
   type ProgressPhase = 'parsing' | 'inventory' | 'planning' | 'validating' | 'rendering' | 'done' | 'error';
   const [progressPhase, setProgressPhase] = useState<ProgressPhase | null>(null);
@@ -144,6 +148,15 @@ export default function ExcelUploader() {
     timeoutId = setTimeout(advance, intervals[0]);
     return () => clearTimeout(timeoutId);
   }, [status]);
+
+  // Cleanup global: si el componente se desmonta con una generación en vuelo,
+  // aborta el fetch para que el SSE reader no siga consumiendo el stream.
+  useEffect(() => {
+    return () => {
+      generateAbortRef.current?.abort();
+      generateAbortRef.current = null;
+    };
+  }, []);
 
   const setValidFile = useCallback(async (f: File) => {
     setStatus('processing');
@@ -206,6 +219,12 @@ export default function ExcelUploader() {
 
   const handleGenerate = async () => {
     if (!file) return;
+    // Si había una generación previa en vuelo (ej: el usuario re-disparó),
+    // abortala antes de empezar otra. Evita reader leaks acumulados.
+    generateAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    generateAbortRef.current = ctrl;
+
     setRetryError(null);
     setProgressPhase('parsing');
     setProgressMessage('');
@@ -230,8 +249,11 @@ export default function ExcelUploader() {
       formData.append('slideOrder', JSON.stringify(slideOrderOverride));
     }
 
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     try {
-      const res = await fetch('/api/generate-pptx', { method: 'POST', body: formData });
+      const res = await fetch('/api/generate-pptx', {
+        method: 'POST', body: formData, signal: ctrl.signal,
+      });
       if (!res.ok || !res.body) {
         let errPayload: PipelineErrorPayload | null = null;
         try {
@@ -273,7 +295,7 @@ export default function ExcelUploader() {
         return;
       }
 
-      const reader = res.body.getReader();
+      reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
       while (true) {
@@ -356,6 +378,11 @@ export default function ExcelUploader() {
         }
       }
     } catch (err: unknown) {
+      // Aborto manual o desmontaje: silencioso, no es un error real para el
+      // usuario — su intención era cancelar.
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return;
+      }
       // TypeError es típicamente fallo de red o conexión cortada;
       // otros errores (parser SSE, etc.) son del cliente — siempre logueamos
       // el detalle a consola para debug y damos un mensaje útil al usuario.
@@ -372,6 +399,15 @@ export default function ExcelUploader() {
       });
       setProgressPhase(null);
       setStatus('error');
+    } finally {
+      // Cierra el reader explícitamente — sin esto, abortar la fetch deja el
+      // ReadableStream en estado "locked" hasta que el GC lo limpie.
+      try { await reader?.cancel(); } catch { /* ya estaba cerrado */ }
+      // Suelta el controller solo si seguimos siendo el "dueño" actual.
+      // Una llamada concurrente a handleGenerate ya habría reasignado el ref.
+      if (generateAbortRef.current === ctrl) {
+        generateAbortRef.current = null;
+      }
     }
   };
 

@@ -47,6 +47,10 @@ def cmd_plan(args):
     profile = (AIProfile.PATIENT if (os.environ.get("SOCYA_AI_PROFILE", "fast")
                                        .lower() == "patient")
                  else AIProfile.FAST)
+    # Inicializo afuera del try para que el finally siempre vea xls (None si
+    # nunca llegamos a abrirlo). Sin esto, Windows bloquea el archivo entre
+    # uploads del mismo Excel hasta que el GC lo libere.
+    xls = None
     try:
         wb = parse_workbook(args.input, api_key=api_key)
         inv = build_inventory(wb)
@@ -104,11 +108,16 @@ def cmd_plan(args):
         _emit_error(PipelineError(ErrorCode.PYTHON_RUNTIME_ERROR,
                                     "Error inesperado en el planificador.",
                                     details=str(e)[:300]))
+    finally:
+        if xls is not None:
+            try: xls.close()
+            except Exception: pass
 
 def cmd_generate(args):
     request = _load_request(args.request)
     api_key = _resolve_api_key()
     profile = AIProfile.PATIENT
+    xls = None  # ver comentario en cmd_plan
     try:
         wb = parse_workbook(args.input, api_key=api_key)
         inv = build_inventory(wb)
@@ -247,6 +256,10 @@ def cmd_generate(args):
         _emit_error(PipelineError(ErrorCode.PYTHON_RUNTIME_ERROR,
                                     "Error inesperado en la generación.",
                                     details=str(e)[:300]))
+    finally:
+        if xls is not None:
+            try: xls.close()
+            except Exception: pass
 
 def _resolve_api_key() -> str:
     """Look up the OpenRouter API key from env or .env files.
