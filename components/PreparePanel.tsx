@@ -444,7 +444,7 @@ export default function PreparePanel({
         </div>
 
         {planLoading && !plan ? (
-          <SectionSkeleton label="Construyendo el plan con IA (1 sola vez)…" />
+          <SectionSkeleton label="Construyendo el plan con IA — puede tardar hasta 4 min en hora pico (free tier). El resultado se cachea, así que reintentos son instantáneos." />
         ) : planError ? (
           <div className="prep-banner is-error">
             <AlertCircle size={14} />

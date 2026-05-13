@@ -158,6 +158,33 @@ export default function ExcelUploader() {
     };
   }, []);
 
+  // Pre-warm en mount: ataca el problema #1 del primer upload en npm run dev.
+  // Sin esto, el primer POST a /api/quick-summary o /api/preview-plan paga:
+  //   1. Compilación on-demand de la API route por Next (5-10s en dev)
+  //   2. Cold start de Python + import pandas/openpyxl/python-pptx (3-5s)
+  // Total: 8-15s de latencia "fantasma" en el primer request, después siempre rápido.
+  // /api/health hace `python -c 'import socya_pipeline...'` lo que sirve de
+  // warmup REAL para los módulos pesados. POSTs vacíos a las otras dos rutas
+  // las fuerzan a compilar (Next devuelve 400 al instante pero la ruta queda hot).
+  useEffect(() => {
+    const ctrl = new AbortController();
+    // Health: warm Python module cache + valida deps en el mismo viaje.
+    fetch('/api/health', { method: 'GET', cache: 'no-store', signal: ctrl.signal })
+      .then(r => r.json().catch(() => null))
+      .then(payload => {
+        if (payload) setBackendHealth({
+          ok: Boolean(payload?.ok),
+          message: String(payload?.message || 'Backend operativo.'),
+        });
+      })
+      .catch(() => { /* sin red, no rompemos UX — el upload mostrará el error */ });
+    // Compila las rutas críticas con POST vacío (devuelven 400 instantáneo
+    // pero Next deja la ruta compilada para el primer upload real).
+    fetch('/api/quick-summary', { method: 'POST', signal: ctrl.signal }).catch(() => undefined);
+    fetch('/api/preview-plan',  { method: 'POST', signal: ctrl.signal }).catch(() => undefined);
+    return () => ctrl.abort();
+  }, []);
+
   const setValidFile = useCallback(async (f: File) => {
     setStatus('processing');
     setErrorMessage('');
