@@ -261,22 +261,43 @@ def cmd_generate(args):
             try: xls.close()
             except Exception: pass
 
-def _resolve_api_key() -> str:
-    """Look up the OpenRouter API key from env or .env files.
+def _load_dotenv_into_environ() -> None:
+    """Carga las variables de .env / .env.local en os.environ si no están ya
+    seteadas. Para que el CLI directo (python -m socya_pipeline ...) detecte
+    GROQ_API_KEY, CEREBRAS_API_KEY, GEMINI_API_KEY del .env igual que las
+    detecta Next.js en dev mode.
 
-    Operate-then-handle (no os.path.exists pre-check) — TOCTOU-safe and one
-    syscall less per file probed."""
-    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if key:
-        return key
+    Idempotente: lee solo claves que NO están en env (no pisa overrides
+    explícitos del shell). Best-effort — si .env no existe o está malformado
+    no rompe."""
     for env_file in (".env", ".env.local"):
         try:
             with open(env_file, "r", encoding="utf-8") as f:
                 for line in f:
-                    if line.startswith("OPENROUTER_API_KEY="):
-                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'")
+                    # Solo setea si no estaba — el shell tiene precedencia.
+                    if key and key not in os.environ:
+                        os.environ[key] = val
         except OSError:
             continue
+
+
+def _resolve_api_key() -> str:
+    """Look up the OpenRouter API key from env or .env files.
+
+    Operate-then-handle (no os.path.exists pre-check) — TOCTOU-safe y un
+    syscall menos por archivo probado."""
+    # Asegura que .env esté cargado (también permite a ai_chain ver GROQ_API_KEY
+    # y similares cuando cli corre directo, sin Next).
+    _load_dotenv_into_environ()
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if key:
+        return key
     return ""
 
 def cmd_quick_summary(args):
