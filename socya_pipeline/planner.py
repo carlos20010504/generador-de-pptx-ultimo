@@ -149,17 +149,85 @@ Datos disponibles:
 {payload_json}
 """
 
+def _format_money(v) -> str:
+    """Formato de moneda compacto: 1500000 → '$1.5M', 12345 → '$12K'."""
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if abs(n) >= 1_000_000_000:
+        return f"${n / 1_000_000_000:.1f}B"
+    if abs(n) >= 1_000_000:
+        return f"${n / 1_000_000:.1f}M"
+    if abs(n) >= 1_000:
+        return f"${n / 1_000:.0f}K"
+    return f"${n:,.0f}"
+
+
+def _build_fallback_bullets(wb: WorkbookData, table_block) -> list:
+    """Construye bullets que pasan el validator de provenance. Citan stats
+    de columnas DEL TABLE_BLOCK directamente (validator construye su haystack
+    desde la sheet+cols del supports_block, no de otros bloques).
+
+    El validator ahora también incluye los nombres de columnas en el haystack,
+    así que podemos referenciarlas por nombre en los bullets."""
+    sheet = next((s for s in wb.sheets if s.name == table_block.provenance.sheet),
+                  None)
+    if not sheet:
+        return []
+    cols_set = set(table_block.provenance.columns)
+    relevant = [c for c in sheet.columns if c.name in cols_set]
+    bullets: list = []
+
+    # Bullet 1: total de la columna numérica con mayor sum (típicamente el
+    # monto principal). El validator hace match contra col.sum directamente.
+    money_cols = [c for c in relevant
+                  if c.dtype in ("currency", "numeric") and c.sum is not None]
+    money_cols.sort(key=lambda c: abs(c.sum or 0), reverse=True)
+    if money_cols:
+        top = money_cols[0]
+        bullets.append(
+            f"El total acumulado de '{top.name}' suma {_format_money(top.sum)}.")
+
+    # Bullet 2: cantidad total de registros en la tabla. El validator añade
+    # sheet.shape[0] al haystack_nums explícitamente.
+    n_rows = sheet.shape[0] if sheet.shape else 0
+    if n_rows:
+        bullets.append(f"Se analizaron {n_rows} registros en la tabla.")
+
+    # Bullet 3: top categoría del primer cat columna. Tanto el nombre de la
+    # categoría (ej. 'Bogotá') como el conteo (ej. 53) están en col.top_values
+    # → ambos en haystack.
+    cat_cols = [c for c in relevant
+                if c.dtype == "categorical" and (c.top_values or [])]
+    if cat_cols:
+        c = cat_cols[0]
+        top_label, top_count = c.top_values[0][0], c.top_values[0][1]
+        try:
+            top_count_int = int(top_count)
+        except (TypeError, ValueError):
+            top_count_int = top_count
+        bullets.append(
+            f"En '{c.name}' destaca '{top_label}' con {top_count_int} registros.")
+
+    # Bullet 4 (opcional): máximo de la columna monetaria principal.
+    if money_cols and money_cols[0].max is not None:
+        top = money_cols[0]
+        bullets.append(
+            f"El valor máximo registrado en '{top.name}' es {_format_money(top.max)}.")
+
+    return bullets[:3]  # max 3 bullets para no saturar la slide
+
+
 def _deterministic_plan_fallback(wb: WorkbookData, blocks,
                                    audience: str, language: str) -> dict:
     """Plan determinístico derivado del inventory cuando la AI satura o
-    devuelve garbage. Antes esto causaba un error AI_SATURATED que dejaba
-    al usuario sin deck. Ahora generamos un deck SIMPLE pero completamente
-    funcional — el usuario puede elegir entre esto o reintentar más tarde
-    para conseguir el plan rico de la AI.
+    devuelve garbage. Antes esto causaba AI_SATURATED que bloqueaba al
+    usuario; ahora genera un deck simple pero completamente funcional.
 
-    NO incluye text_bullets — esos requieren provenance check estricta del
-    validator y construirlos sin la AI implicaría duplicar la lógica narrativa.
-    Mejor 5 slides limpios que 7 slides de los cuales 2 dropean."""
+    Incluye bullets construidos con _build_fallback_bullets() que citan
+    stats de block.extra (sum/min/max/value/top_values) — eso garantiza
+    que pasen el validator de provenance sin caer."""
     kpi_blocks = [b for b in blocks if b.kind == "kpi_candidate"][:4]
     chart_cats = [b for b in blocks if b.kind == "categorical_distribution"]
     chart_ts = [b for b in blocks if b.kind == "time_series_candidate"]
@@ -187,7 +255,9 @@ def _deterministic_plan_fallback(wb: WorkbookData, blocks,
             "chart_type": "bar",
             "title": f"Distribución por {col}",
             "block_ref": b.id,
-            "narrative": "",  # Extractor genera narrativa honesta automática
+            # Vacío → el extractor inyecta narrativa honesta auto-generada
+            # con _auto_chart_narrative (mejor que cualquier template hardcoded).
+            "narrative": "",
         })
 
     if chart_ts:
@@ -219,6 +289,19 @@ def _deterministic_plan_fallback(wb: WorkbookData, blocks,
             "block_ref": b.id,
             "max_rows": 10,
         })
+
+        # Slide final de hallazgos. Si los bullets fueran inválidos, el validator
+        # los dropea por provenance y la slide queda vacía → el extractor a su
+        # vez la dropea por bullets_empty. Solo añadimos la slide si tenemos
+        # bullets que el validator probablemente acepta.
+        bullets = _build_fallback_bullets(wb, b)
+        if bullets:
+            slides.append({
+                "type": "text_bullets",
+                "title": "Hallazgos Principales",
+                "supports_block": b.id,
+                "bullets": bullets,
+            })
 
     return {
         "presentation_meta": {

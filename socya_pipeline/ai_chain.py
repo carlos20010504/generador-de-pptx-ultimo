@@ -1,4 +1,22 @@
-"""OpenRouter call layer with 4-model fallback chain and profile-aware retry."""
+"""Multi-provider AI call layer.
+
+Antes esta capa solo hablaba con OpenRouter free tier — cuando saturaba
+todos los modelos free, el usuario veía AI_SATURATED y quedaba bloqueado.
+
+Ahora soporta múltiples proveedores con detección automática:
+  - Groq (free tier, super rápido — ~300 tok/s)
+  - Cerebras (free tier, también velocísimo)
+  - Google Gemini (free tier, 15 RPM, muy estable)
+  - OpenRouter (free tier, fallback final)
+
+Cada provider se activa SOLO si su API key está en env. Si solo hay
+OPENROUTER_API_KEY (caso histórico), el comportamiento es idéntico al de
+antes. El usuario amplía la red simplemente seteando otras keys.
+
+El orden por defecto privilegia velocidad y confiabilidad:
+  Groq > Cerebras > Gemini > OpenRouter
+"""
+import json
 import os
 import re
 import time
@@ -8,6 +26,8 @@ from typing import List, Optional
 import requests
 from socya_pipeline.errors import PipelineError, ErrorCode
 
+# OpenRouter free chain (tier histórico) — last-resort si los providers más
+# rápidos no están configurados o saturaron todos.
 MODEL_CHAIN = [
     "openai/gpt-oss-120b:free",
     "google/gemma-4-31b-it:free",
@@ -20,15 +40,80 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 APP_NAME = os.environ.get("OPENROUTER_APP_NAME", "Socya PPTX Generator")
 SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "http://localhost")
 
+
+# ─────────────────────────────────────────────────────────────────────
+# Provider definitions
+# ─────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class _ProviderDef:
+    name: str
+    base_url: str             # endpoint URL (sin model path para gemini)
+    api_key_env: str          # env var con la key
+    models: tuple             # modelos a probar en orden
+    style: str                # "openai_compat" o "gemini"
+
+
+# IMPORTANTE: el orden importa. Más rápido y estable arriba.
+# Para activar un provider, el usuario solo setea su env var.
+PROVIDER_DEFS: tuple = (
+    _ProviderDef(
+        name="groq",
+        base_url="https://api.groq.com/openai/v1/chat/completions",
+        api_key_env="GROQ_API_KEY",
+        models=("llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+                "mixtral-8x7b-32768"),
+        style="openai_compat",
+    ),
+    _ProviderDef(
+        name="cerebras",
+        base_url="https://api.cerebras.ai/v1/chat/completions",
+        api_key_env="CEREBRAS_API_KEY",
+        models=("llama3.1-70b", "llama3.1-8b"),
+        style="openai_compat",
+    ),
+    _ProviderDef(
+        name="gemini",
+        # Gemini construye la URL como base_url/{model}:generateContent
+        base_url="https://generativelanguage.googleapis.com/v1beta/models",
+        api_key_env="GEMINI_API_KEY",
+        models=("gemini-2.0-flash-exp", "gemini-1.5-flash-latest",
+                "gemini-1.5-pro-latest"),
+        style="gemini",
+    ),
+    _ProviderDef(
+        name="openrouter",
+        base_url=OPENROUTER_URL,
+        api_key_env="OPENROUTER_API_KEY",
+        models=tuple(MODEL_CHAIN),
+        style="openai_compat",
+    ),
+)
+
+
+@dataclass
+class _ProviderRuntime:
+    definition: _ProviderDef
+    api_key: str
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Profile settings
+# ─────────────────────────────────────────────────────────────────────
+
 class AIProfile(str, Enum):
     FAST = "fast"      # 25s timeout, 1 model only, raise if it fails
-    PATIENT = "patient"  # full chain, hasta ~3 min cap duro
+    PATIENT = "patient"  # full chain multi-provider, hasta ~3 min cap duro
 
 # `total_budget_seconds` es el techo absoluto del tiempo que la cadena puede
-# bloquear el request — antes podía sumar 90s × 5 modelos × 4 ciclos = 30 min
-# de sleeps si todos los modelos volvían 429 con retry_after grande. La API
-# route tiene maxDuration=280s; superarlo solo desperdicia recursos del server
-# y frustra al usuario con un freeze más largo del que ya iba a romperse.
+# bloquear el request. La API route tiene maxDuration=280s; superarlo solo
+# desperdicia recursos del server y frustra al usuario con un freeze más
+# largo del que ya iba a romperse.
+#
+# `max_models_to_try` ahora es el cap GLOBAL across providers. Con todos los
+# providers configurados podemos tener hasta 13 modelos en la cadena
+# (3 Groq + 2 Cerebras + 3 Gemini + 5 OpenRouter), pero rara vez probamos
+# tantos antes de conseguir respuesta.
 PROFILE_SETTINGS = {
     AIProfile.FAST: {
         "timeout_per_call": 25,
@@ -39,7 +124,7 @@ PROFILE_SETTINGS = {
     },
     AIProfile.PATIENT: {
         "timeout_per_call": 60,
-        "max_models_to_try": len(MODEL_CHAIN),
+        "max_models_to_try": 13,
         "max_cycles": 4,
         "retry_within_model": 1,
         # 200s deja ~80s de margen antes del maxDuration=280s del API route.
@@ -48,38 +133,75 @@ PROFILE_SETTINGS = {
 }
 
 RATE_LIMIT_TOKENS = ("rate limit", "high demand", "limit_rpm",
-                     "429", "limited to", "temporarily rate-limited")
+                     "429", "limited to", "temporarily rate-limited",
+                     "quota exceeded", "resource_exhausted")
 TRANSIENT_TOKENS = ("upstream error", "timed out", "timeout",
                     "service unavailable", "overloaded", "bad gateway")
 
+
+# ─────────────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────────────
+
 @dataclass
 class AIChainResult:
-    model: str
+    model: str                # "{provider}/{model}" cuando hay multi-provider
     content: str
     fallback_steps: List[dict] = field(default_factory=list)
     cache_hit: bool = False
 
+
 class AIChain:
     def __init__(self, api_key: str, profile: AIProfile = AIProfile.FAST):
-        self.api_key = (api_key or "").strip().strip('"').strip("'")
+        # api_key se trata como override de OPENROUTER_API_KEY (back-compat
+        # con el código que existía cuando solo hablábamos con OpenRouter).
+        # Los otros providers leen su env var dedicada.
+        self._openrouter_key = (api_key or "").strip().strip('"').strip("'")
         self.profile = profile
         self.settings = PROFILE_SETTINGS[profile]
+        self._providers: List[_ProviderRuntime] = self._discover_providers()
+
+    def _discover_providers(self) -> List[_ProviderRuntime]:
+        """Enumera providers con key configurada. OpenRouter usa el key del
+        constructor; los demás leen su env var dedicada. Si solo hay
+        OPENROUTER_API_KEY (caso histórico), el resultado es la lista vieja."""
+        out: List[_ProviderRuntime] = []
+        for pdef in PROVIDER_DEFS:
+            if pdef.name == "openrouter":
+                key = self._openrouter_key
+            else:
+                key = (os.environ.get(pdef.api_key_env, "") or "").strip()
+                key = key.strip('"').strip("'")
+            if key:
+                out.append(_ProviderRuntime(definition=pdef, api_key=key))
+        return out
+
+    def _enumerate_attempts(self):
+        """Yield (provider, model) pairs en orden de prioridad, capeado por
+        max_models_to_try (el cap global, no per-provider)."""
+        cap = self.settings["max_models_to_try"]
+        n = 0
+        for provider in self._providers:
+            for model in provider.definition.models:
+                if n >= cap:
+                    return
+                yield provider, model
+                n += 1
 
     def call(self, prompt: str, system_msg: str = "You must output strictly valid JSON.",
              temperature: float = 0.2) -> AIChainResult:
-        if not self.api_key:
+        if not self._providers:
             raise PipelineError(
                 ErrorCode.AI_SATURATED,
-                "Falta OPENROUTER_API_KEY en el entorno.",
+                "No hay ningún proveedor de IA configurado. Setea al menos una de: "
+                "GROQ_API_KEY, CEREBRAS_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY.",
                 user_action="report_bug",
             )
 
         fallback_steps: List[dict] = []
         last_error = "unknown"
-        models_to_try = MODEL_CHAIN[: self.settings["max_models_to_try"]]
 
         # Techo duro: si superamos este budget, abortamos con AI_SATURATED.
-        # Ver comentario en PROFILE_SETTINGS sobre por qué 200s.
         budget = self.settings.get("total_budget_seconds", 200)
         start = time.monotonic()
 
@@ -90,17 +212,20 @@ class AIChain:
             if _budget_left() <= 0:
                 last_error = "budget_exhausted"
                 break
-            for model in models_to_try:
+            for provider, model in self._enumerate_attempts():
                 if _budget_left() <= 0:
                     last_error = "budget_exhausted"
                     break
+                model_id = f"{provider.definition.name}/{model}"
                 try:
-                    content = self._call_one(model, prompt, system_msg, temperature)
-                    return AIChainResult(model=model, content=content,
-                                         fallback_steps=fallback_steps)
+                    content = self._call_provider(
+                        provider, model, prompt, system_msg, temperature)
+                    return AIChainResult(
+                        model=model_id, content=content,
+                        fallback_steps=fallback_steps)
                 except _Retryable as exc:
                     fallback_steps.append({
-                        "from": model, "reason": exc.reason,
+                        "from": model_id, "reason": exc.reason,
                         "message": str(exc)[:200],
                     })
                     last_error = exc.reason
@@ -112,7 +237,7 @@ class AIChain:
                 except _Fatal as exc:
                     raise PipelineError(
                         ErrorCode.AI_RESPONSE_INVALID,
-                        f"El modelo {model} devolvió una respuesta inválida.",
+                        f"El modelo {model_id} devolvió una respuesta inválida.",
                         details=str(exc)[:300],
                         user_action="retry",
                     )
@@ -122,13 +247,12 @@ class AIChain:
                     time.sleep(cycle_nap)
 
         # Build a richer details payload so the user (and our logs) can see
-        # WHICH models tried, WHICH reason dominated (rate-limit vs network
-        # vs invalid response), and WHETHER it's likely a transient saturation
-        # or a real outage.
-        n_models = len(models_to_try)
+        # WHICH providers/models tried, WHICH reason dominated, y si vale la
+        # pena reintentar o ya está fuera de servicio.
+        n_models = sum(1 for _ in self._enumerate_attempts())
         n_attempts = len(fallback_steps)
         n_cycles = self.settings["max_cycles"]
-        # Tally reasons for a quick diagnosis
+        n_providers = len(self._providers)
         reason_counts: dict = {}
         for step in fallback_steps:
             r = step.get("reason", "unknown")
@@ -136,9 +260,11 @@ class AIChain:
         reasons_str = ", ".join(
             f"{r}:{n}" for r, n in sorted(reason_counts.items(), key=lambda kv: -kv[1])
         ) or "unknown"
+        provider_names = ", ".join(p.definition.name for p in self._providers)
         details = (
             f"Último error: {last_error}. "
-            f"Modelos probados: {n_models}, ciclos: {n_cycles}, intentos totales: {n_attempts}. "
+            f"Providers activos: {provider_names} ({n_providers}). "
+            f"Modelos cap: {n_models}, ciclos: {n_cycles}, intentos totales: {n_attempts}. "
             f"Razones: {reasons_str}."
         )
         raise PipelineError(
@@ -149,8 +275,24 @@ class AIChain:
             retry_after_seconds=300,
         )
 
-    def _call_one(self, model: str, prompt: str, system_msg: str,
-                   temperature: float) -> str:
+    # ─────────────────────────────────────────────────────────────────
+    # Provider dispatch
+    # ─────────────────────────────────────────────────────────────────
+
+    def _call_provider(self, provider: _ProviderRuntime, model: str,
+                        prompt: str, system_msg: str, temperature: float) -> str:
+        if provider.definition.style == "openai_compat":
+            return self._call_openai_compat(provider, model, prompt, system_msg,
+                                              temperature)
+        if provider.definition.style == "gemini":
+            return self._call_gemini(provider, model, prompt, system_msg,
+                                       temperature)
+        raise _Fatal(f"unknown provider style: {provider.definition.style}")
+
+    def _call_openai_compat(self, provider: _ProviderRuntime, model: str,
+                              prompt: str, system_msg: str, temperature: float) -> str:
+        """Funciona para Groq, Cerebras, OpenRouter, y cualquier endpoint
+        compatible con OpenAI Chat Completions API."""
         payload = {
             "model": model,
             "messages": [
@@ -160,13 +302,18 @@ class AIChain:
             "temperature": temperature,
         }
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {provider.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": SITE_URL,
-            "X-Title": APP_NAME,
         }
+        # OpenRouter pide attribution headers (no obligatorios pero ayudan
+        # con cuotas + ranking). Otros providers los ignoran.
+        if provider.definition.name == "openrouter":
+            headers["HTTP-Referer"] = SITE_URL
+            headers["X-Title"] = APP_NAME
+
         try:
-            resp = requests.post(OPENROUTER_URL, headers=headers, json=payload,
+            resp = requests.post(provider.definition.base_url, headers=headers,
+                                  json=payload,
                                   timeout=self.settings["timeout_per_call"])
         except requests.Timeout:
             raise _Retryable("timeout", "request timed out")
@@ -184,9 +331,6 @@ class AIChain:
                 raise _Retryable("rate_limited", text[:200])
             if any(t in lower for t in TRANSIENT_TOKENS):
                 raise _Retryable("transient", text[:200])
-            # Any other non-OK HTTP (404 retired model, 401 bad auth, 400 bad request,
-            # 5xx server error not in transient list) → try next model in the chain
-            # rather than aborting. Only malformed JSON in a 200 response is truly fatal.
             raise _Retryable(f"http_{resp.status_code}", text[:200])
 
         try:
@@ -198,6 +342,90 @@ class AIChain:
         except (KeyError, IndexError, ValueError) as e:
             raise _Fatal(f"malformed response: {e}")
 
+    def _call_gemini(self, provider: _ProviderRuntime, model: str,
+                       prompt: str, system_msg: str, temperature: float) -> str:
+        """Gemini API tiene su propio request/response shape distinto a
+        OpenAI Chat Completions. URL: base_url/{model}:generateContent?key=KEY."""
+        url = f"{provider.definition.base_url}/{model}:generateContent"
+        payload = {
+            "contents": [{
+                "role": "user",
+                # Gemini no separa system+user igual que OpenAI; mergeamos.
+                "parts": [{"text": f"{system_msg}\n\n{prompt}"}],
+            }],
+            "generationConfig": {
+                "temperature": temperature,
+                # Forza JSON output — clave para que el plan parseable salga
+                # sin markdown wrapping.
+                "responseMimeType": "application/json",
+            },
+        }
+        headers = {"Content-Type": "application/json"}
+
+        try:
+            resp = requests.post(
+                url, headers=headers, json=payload,
+                params={"key": provider.api_key},
+                timeout=self.settings["timeout_per_call"],
+            )
+        except requests.Timeout:
+            raise _Retryable("timeout", "request timed out")
+        except requests.RequestException as e:
+            raise _Retryable("network_error", str(e))
+
+        text = resp.text or ""
+        lower = text.lower()
+
+        if resp.status_code == 429:
+            retry_after = _parse_retry_after(resp.headers, lower)
+            raise _Retryable("rate_limited", text[:200], retry_after=retry_after)
+        if not resp.ok:
+            if any(t in lower for t in RATE_LIMIT_TOKENS):
+                raise _Retryable("rate_limited", text[:200])
+            if any(t in lower for t in TRANSIENT_TOKENS):
+                raise _Retryable("transient", text[:200])
+            raise _Retryable(f"http_{resp.status_code}", text[:200])
+
+        try:
+            data = resp.json()
+            # Gemini response: candidates[0].content.parts[0].text
+            candidates = data.get("candidates") or []
+            if not candidates:
+                # Algunas safety policies devuelven 200 con candidates vacío.
+                # Tratar como retryable — otro modelo puede tener config menos
+                # restrictiva.
+                pf = data.get("promptFeedback", {})
+                raise _Retryable("safety_block", json.dumps(pf)[:200])
+            content_obj = candidates[0].get("content") or {}
+            parts = content_obj.get("parts") or []
+            if not parts:
+                raise _Fatal("empty parts in candidate")
+            content = parts[0].get("text", "")
+            if not content:
+                raise _Fatal("empty content")
+            return content
+        except (KeyError, IndexError, ValueError) as e:
+            raise _Fatal(f"malformed gemini response: {e}")
+
+    # Back-compat shim: tests viejos parchean `requests.post` y esperan que
+    # `_call_one(model, ...)` use OpenRouter directamente. Lo dejamos como
+    # wrapper sobre el nuevo dispatcher para no romper tests existentes.
+    def _call_one(self, model: str, prompt: str, system_msg: str,
+                   temperature: float) -> str:
+        # Encuentra el runtime de OpenRouter (el constructor lo registra
+        # cuando se pasa api_key).
+        openrouter = next(
+            (p for p in self._providers if p.definition.name == "openrouter"),
+            None)
+        if openrouter is None:
+            raise _Fatal("openrouter not configured (legacy _call_one path)")
+        return self._call_openai_compat(openrouter, model, prompt, system_msg,
+                                          temperature)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────
 
 def _parse_retry_after(headers, body_lower: str) -> int:
     h = headers.get("Retry-After") or headers.get("retry-after")
@@ -217,6 +445,7 @@ class _Retryable(Exception):
         self.reason = reason
         self.retry_after = retry_after
         super().__init__(message)
+
 
 class _Fatal(Exception):
     pass

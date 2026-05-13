@@ -26,7 +26,8 @@ def test_first_model_success(fast_chain):
     })
     with patch("socya_pipeline.ai_chain.requests.post", return_value=happy):
         result = fast_chain.call("prompt")
-    assert result.model == MODEL_CHAIN[0]
+    # Multi-provider: el modelo ahora va prefijado con el provider name.
+    assert result.model == f"openrouter/{MODEL_CHAIN[0]}"
     assert result.content == '{"plan":"ok"}'
     assert result.fallback_steps == []
 
@@ -37,9 +38,9 @@ def test_falls_back_on_429(patient_chain):
                side_effect=[rate_limited, happy]), \
          patch("socya_pipeline.ai_chain.time.sleep"):
         result = patient_chain.call("prompt")
-    assert result.model == MODEL_CHAIN[1]
+    assert result.model == f"openrouter/{MODEL_CHAIN[1]}"
     assert len(result.fallback_steps) == 1
-    assert result.fallback_steps[0]["from"] == MODEL_CHAIN[0]
+    assert result.fallback_steps[0]["from"] == f"openrouter/{MODEL_CHAIN[0]}"
     assert result.fallback_steps[0]["reason"] == "rate_limited"
 
 def test_all_saturated_raises_ai_saturated(fast_chain):
@@ -63,7 +64,7 @@ def test_falls_back_on_404(patient_chain):
                side_effect=[not_found, happy]), \
          patch("socya_pipeline.ai_chain.time.sleep"):
         result = patient_chain.call("prompt")
-    assert result.model == MODEL_CHAIN[1]
+    assert result.model == f"openrouter/{MODEL_CHAIN[1]}"
     assert len(result.fallback_steps) == 1
-    assert result.fallback_steps[0]["from"] == MODEL_CHAIN[0]
+    assert result.fallback_steps[0]["from"] == f"openrouter/{MODEL_CHAIN[0]}"
     assert "404" in result.fallback_steps[0]["reason"] or "http_404" in result.fallback_steps[0]["reason"]

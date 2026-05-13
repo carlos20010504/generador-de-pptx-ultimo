@@ -132,6 +132,16 @@ def _bullet_has_provenance(bullet: str, block, wb: WorkbookData) -> bool:
     # Build a flat searchable string of relevant cells
     haystack_str = ""
     haystack_nums: set = set()
+
+    # Nombres de columnas + sheet — bullets como "El total de 'Monto Solicitado'"
+    # citan nombres del schema, no del dato. Sin esto cualquier bullet que
+    # mencione una columna explícitamente fallaba provenance aunque las cifras
+    # citadas SÍ estuvieran. Incluyo también el sheet name por si la narrativa
+    # cita la hoja.
+    for col_name in cols_set:
+        haystack_str += " " + str(col_name).lower()
+    haystack_str += " " + str(block.provenance.sheet).lower()
+
     for col in sheet.columns:
         if col.name not in cols_set:
             continue
