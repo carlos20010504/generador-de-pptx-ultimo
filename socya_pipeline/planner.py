@@ -9,14 +9,14 @@ from socya_pipeline.inventory import Block
 from socya_pipeline.parser import WorkbookData
 from socya_pipeline import insights
 
-PLANNER_VERSION = "p3"  # bump when prompt template changes — invalidates cache
+PLANNER_VERSION = "p4"  # bump when prompt template changes — invalidates cache
 
 MAX_PAYLOAD_CHARS = 24_000  # rough 6K-token budget (~4 chars/token)
 MAX_SAMPLES_PER_COL = 8
 MAX_FIRST_ROWS = 8
 
 def build_payload(wb: WorkbookData, blocks, user_prompt: str, audience: str,
-                   language: str) -> dict:
+                   language: str, intent=None) -> dict:
     sheets_payload = []
     for s in wb.sheets:
         sheets_payload.append({
@@ -39,8 +39,16 @@ def build_payload(wb: WorkbookData, blocks, user_prompt: str, audience: str,
         except Exception:
             effective_prompt = ""
 
+    user_intent_payload = None
+    if intent is not None:
+        user_intent_payload = {
+            "slide_count": intent.requested_slide_count,
+            "required_sheets": [m.matched for m in intent.required_sheets if m.matched],
+        }
+
     payload = {
         "user_prompt": effective_prompt,
+        "user_intent": user_intent_payload,
         "audience": audience or "ejecutivos",
         "language": language or "es",
         "workbook": {
@@ -89,13 +97,17 @@ PROMPT_TEMPLATE = """Eres un director de arte y analista que diseña presentacio
 
 REGLAS CRÍTICAS:
 
-1. **Volumen**: produce entre 7 y 11 slides. Una portada + 6-10 slides de contenido. NO menos.
+0a. **Cantidad de slides — RESPETO LITERAL**: si `user_intent.slide_count` está presente y NO es null, debes producir EXACTAMENTE ese número de slides totales (incluyendo portada). NO menos, NO más. Si está null, aplica la regla 1 (Volumen).
+
+0b. **Hojas obligatorias — RESPETO LITERAL**: si `user_intent.required_sheets` no está vacío, cada hoja listada debe aparecer como `provenance.sheet` en al menos UNA slide. Si una hoja listada no tiene datos suficientes para construir una slide válida, OMÍTELA y al final del JSON añade `"_skipped_required_sheets": ["nombre"]`. Nunca inventes datos para forzar la cobertura.
+
+1. **Volumen** (solo cuando `user_intent.slide_count` es null): produce entre 7 y 11 slides. Una portada + 6-10 slides de contenido. NO menos.
 
 2. **Procedencia obligatoria**: cada slide DEBE referenciar bloques existentes por su `id` (`block_ref`, `block_refs`, o `supports_block`). NUNCA inventes IDs.
 
 3. **CERO alucinaciones**: ningún número, nombre, fecha, porcentaje en el JSON puede ser inventado. Si va en un `narrative` o `bullets`, debe existir en el bloque referenciado (`samples`, `top_values`, `min/max/mean/sum/value`, o `first_rows`).
 
-4. **Bullets específicos**: cada bullet DEBE contener al menos una cifra concreta o un nombre propio del bloque. PROHIBIDO bullets genéricos como "los datos muestran variabilidad" o "es importante revisar".
+4. **Bullets específicos y abundantes**: cada slide `text_bullets` debe tener **5-7 bullets**, cada uno con al menos una cifra concreta o un nombre propio del bloque. PROHIBIDO bullets genéricos como "los datos muestran variabilidad" o "es importante revisar".
 
 5. **Narrativas tipo analista (NO descriptivas)**: cada `narrative` de un chart debe explicar QUÉ pasa Y POR QUÉ importa. Incluir mínimo 2 datos concretos y al menos uno de estos ángulos:
    - **Concentración** ("top 3 destinos = 78% del total → riesgo de dependencia"),
@@ -108,7 +120,7 @@ REGLAS CRÍTICAS:
    - 1 slide `kpi_row` con 2-4 KPIs principales. PREFIERE: (a) bloques con `quality_flags: ["derived"]` (% derivados como "% Aprobación") por encima de todo, (b) currency totales SIN flag `subsumed_by_total`, (c) NUNCA elijas KPIs marcados `subsumed_by_total` salvo que no haya alternativa — esos son sub-totales redundantes.
    - 2-4 slides `chart` con distintos cortes (mezcla `bar`, `pie`, `line` según los `kind` disponibles)
    - 1-2 slides `table` con cortes detallados (T*) — usa `columns_subset` con solo 4-6 columnas relevantes (NO IDs, NO observaciones largas)
-   - 1-2 slides `text_bullets` con hallazgos accionables (bullets con cifras; cada bullet debe incluir un dato concreto del bloque referenciado)
+   - 1-2 slides `text_bullets` con hallazgos accionables (5-7 bullets con cifras; cada bullet debe incluir un dato concreto del bloque referenciado)
 
 7. **Variedad visual**: si tienes ≥2 distribuciones categóricas, usa una `bar` y una `pie`. Si hay serie temporal `S*`, dale un `line`.
 
@@ -135,7 +147,10 @@ REGLAS CRÍTICAS:
        "bullets": [
          "El monto máximo individual asciende a $1.000.000 en ANTIOQUIA - EL BAGRE.",
          "Existen 192 comisiones en estado RECHAZADO que requieren revisión.",
-         "La concentración geográfica se ubica en MEDELLÍN con el mayor número de registros."
+         "La concentración geográfica se ubica en MEDELLÍN con el mayor número de registros.",
+         "El total acumulado de montos solicitados suma $250.2M.",
+         "Bogotá representa el 53% del volumen, evidenciando concentración geográfica.",
+         "El monto promedio por solicitud es $2.5M, con 192 outliers sobre 2x ese valor."
        ] }}
   ],
   "prompt_suggestions": [
@@ -328,14 +343,22 @@ def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
                        language: str, api_key: str,
                        profile: AIProfile = AIProfile.PATIENT,
                        cache_dir: Optional[Path] = None,
-                       file_path: Optional[Path] = None) -> dict:
+                       file_path: Optional[Path] = None,
+                       intent=None) -> dict:
     cache_key = None
     cache: Optional[PlanCache] = None
     if file_path is not None:
         try:
             file_bytes = Path(file_path).read_bytes()
-            cache_key = compute_cache_key(file_bytes, user_prompt, audience,
-                                            language, PLANNER_VERSION)
+            intent_signature = ""
+            if intent is not None:
+                req_sheets = ",".join(sorted(
+                    m.matched for m in intent.required_sheets if m.matched
+                ))
+                intent_signature = (f"|sc={intent.requested_slide_count}"
+                                     f"|rs={req_sheets}")
+            cache_key = compute_cache_key(file_bytes, user_prompt + intent_signature,
+                                            audience, language, PLANNER_VERSION)
             cache = PlanCache(cache_dir=cache_dir)
             cached = cache.get(cache_key)
             if cached:
@@ -345,7 +368,8 @@ def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
         except OSError:
             pass
 
-    payload = build_payload(wb, blocks, user_prompt, audience, language)
+    payload = build_payload(wb, blocks, user_prompt, audience, language,
+                              intent=intent)
     payload_json = json.dumps(payload, ensure_ascii=False, default=str)
     prompt = PROMPT_TEMPLATE.format(payload_json=payload_json)
 
@@ -380,6 +404,8 @@ def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
             plan["_meta"]["fallback_reason"] = (
                 e.code.value if hasattr(e.code, "value") else str(e.code)
             )
+            if intent is not None:
+                plan = _enforce_intent(plan, intent, blocks, wb)
             return plan
         raise
 
@@ -389,6 +415,9 @@ def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
         "fallback_steps": result.fallback_steps,
         "planner_version": PLANNER_VERSION,
     }
+
+    if intent is not None:
+        parsed = _enforce_intent(parsed, intent, blocks, wb)
 
     if cache and cache_key:
         cache.set(cache_key, parsed)
