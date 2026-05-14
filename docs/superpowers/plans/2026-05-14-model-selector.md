@@ -582,3 +582,39 @@ Cambiar a `"preferredModel":"groq/llama-3.3-70b-versatile"`. Verificar `ai_statu
 git add docs/superpowers/plans/2026-05-14-model-selector.md
 git commit -m "test: e2e verification of model selector — Cerebras gpt-oss-120b primary"
 ```
+
+
+---
+
+## Findings — Task 5 E2E (2026-05-14)
+
+### Test 1: preferred_model honored
+- Prompt: `{"preferredModel":"groq/llama-3.3-70b-versatile"}`
+- Result: groq/llama-3.3-70b-versatile fue PROBADO PRIMERO ✓
+- Falló por http_413 (TPM limit del Excel comisiones >12000 tok/min)
+- Cayó al chain → openrouter/openai/gpt-oss-120b:free respondió OK
+- Plan generado correctamente (165/165 tests + 9 slides exactas + count_honored=true)
+
+### Test 2: preferred_model invalid → graceful skip
+- Prompt: `{"preferredModel":"foo/bar"}`
+- Result: ignorado silenciosamente, no crash
+- Cae al chain default (FAST profile cap=1 → solo default model)
+- Si el default falla → deterministic_fallback (que produce 7 slides decentes)
+
+### Test 3: Cerebras gpt-oss-120b ⚠ requiere CEREBRAS_API_KEY
+- El user shared key paga en chat pero NO la añadió a `.env`
+- El chain saltó cerebras provider entirely (no key → no provider configurado)
+- Para activar Cerebras gpt-oss-120b primario, añadir a `.env`:
+  ```
+  CEREBRAS_API_KEY=csk-...
+  ```
+- Restart `npm run dev` después de añadir.
+
+### Estado final
+- 165/165 pytest verde
+- tsc clean
+- 5 commits del plan + 1 commit findings
+- preferred_model funciona end-to-end
+- UI selector renders + persiste en localStorage
+- Pendiente del user: rotar key vieja + añadir nueva a .env
+
