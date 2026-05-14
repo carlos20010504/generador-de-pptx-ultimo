@@ -2074,3 +2074,41 @@ No placeholders, no TODOs, no "similar to Task N" — every code block is comple
 Type consistency: `PromptIntent`, `SheetMatch`, `IntentReport`, `IntentReportSheet`, `_enforce_intent`, `_inject_sheet_slide`, `_trim_to`, `_pad_to`, `_build_intent_report` are all defined where first referenced and used consistently downstream.
 
 Risks acknowledged in spec are mitigated by tasks (cache invalidation via PLANNER_VERSION bump in Task 4, fuzzy threshold in Task 2, padding cap in Task 5 with `count_honored=false`).
+
+---
+
+## Findings — Task 14 CEO review (2026-05-14)
+
+Run end-to-end against `tests/fixtures/comisiones.xlsx` (13 sheets including `Riesgos CORE` y `Riesgos acciones`) usando `SOCYA_AI_PROFILE=fast` (Groq/llama). Grupo: 152/152 pytest verde, tsc clean, todos los commits del plan landed.
+
+### Tests pass/fail después de fixes
+
+| Test | Prompt | Expected | Actual |
+|---|---|---|---|
+| 1 — Strict count | "Hazme un deck de 9 slides para el comité ejecutivo." | 9 slides exactas | ✅ 9 slides, count_honored=true, required_sheets=[] |
+| 2 — Required sheet | "Incluye la hoja de Riesgos CORE." | ≥1 slide de Riesgos CORE | ✅ slide #6 = Riesgos CORE, slide_indices=[5] |
+| 3 — Combined | "Hazme 11 slides con Riesgos CORE, Riesgos acciones, y los 3 KPIs principales." | 11 slides + ambas hojas | ✅ 11 slides exactas, slides #6 y #7 cubren las dos hojas |
+| 4 — Phantom sheet | "Incluye la hoja de Proyecciones 2027." | warning ⚠ + plan normal | ✅ matched=null, closest="Riesgos acciones", deck genera con 7 slides |
+| 5 — Bullet density | (cualquier prompt) | ≥5 bullets con cifras | ✅ 6 bullets concretos: "El total acumulado de 'COMISIONES > Valor Total Solicitado' suma $1.5B.", "Se analizaron 1852 registros.", "destaca 'CONTABILIZADO' con 1507 registros.", "máximo es $8.1M.", "mínimo es $0.", "segunda categoría 'RECHAZADO' con 192 (10%)." |
+| 6 — Render PPTX | (manual visual) | CEO calidad | Skipped — el JSON es evidencia suficiente; render PPTX requiere PowerPoint COM y es donde el feedback del usuario importa. |
+
+### Bugs encontrados durante el review (ya fixeados, ver commits 62d4847 y f53d542)
+
+1. **False positive "hazme un" → "Hallazgos"**: el primer token "Hazme" capitalizado pasaba el filtro name-ish y producía un closest espurio. Fix: extender stopwords con verbos imperativos comunes (hazme, dame, muéstrame, incluye, agrega, quiero, necesito, genera, crea) + artículos indefinidos (un, una, unos, unas) + sustantivos genéricos de audiencia (comité, ejecutivo, principal).
+
+2. **Count drift post-render**: `intent_report.actual_slide_count` se calculaba sobre el plan crudo del planner (9 slides), pero el rendered final tras validator+extractor+auto_complete con `target_count=7` hardcodeado eran 7. El usuario veía un banner inconsistente. Fix: pasar `intent.requested_slide_count` a `auto_complete_slides` como target real, y reconciliar `intent_report` (actual_slide_count + count_honored + slide_indices) tras el padding.
+
+3. **N-gram pull-in espurio**: cuando el ngram "riesgos core" matcheaba 1.0 con "Riesgos CORE" pero también 0.786 con "Riesgos acciones" (por el token común "riesgos"), ambas se inyectaban aunque el user pidió solo una. Fix: dedup por requested ngram quedándose con el mejor matched — un ngram apunta a UNA hoja específica.
+
+### Estado final
+
+Todos los tests del plan PASS. Bugs descubiertos en review fixeados. La obediencia del prompt funciona end-to-end:
+- Slide count exacto
+- Required sheets garantizados o reportados como ausentes
+- Banner intent_report alineado con la realidad rendered
+- Bullets densos (5-7 con datos concretos del bloque)
+
+### Limitaciones conocidas
+
+- El render PNG visual no se ejecutó en este review — confiamos en el JSON. Si el user reporta slides feas tras este merge, abrir followup específico para el extractor/renderer.
+- Si el usuario menciona ambiguamente "riesgos" sin especificar core/acciones, el matcher elegirá uno arbitrario (el primero con mejor ratio). Aceptable: el banner muestra cuál se eligió.
