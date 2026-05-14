@@ -65,6 +65,7 @@ def cmd_plan(args):
             profile=profile,
             file_path=Path(args.input),
             intent=intent,
+            preferred_model=request.get("preferredModel"),
         )
         outcome = validate_plan(plan, inv, wb)
         if not outcome.slides:
@@ -165,6 +166,7 @@ def cmd_generate(args):
             profile=profile,
             file_path=Path(args.input),
             intent=intent,
+            preferred_model=request.get("preferredModel"),
         )
         # Optional second-pass critique (refiner). Off por default; opt-in
         # via env SOCYA_AI_REFINE=1. Best-effort — fallos no rompen la

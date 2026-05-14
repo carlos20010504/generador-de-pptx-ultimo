@@ -9,7 +9,7 @@ from socya_pipeline.inventory import Block
 from socya_pipeline.parser import WorkbookData
 from socya_pipeline import insights
 
-PLANNER_VERSION = "p4"  # bump when prompt template changes — invalidates cache
+PLANNER_VERSION = "p5"  # bump when prompt template changes — invalidates cache
 
 MAX_PAYLOAD_CHARS = 24_000  # rough 6K-token budget (~4 chars/token)
 MAX_SAMPLES_PER_COL = 8
@@ -654,7 +654,8 @@ def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
                        profile: AIProfile = AIProfile.PATIENT,
                        cache_dir: Optional[Path] = None,
                        file_path: Optional[Path] = None,
-                       intent=None) -> dict:
+                       intent=None,
+                       preferred_model: Optional[str] = None) -> dict:
     cache_key = None
     cache: Optional[PlanCache] = None
     if file_path is not None:
@@ -666,7 +667,8 @@ def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
                     m.matched for m in intent.required_sheets if m.matched
                 ))
                 intent_signature = (f"|sc={intent.requested_slide_count}"
-                                     f"|rs={req_sheets}")
+                                     f"|rs={req_sheets}"
+                                     f"|pm={preferred_model or ''}")
             cache_key = compute_cache_key(file_bytes, user_prompt + intent_signature,
                                             audience, language, PLANNER_VERSION)
             cache = PlanCache(cache_dir=cache_dir)
@@ -687,7 +689,8 @@ def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
     # devolvemos un plan derivado del inventory en vez de un error que deja
     # al usuario bloqueado. NO cacheamos el fallback — queremos reintentar
     # AI en el próximo request por si vuelve a estar disponible.
-    chain = AIChain(api_key=api_key, profile=profile)
+    chain = AIChain(api_key=api_key, profile=profile,
+                     preferred_model=preferred_model)
     try:
         result = chain.call(prompt)
         parsed = insights.parse_loose_json(result.content)
