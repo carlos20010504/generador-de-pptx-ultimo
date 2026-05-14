@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Sparkles, Lightbulb, LayoutDashboard, Table2, BarChart2,
-  FileText, Loader2, Send, ChevronRight, RefreshCw, Wand2, Check, Brain, TrendingUp,
+  FileText, Loader2, ChevronRight, RefreshCw, Wand2, Brain, TrendingUp,
 } from 'lucide-react';
 import { aiStatusBadge, AIStatus } from '@/utils/ai-status';
 
@@ -55,7 +55,6 @@ interface IntelligenceResponse {
   suggestions?: string[];
   keyFindings?: string[];
   trends?: string[];
-  promptHints?: string[];
   healthSignals?: string[];
   semanticSummary?: {
     topic?: string;
@@ -102,12 +101,10 @@ export default function AIControlPanel({
   originalFileName = null,
 }: AIControlPanelProps) {
   const defaultTheme = THEME_OPTIONS[0];
-  const [prompt, setPrompt] = useState('');
   const [focus, setFocus] = useState<'tables' | 'charts' | 'text' | 'mixed'>('mixed');
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [findings, setFindings] = useState<string[]>([]);
   const [trends, setTrends] = useState<string[]>([]);
-  const [promptHints, setPromptHints] = useState<string[]>([]);
   const [recommendedSlides, setRecommendedSlides] = useState<RecommendedSlide[]>([]);
   const [executiveSummary, setExecutiveSummary] = useState('');
   const [semanticSummary, setSemanticSummary] = useState<IntelligenceResponse['semanticSummary'] | null>(null);
@@ -115,10 +112,8 @@ export default function AIControlPanel({
   const [healthSignals, setHealthSignals] = useState<string[]>([]);
   const [processingMessage, setProcessingMessage] = useState('');
   const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
-  const [promptSent, setPromptSent] = useState(false);
   const [lastFile, setLastFile] = useState<File | null>(null);
   const [aiStatus, setAiStatus] = useState<AIStatus | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     onContextChange({
@@ -134,7 +129,6 @@ export default function AIControlPanel({
       setSuggestions([]);
       setFindings([]);
       setTrends([]);
-      setPromptHints([]);
       setRecommendedSlides([]);
       setExecutiveSummary('');
       setSemanticSummary(null);
@@ -156,9 +150,6 @@ export default function AIControlPanel({
     try {
       const formData = new FormData();
       formData.append('file', f);
-      if (prompt.trim()) {
-        formData.append('userPrompt', prompt.trim());
-      }
       formData.append('audience', 'ejecutivos');
       formData.append('language', 'Español');
       formData.append('theme', JSON.stringify(defaultTheme));
@@ -186,7 +177,6 @@ export default function AIControlPanel({
       setAiStatus(data.ai_status ?? null);
       setFindings(Array.isArray(data.keyFindings) ? data.keyFindings.slice(0, 4) : []);
       setTrends(Array.isArray(data.trends) ? data.trends.slice(0, 3) : []);
-      setPromptHints(Array.isArray(data.promptHints) ? data.promptHints.slice(0, 3) : []);
       setRecommendedSlides(Array.isArray(data.powerPointPlan?.recommendedSlides) ? data.powerPointPlan!.recommendedSlides!.slice(0, 3) : []);
       setExecutiveSummary(String(data.executiveSummary || '').trim());
       setSemanticSummary(data.semanticSummary && typeof data.semanticSummary === 'object' ? data.semanticSummary : null);
@@ -206,7 +196,6 @@ export default function AIControlPanel({
       setAiStatus(null);
       setFindings([]);
       setTrends([]);
-      setPromptHints([]);
       setRecommendedSlides([]);
       setExecutiveSummary('');
       setSemanticSummary(null);
@@ -228,33 +217,13 @@ export default function AIControlPanel({
       text: 'Prioriza el análisis textual y las conclusiones ejecutivas.',
       mixed: '',
     };
-    if (!prompt && map[val]) {
-      const newP = map[val];
-      setPrompt(newP);
-      onPromptChange(newP);
+    if (map[val]) {
+      onPromptChange(map[val]);
     }
-  };
-
-  const handlePromptInput = (val: string) => {
-    setPrompt(val);
-    setPromptSent(false);
-    onPromptChange(val);
-  };
-
-  const handleSend = () => {
-    onPromptChange(prompt);
-    if (file) {
-      void loadSuggestions(file);
-    }
-    setPromptSent(true);
-    setTimeout(() => setPromptSent(false), 2500);
   };
 
   const applySuggestion = (s: string) => {
-    setPrompt(s);
-    setPromptSent(false);
     onPromptChange(s);
-    textareaRef.current?.focus();
   };
 
   const applyRecommendedSlide = (slide: RecommendedSlide) => {
@@ -264,12 +233,6 @@ export default function AIControlPanel({
       'Usa datos reales del Excel y conviértelo en una parte importante de la presentación.',
     ].filter(Boolean).join(' ');
     applySuggestion(promptText);
-  };
-
-  const clearPrompt = () => {
-    setPrompt('');
-    onPromptChange('');
-    setPromptSent(false);
   };
 
   const hasFile = Boolean(file);
@@ -419,104 +382,6 @@ export default function AIControlPanel({
               </button>
             );
           })}
-        </div>
-      </div>
-
-      {/* Prompt Input */}
-      <div style={{
-        background: '#FAFAFA',
-        border: '1px solid rgba(26,26,26,0.08)',
-        borderRadius: '14px',
-        padding: '0.8rem',
-      }}>
-        <p style={{
-          color: '#4D4F53',
-          fontSize: '0.62rem',
-          fontWeight: 700,
-          textTransform: 'uppercase',
-          letterSpacing: '0.06em',
-          margin: '0 0 0.5rem',
-        }}>
-          Tus instrucciones para la IA
-        </p>
-        <div style={{ position: 'relative' }}>
-          <textarea
-            ref={textareaRef}
-            value={prompt}
-            onChange={(e) => handlePromptInput(e.target.value)}
-            placeholder={hasFile
-              ? 'Ej: Resalta los costos más altos y genera un gráfico de barras por mes...'
-              : 'Sube un Excel para escribir instrucciones...'}
-            disabled={!hasFile}
-            style={{
-              width: '100%',
-              minHeight: '90px',
-              background: 'rgba(0,0,0,0.25)',
-              border: '1px solid rgba(26,26,26,0.15)',
-              borderRadius: '10px',
-              padding: '0.65rem 0.7rem 2.2rem',
-              color: hasFile ? '#1A1A1A' : 'rgba(26,26,26,0.30)',
-              fontSize: '0.75rem',
-              fontFamily: 'inherit',
-              resize: 'none',
-              outline: 'none',
-              transition: 'border-color 0.2s',
-              boxSizing: 'border-box',
-              cursor: hasFile ? 'text' : 'not-allowed',
-            }}
-            onFocus={(e) => { e.currentTarget.style.borderColor = 'rgba(8,112,98,0.40)'; }}
-            onBlur={(e) => { e.currentTarget.style.borderColor = 'rgba(26,26,26,0.15)'; }}
-          />
-          {/* Send / Clear buttons row */}
-          <div style={{
-            position: 'absolute',
-            bottom: '0.5rem',
-            right: '0.5rem',
-            display: 'flex',
-            gap: '0.3rem',
-            alignItems: 'center',
-          }}>
-            {prompt && (
-              <button
-                onClick={clearPrompt}
-                title="Borrar"
-                style={{
-                  background: '#EEF7E6',
-                  border: '1px solid rgba(26,26,26,0.10)',
-                  borderRadius: '6px',
-                  padding: '0.25rem 0.4rem',
-                  color: 'rgba(26,26,26,0.45)',
-                  fontSize: '0.58rem',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                }}
-              >
-                Borrar
-              </button>
-            )}
-            <button
-              onClick={handleSend}
-              disabled={!hasFile || !prompt.trim()}
-              title="Confirmar instrucciones"
-              style={{
-                background: promptSent ? 'rgba(105,190,40,0.22)' : 'rgba(8,112,98,0.22)',
-                border: `1px solid ${promptSent ? 'rgba(105,190,40,0.40)' : 'rgba(8,112,98,0.40)'}`,
-                borderRadius: '6px',
-                padding: '0.25rem 0.38rem',
-                color: promptSent ? '#69BE28' : '#087062',
-                cursor: (!hasFile || !prompt.trim()) ? 'not-allowed' : 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.25rem',
-                fontSize: '0.6rem',
-                fontWeight: 700,
-                transition: 'all 0.2s',
-                opacity: (!hasFile || !prompt.trim()) ? 0.4 : 1,
-              }}
-            >
-              {promptSent ? <><Check size={11} /> Listo</> : <><Send size={11} /> Aplicar</>}
-            </button>
-          </div>
         </div>
       </div>
 
@@ -795,33 +660,6 @@ export default function AIControlPanel({
         </div>
       )}
 
-      {/* Ayuda de prompts */}
-      {hasFile && !isLoadingSuggestions && promptHints.length > 0 && (
-        <div style={{
-          background: '#FAFAFA',
-          border: '1px solid rgba(26,26,26,0.08)',
-          borderRadius: '14px',
-          padding: '0.8rem',
-        }}>
-          <p style={{
-            color: '#4D4F53',
-            fontSize: '0.62rem',
-            fontWeight: 700,
-            textTransform: 'uppercase',
-            letterSpacing: '0.06em',
-            margin: '0 0 0.5rem',
-          }}>
-            Guía para tu prompt
-          </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.32rem' }}>
-            {promptHints.map((hint, idx) => (
-              <div key={`prompt-hint-${idx}`} style={{ color: 'rgba(26,26,26,0.55)', fontSize: '0.65rem', lineHeight: 1.38 }}>
-                • {hint}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
