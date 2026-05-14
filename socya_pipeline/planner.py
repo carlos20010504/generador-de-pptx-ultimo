@@ -179,67 +179,159 @@ def _format_money(v) -> str:
     return f"${n:,.0f}"
 
 
-def _build_fallback_bullets(wb: WorkbookData, table_block) -> list:
-    """Construye 5-6 bullets que pasan el validator de provenance. Citan
-    stats de columnas DEL TABLE_BLOCK directamente."""
-    sheet = next((s for s in wb.sheets if s.name == table_block.provenance.sheet),
-                  None)
+def _build_insight_bullets(wb: WorkbookData, table_block,
+                            max_candidates: int = 8) -> list:
+    """Generates up to `max_candidates` insight bullets from the block's
+    sheet stats. Returns a list of (angle, bullet_text) tuples so callers
+    can pick a diverse mix.
+
+    Each generator is best-effort and degrades to no-op if the block lacks
+    the required signal (no money column, no categorical column, etc).
+
+    Bullets are designed to pass validator._bullet_has_provenance:
+    - All cited numbers come from col.sum/mean/min/max/value or top_values
+    - All cited names come from col.top_values labels or column names
+    """
+    sheet = next((s for s in wb.sheets
+                  if s.name == table_block.provenance.sheet), None)
     if not sheet:
         return []
     cols_set = set(table_block.provenance.columns)
     relevant = [c for c in sheet.columns if c.name in cols_set]
-    bullets: list = []
 
+    out: list = []
     money_cols = [c for c in relevant
                   if c.dtype in ("currency", "numeric") and c.sum is not None]
     money_cols.sort(key=lambda c: abs(c.sum or 0), reverse=True)
-    if money_cols:
-        top = money_cols[0]
-        bullets.append(
-            f"El total acumulado de '{top.name}' suma {_format_money(top.sum)}.")
-
-    n_rows = sheet.shape[0] if sheet.shape else 0
-    if n_rows:
-        bullets.append(f"Se analizaron {n_rows} registros en la tabla.")
-
     cat_cols = [c for c in relevant
                 if c.dtype == "categorical" and (c.top_values or [])]
-    if cat_cols:
-        c = cat_cols[0]
-        top_label, top_count = c.top_values[0][0], c.top_values[0][1]
-        try:
-            top_count_int = int(top_count)
-        except (TypeError, ValueError):
-            top_count_int = top_count
-        bullets.append(
-            f"En '{c.name}' destaca '{top_label}' con {top_count_int} registros.")
 
-    if money_cols and money_cols[0].max is not None:
-        top = money_cols[0]
-        bullets.append(
-            f"El valor máximo registrado en '{top.name}' es {_format_money(top.max)}.")
+    # Generators (each appends 0 or 1 bullet to `out`)
+    _gen_total(out, money_cols)
+    _gen_count(out, sheet)
+    _gen_top_cat(out, cat_cols)
+    _gen_max(out, money_cols)
+    _gen_min(out, money_cols)
+    _gen_second_cat(out, cat_cols)
+    _gen_pareto(out, cat_cols)
+    _gen_outlier(out, cat_cols)
 
-    if money_cols and money_cols[0].min is not None:
-        top = money_cols[0]
-        bullets.append(
-            f"El valor mínimo en '{top.name}' es {_format_money(top.min)}.")
+    return out[:max_candidates]
 
-    if cat_cols and len(cat_cols[0].top_values or []) >= 2:
-        c = cat_cols[0]
-        total_in_top = sum(int(v) for _, v in (c.top_values or [])
-                            if isinstance(v, (int, float)))
-        if total_in_top > 0:
-            second_label, second_count = c.top_values[1][0], c.top_values[1][1]
-            try:
-                second_count_int = int(second_count)
-                pct = (second_count_int / total_in_top) * 100
-                bullets.append(
-                    f"La segunda categoría más frecuente en '{c.name}' es "
-                    f"'{second_label}' con {second_count_int} ({pct:.0f}%).")
-            except (TypeError, ValueError, ZeroDivisionError):
-                pass
 
-    return bullets[:6]
+def _gen_total(out: list, money_cols: list) -> None:
+    if not money_cols:
+        return
+    top = money_cols[0]
+    out.append(("total",
+        f"El total acumulado de '{top.name}' suma {_format_money(top.sum)}."))
+
+
+def _gen_count(out: list, sheet) -> None:
+    n = sheet.shape[0] if sheet.shape else 0
+    if n:
+        out.append(("count", f"Se analizaron {n} registros en la tabla."))
+
+
+def _gen_top_cat(out: list, cat_cols: list) -> None:
+    if not cat_cols:
+        return
+    c = cat_cols[0]
+    label, count = c.top_values[0][0], c.top_values[0][1]
+    try:
+        ci = int(count)
+    except (TypeError, ValueError):
+        ci = count
+    out.append(("top_cat",
+        f"En '{c.name}' destaca '{label}' con {ci} registros."))
+
+
+def _gen_max(out: list, money_cols: list) -> None:
+    if not money_cols or money_cols[0].max is None:
+        return
+    top = money_cols[0]
+    out.append(("max",
+        f"El valor máximo registrado en '{top.name}' es {_format_money(top.max)}."))
+
+
+def _gen_min(out: list, money_cols: list) -> None:
+    if not money_cols or money_cols[0].min is None:
+        return
+    top = money_cols[0]
+    out.append(("min",
+        f"El valor mínimo en '{top.name}' es {_format_money(top.min)}."))
+
+
+def _gen_second_cat(out: list, cat_cols: list) -> None:
+    if not cat_cols or len(cat_cols[0].top_values or []) < 2:
+        return
+    c = cat_cols[0]
+    total = sum(int(v) for _, v in (c.top_values or [])
+                if isinstance(v, (int, float)))
+    if total <= 0:
+        return
+    label, count = c.top_values[1][0], c.top_values[1][1]
+    try:
+        ci = int(count)
+        pct = (ci / total) * 100
+        out.append(("second_cat",
+            f"La segunda categoría más frecuente en '{c.name}' es "
+            f"'{label}' con {ci} ({pct:.0f}%)."))
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+
+
+def _gen_pareto(out: list, cat_cols: list) -> None:
+    """Pareto top-3: si los 3 más frecuentes concentran ≥60% del total,
+    bullet de concentración."""
+    if not cat_cols or len(cat_cols[0].top_values or []) < 3:
+        return
+    c = cat_cols[0]
+    counts = [int(v) for _, v in (c.top_values or [])
+              if isinstance(v, (int, float))]
+    if not counts or sum(counts) <= 0:
+        return
+    try:
+        share = insights.pareto_share(counts, top_n=3)
+    except Exception:
+        return
+    if share is None or share < 0.6:
+        return
+    top3_labels = [t[0] for t in c.top_values[:3]]
+    out.append(("pareto",
+        f"El top 3 de '{c.name}' ({', '.join(str(l) for l in top3_labels)}) "
+        f"concentra el {share*100:.0f}% del total — riesgo de dependencia."))
+
+
+def _gen_outlier(out: list, cat_cols: list) -> None:
+    """Outlier alto vía IQR sobre los counts de la columna categórica."""
+    if not cat_cols or len(cat_cols[0].top_values or []) < 4:
+        return
+    c = cat_cols[0]
+    counts = [int(v) for _, v in (c.top_values or [])
+              if isinstance(v, (int, float))]
+    if len(counts) < 4:
+        return
+    try:
+        outliers = insights.iqr_outliers(counts, k=1.5)
+    except Exception:
+        return
+    high = [(i, v) for i, v, side in outliers if side == "high"]
+    if not high:
+        return
+    # Pick the highest outlier
+    high.sort(key=lambda t: -t[1])
+    idx, val = high[0]
+    if idx >= len(c.top_values):
+        return
+    label = c.top_values[idx][0]
+    median = sorted(counts)[len(counts) // 2]
+    if median <= 0:
+        return
+    ratio = val / median
+    out.append(("outlier_high",
+        f"'{label}' destaca con {val} registros — {ratio:.1f}x la mediana, "
+        f"un caso atípico marcado en '{c.name}'."))
 
 
 def _deterministic_plan_fallback(wb: WorkbookData, blocks,
@@ -248,7 +340,7 @@ def _deterministic_plan_fallback(wb: WorkbookData, blocks,
     devuelve garbage. Antes esto causaba AI_SATURATED que bloqueaba al
     usuario; ahora genera un deck simple pero completamente funcional.
 
-    Incluye bullets construidos con _build_fallback_bullets() que citan
+    Incluye bullets construidos con _build_insight_bullets() que citan
     stats de block.extra (sum/min/max/value/top_values) — eso garantiza
     que pasen el validator de provenance sin caer."""
     kpi_blocks = [b for b in blocks if b.kind == "kpi_candidate"][:4]
@@ -317,7 +409,9 @@ def _deterministic_plan_fallback(wb: WorkbookData, blocks,
         # los dropea por provenance y la slide queda vacía → el extractor a su
         # vez la dropea por bullets_empty. Solo añadimos la slide si tenemos
         # bullets que el validator probablemente acepta.
-        bullets = _build_fallback_bullets(wb, b)
+        # _build_insight_bullets now returns (angle, text) tuples — extraer texto
+        candidates = _build_insight_bullets(wb, b, max_candidates=8)
+        bullets = [text for (_, text) in candidates[:6]]
         if bullets:
             slides.append({
                 "type": "text_bullets",
