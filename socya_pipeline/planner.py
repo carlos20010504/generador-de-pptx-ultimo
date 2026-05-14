@@ -339,6 +339,214 @@ def _deterministic_plan_fallback(wb: WorkbookData, blocks,
     }
 
 
+def _enforce_intent(plan: dict, intent, blocks, wb) -> dict:
+    """Garantiza que `plan` honre `intent`. Idempotente.
+
+    1. Inyecta required_sheets faltantes (puede crecer el deck).
+    2. Recorta o expande para llegar a `requested_slide_count`.
+    3. Anota _intent_report con lo que se honró y lo que no.
+    """
+    slides = list(plan.get("slides") or [])
+    blocks_by_id = {b.id: b for b in blocks}
+
+    used_sheets = {s.get("provenance", {}).get("sheet")
+                   for s in slides if isinstance(s.get("provenance"), dict)}
+    skipped_sheets: list = []
+    for match in intent.required_sheets:
+        if match.matched is None:
+            continue
+        if match.matched in used_sheets:
+            continue
+        injected = _inject_sheet_slide(match.matched, blocks, wb, blocks_by_id)
+        if injected is not None:
+            slides.append(injected)
+            used_sheets.add(match.matched)
+        else:
+            skipped_sheets.append(match.matched)
+
+    target = intent.requested_slide_count
+    count_honored = True
+    if target is not None:
+        if len(slides) > target:
+            slides = _trim_to(slides, target, intent)
+        elif len(slides) < target:
+            padded = _pad_to(slides, target, blocks, wb, blocks_by_id)
+            slides = padded
+            if len(slides) < target:
+                count_honored = False
+
+    plan["slides"] = slides
+    plan["_intent_report"] = _build_intent_report(intent, slides,
+                                                     skipped_sheets,
+                                                     count_honored)
+    return plan
+
+
+def _inject_sheet_slide(sheet_name: str, blocks, wb, blocks_by_id) -> Optional[dict]:
+    """Construye una slide a partir de la primera hoja `sheet_name`.
+
+    Preferencia: chart > table > kpi_row. Devuelve None si no hay material.
+    """
+    sheet_blocks = [b for b in blocks if b.provenance.sheet == sheet_name]
+    if not sheet_blocks:
+        return None
+
+    cat = next((b for b in sheet_blocks
+                if b.kind == "categorical_distribution"
+                and "single_dominant_category" not in b.quality_flags),
+                None)
+    if cat:
+        col = cat.provenance.columns[0] if cat.provenance.columns else "categorías"
+        return {
+            "type": "chart",
+            "chart_type": "bar",
+            "title": f"{sheet_name} — Distribución por {col}",
+            "block_ref": cat.id,
+            "narrative": "",
+            "provenance": {"sheet": sheet_name,
+                            "columns": list(cat.provenance.columns)},
+            "_injected_by": "intent_enforcement",
+        }
+
+    table = next((b for b in sheet_blocks
+                  if b.kind == "table"
+                  and "low_fill_ratio" not in b.quality_flags
+                  and "too_few_rows" not in b.quality_flags),
+                  None)
+    if table:
+        return {
+            "type": "table",
+            "title": f"Detalle: {sheet_name}",
+            "block_ref": table.id,
+            "max_rows": 10,
+            "provenance": {"sheet": sheet_name,
+                            "columns": list(table.provenance.columns)},
+            "_injected_by": "intent_enforcement",
+        }
+
+    kpis = [b for b in sheet_blocks if b.kind == "kpi_candidate"][:3]
+    if kpis:
+        return {
+            "type": "kpi_row",
+            "title": f"Indicadores — {sheet_name}",
+            "block_refs": [b.id for b in kpis],
+            "provenance": {"sheet": sheet_name,
+                            "columns": [c for k in kpis for c in k.provenance.columns]},
+            "_injected_by": "intent_enforcement",
+        }
+
+    return None
+
+
+def _trim_to(slides: list, target: int, intent) -> list:
+    """Recorta `slides` a `target` preservando: title, slides inyectadas,
+    slides cuya provenance.sheet está en required_sheets, luego por tipo."""
+    if len(slides) <= target:
+        return slides
+
+    required_sheet_names = {m.matched for m in intent.required_sheets if m.matched}
+
+    def _slot_priority(s_idx_pair):
+        idx, s = s_idx_pair
+        if s.get("type") == "title":
+            return 0
+        if s.get("_injected_by") == "intent_enforcement":
+            return 1
+        prov_sheet = s.get("provenance", {}).get("sheet")
+        if prov_sheet in required_sheet_names:
+            return 2
+        type_pref = {"kpi_row": 3, "chart": 4, "table": 5,
+                     "text_bullets": 6}.get(s.get("type"), 7)
+        return type_pref
+
+    indexed = list(enumerate(slides))
+    indexed.sort(key=_slot_priority)
+    kept_indices = sorted(idx for idx, _ in indexed[:target])
+    return [slides[i] for i in kept_indices]
+
+
+def _pad_to(slides: list, target: int, blocks, wb, blocks_by_id) -> list:
+    """Añade slides desde bloques no usados hasta llegar a `target`."""
+    if len(slides) >= target:
+        return slides
+
+    used_block_ids: set = set()
+    for s in slides:
+        for k in ("block_ref", "supports_block"):
+            v = s.get(k)
+            if v:
+                used_block_ids.add(v)
+        for v in s.get("block_refs") or []:
+            used_block_ids.add(v)
+
+    candidates = [b for b in blocks if b.id not in used_block_ids]
+    cats = [b for b in candidates if b.kind == "categorical_distribution"
+            and "single_dominant_category" not in b.quality_flags]
+    tables = [b for b in candidates if b.kind == "table"
+              and "low_fill_ratio" not in b.quality_flags
+              and "too_few_rows" not in b.quality_flags]
+    kpis = [b for b in candidates if b.kind == "kpi_candidate"][:4]
+
+    out = list(slides)
+    for b in cats:
+        if len(out) >= target:
+            break
+        col = b.provenance.columns[0] if b.provenance.columns else "categorías"
+        out.append({
+            "type": "chart", "chart_type": "bar",
+            "title": f"Distribución por {col}",
+            "block_ref": b.id, "narrative": "",
+            "provenance": {"sheet": b.provenance.sheet,
+                            "columns": list(b.provenance.columns)},
+            "_injected_by": "pad_to_target",
+        })
+    for b in tables:
+        if len(out) >= target:
+            break
+        out.append({
+            "type": "table", "title": f"Detalle: {b.provenance.sheet}",
+            "block_ref": b.id, "max_rows": 10,
+            "provenance": {"sheet": b.provenance.sheet,
+                            "columns": list(b.provenance.columns)},
+            "_injected_by": "pad_to_target",
+        })
+    if kpis and len(out) < target and not any(s.get("type") == "kpi_row" for s in out):
+        out.append({
+            "type": "kpi_row", "title": "Indicadores Adicionales",
+            "block_refs": [b.id for b in kpis],
+            "_injected_by": "pad_to_target",
+        })
+    return out
+
+
+def _build_intent_report(intent, slides: list, skipped_sheets: list,
+                           count_honored: bool) -> dict:
+    """Construye el report que la UI mostrará como banner."""
+    sheet_to_indices: dict = {}
+    for i, s in enumerate(slides):
+        sheet = s.get("provenance", {}).get("sheet")
+        if sheet:
+            sheet_to_indices.setdefault(sheet, []).append(i)
+
+    required_sheets_report = []
+    for m in intent.required_sheets:
+        indices = sheet_to_indices.get(m.matched, []) if m.matched else []
+        required_sheets_report.append({
+            "requested": m.requested,
+            "matched": m.matched,
+            "closest": m.closest,
+            "slide_indices": indices,
+        })
+
+    return {
+        "requested_slide_count": intent.requested_slide_count,
+        "actual_slide_count": len(slides),
+        "count_honored": count_honored,
+        "required_sheets": required_sheets_report,
+        "skipped_sheets": skipped_sheets,
+    }
+
+
 def plan_presentation(wb: WorkbookData, blocks, user_prompt: str, audience: str,
                        language: str, api_key: str,
                        profile: AIProfile = AIProfile.PATIENT,
