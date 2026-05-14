@@ -17,6 +17,9 @@ from socya_pipeline import insights
 
 UGLY_LITERALS_LOWER = insights.UGLY_LITERALS  # back-compat alias
 MAX_TABLE_COLS = 6
+MIN_BULLETS = 5
+MAX_BULLETS = 6
+MAX_AUTO_HALLAZGOS = 3  # cap auto-añadidos para no inflar el deck
 
 
 def _build_dtype_map(wb: WorkbookData) -> dict:
@@ -129,6 +132,9 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
 
         elif stype == "text_bullets":
             bullets = slide.get("bullets") or []
+            # Top-up determinístico cuando el AI/validator dejaron <5 bullets.
+            # Garantiza densidad sin depender de variabilidad del modelo.
+            bullets = _topup_bullets(bullets, block, wb)
             if bullets:
                 rendered.append({**slide, "data": {"bullets": bullets}})
             else:
@@ -326,15 +332,138 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
     # Merge: keep the title slide first, then alternate richness.
     title_slides = [s for s in rendered if s.get("type") == "title"]
     other = [s for s in rendered if s.get("type") != "title"]
+    merged = title_slides + other + extra
+    # Sandwich hallazgos per cubierta: inserta text_bullets después del
+    # chart/table de cada hoja importante que no tenga ya su slide de
+    # hallazgos. Cap interno a MAX_AUTO_HALLAZGOS para no inflar.
+    blocks_by_id = {b.id: b for b in inventory}
+    merged = _add_hallazgos_per_sheet(merged, inventory, wb, blocks_by_id)
     if xls_owned:
         try: xls.close()
         except Exception: pass
-    return title_slides + other + extra
+    return merged
 
 
 def _col_norm(s: str) -> str:
     """Normalize a column name for semantic-equality comparison."""
     return str(s or "").strip().lower().replace(" ", "").replace("_", "")
+
+
+def _topup_bullets(existing: list, block, wb: WorkbookData) -> list:
+    """Si `existing` tiene <MIN_BULLETS, agrega bullets determinísticos
+    desde _build_insight_bullets sin duplicar. Cap a MAX_BULLETS."""
+    if len(existing) >= MIN_BULLETS:
+        return existing[:MAX_BULLETS]
+    from socya_pipeline.planner import _build_insight_bullets
+    candidates = _build_insight_bullets(wb, block, max_candidates=8)
+
+    out = list(existing)
+    seen_keys = {_bullet_dedup_key(b) for b in out}
+    seen_angles: set = set()
+    for angle, text in candidates:
+        if len(out) >= MAX_BULLETS:
+            break
+        key = _bullet_dedup_key(text)
+        if key in seen_keys:
+            continue
+        if angle in seen_angles:
+            continue
+        out.append(text)
+        seen_keys.add(key)
+        seen_angles.add(angle)
+    return out
+
+
+def _bullet_dedup_key(bullet: str) -> str:
+    """Clave de dedup: extrae primer número + primera palabra significativa."""
+    import re
+    s = (bullet or "").lower()
+    nums = re.findall(r"\d+(?:[.,]\d+)?", s)
+    words = [w for w in re.findall(r"[a-záéíóúñ]{4,}", s)]
+    n_part = nums[0] if nums else ""
+    w_part = words[0] if words else ""
+    return f"{n_part}|{w_part}"
+
+
+def _add_hallazgos_per_sheet(rendered: list, inventory, wb: WorkbookData,
+                              blocks_by_id: dict) -> list:
+    """Para cada hoja cubierta por chart/table en `rendered` que NO tiene
+    text_bullets, inserta una slide de hallazgos justo después.
+
+    Cap MAX_AUTO_HALLAZGOS para no inflar el deck.
+    """
+    from socya_pipeline.planner import _build_insight_bullets
+
+    sheets_with_text_bullets: set = {
+        (s.get("provenance") or {}).get("sheet")
+        for s in rendered if s.get("type") == "text_bullets"
+    }
+    sheets_with_text_bullets.discard(None)
+
+    # Hojas cubiertas por chart/table en el orden que aparecen
+    seen_sheets: list = []
+    for s in rendered:
+        if s.get("type") in ("chart", "table"):
+            sh = (s.get("provenance") or {}).get("sheet")
+            if sh and sh not in seen_sheets:
+                seen_sheets.append(sh)
+
+    targets = [sh for sh in seen_sheets
+               if sh and sh not in sheets_with_text_bullets][:MAX_AUTO_HALLAZGOS]
+    if not targets:
+        return rendered
+
+    # Construir hallazgos por sheet
+    by_sheet: dict = {}
+    for sheet_name in targets:
+        block = next((b for b in inventory
+                      if b.kind == "table" and b.provenance.sheet == sheet_name),
+                      None)
+        if block is None:
+            # Try any block on this sheet
+            block = next((b for b in inventory
+                          if b.provenance.sheet == sheet_name), None)
+        if block is None:
+            continue
+        candidates = _build_insight_bullets(wb, block, max_candidates=8)
+        if not candidates:
+            continue
+        bullets: list = []
+        seen_angles: set = set()
+        for angle, text in candidates:
+            if len(bullets) >= MAX_BULLETS:
+                break
+            if angle in seen_angles:
+                continue
+            bullets.append(text)
+            seen_angles.add(angle)
+        if len(bullets) >= 3:   # min de utilidad
+            by_sheet[sheet_name] = (block, bullets)
+
+    if not by_sheet:
+        return rendered
+
+    # Sandwich: insertar después del último chart/table de esa hoja
+    out: list = []
+    inserted_for: set = set()
+    for s in rendered:
+        out.append(s)
+        sh = (s.get("provenance") or {}).get("sheet")
+        if (sh in by_sheet
+                and sh not in inserted_for
+                and s.get("type") in ("chart", "table")):
+            block, bullets = by_sheet[sh]
+            out.append({
+                "type": "text_bullets",
+                "title": f"Hallazgos: {sh}",
+                "supports_block": block.id,
+                "data": {"bullets": bullets},
+                "provenance": {"sheet": sh,
+                                "columns": list(block.provenance.columns)},
+                "_injected_by": "auto_hallazgos",
+            })
+            inserted_for.add(sh)
+    return out
 
 
 def _extract_kpi_row(slide: dict, blocks_by_id: dict) -> Optional[dict]:
