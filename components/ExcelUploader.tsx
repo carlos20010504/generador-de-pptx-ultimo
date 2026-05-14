@@ -562,10 +562,10 @@ export default function ExcelUploader() {
               type="button"
               onClick={() => setShowAdvanced(true)}
               className="upl-adv-trigger press-on-active"
-              title="Panel avanzado: prompt, audiencia, tema y sugerencias completas"
+              title="Audiencia, idioma y tema visual"
             >
               <Settings2 size={14} />
-              {t('Avanzado')}
+              {t('Audiencia y tema')}
             </button>
           )}
         </div>
@@ -895,7 +895,7 @@ export default function ExcelUploader() {
       <AdvancedDrawer
         open={showAdvanced}
         onClose={() => setShowAdvanced(false)}
-        title="Panel avanzado · IA"
+        title="Audiencia y tema"
       >
         <AIControlPanel
           file={file}
