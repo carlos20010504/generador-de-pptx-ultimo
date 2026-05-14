@@ -1,22 +1,17 @@
 """Multi-provider AI call layer.
 
-Antes esta capa solo hablaba con OpenRouter free tier — cuando saturaba
-todos los modelos free, el usuario veía AI_SATURATED y quedaba bloqueado.
-
-Ahora soporta múltiples proveedores con detección automática:
-  - Groq (free tier, super rápido — ~300 tok/s)
-  - Cerebras (free tier, también velocísimo)
-  - Google Gemini (free tier, 15 RPM, muy estable)
+Soporta múltiples proveedores con detección automática:
+  - Cerebras (paga, súper rápido — ~2000 tok/s, gpt-oss-120b primario)
+  - Groq (free tier, ~300 tok/s, fallback rápido)
   - OpenRouter (free tier, fallback final)
 
 Cada provider se activa SOLO si su API key está en env. Si solo hay
 OPENROUTER_API_KEY (caso histórico), el comportamiento es idéntico al de
 antes. El usuario amplía la red simplemente seteando otras keys.
 
-El orden por defecto privilegia velocidad y confiabilidad:
-  Groq > Cerebras > Gemini > OpenRouter
+El orden por defecto privilegia velocidad y calidad:
+  Cerebras > Groq > OpenRouter
 """
-import json
 import os
 import re
 import time
@@ -48,15 +43,22 @@ SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "http://localhost")
 @dataclass(frozen=True)
 class _ProviderDef:
     name: str
-    base_url: str             # endpoint URL (sin model path para gemini)
+    base_url: str             # endpoint URL
     api_key_env: str          # env var con la key
     models: tuple             # modelos a probar en orden
-    style: str                # "openai_compat" o "gemini"
+    style: str                # "openai_compat"
 
 
 # IMPORTANTE: el orden importa. Más rápido y estable arriba.
 # Para activar un provider, el usuario solo setea su env var.
 PROVIDER_DEFS: tuple = (
+    _ProviderDef(
+        name="cerebras",
+        base_url="https://api.cerebras.ai/v1/chat/completions",
+        api_key_env="CEREBRAS_API_KEY",
+        models=("gpt-oss-120b", "zai-glm-4.7", "llama3.1-8b"),
+        style="openai_compat",
+    ),
     _ProviderDef(
         name="groq",
         base_url="https://api.groq.com/openai/v1/chat/completions",
@@ -64,22 +66,6 @@ PROVIDER_DEFS: tuple = (
         models=("llama-3.3-70b-versatile", "llama-3.1-8b-instant",
                 "mixtral-8x7b-32768"),
         style="openai_compat",
-    ),
-    _ProviderDef(
-        name="cerebras",
-        base_url="https://api.cerebras.ai/v1/chat/completions",
-        api_key_env="CEREBRAS_API_KEY",
-        models=("llama3.1-70b", "llama3.1-8b"),
-        style="openai_compat",
-    ),
-    _ProviderDef(
-        name="gemini",
-        # Gemini construye la URL como base_url/{model}:generateContent
-        base_url="https://generativelanguage.googleapis.com/v1beta/models",
-        api_key_env="GEMINI_API_KEY",
-        models=("gemini-2.0-flash-exp", "gemini-1.5-flash-latest",
-                "gemini-1.5-pro-latest"),
-        style="gemini",
     ),
     _ProviderDef(
         name="openrouter",
@@ -111,9 +97,9 @@ class AIProfile(str, Enum):
 # largo del que ya iba a romperse.
 #
 # `max_models_to_try` ahora es el cap GLOBAL across providers. Con todos los
-# providers configurados podemos tener hasta 13 modelos en la cadena
-# (3 Groq + 2 Cerebras + 3 Gemini + 5 OpenRouter), pero rara vez probamos
-# tantos antes de conseguir respuesta.
+# providers configurados podemos tener hasta 11 modelos en la cadena
+# (3 Cerebras + 3 Groq + 5 OpenRouter), pero rara vez probamos tantos
+# antes de conseguir respuesta.
 PROFILE_SETTINGS = {
     AIProfile.FAST: {
         "timeout_per_call": 25,
@@ -152,7 +138,12 @@ class AIChainResult:
 
 
 class AIChain:
-    def __init__(self, api_key: str, profile: AIProfile = AIProfile.FAST):
+    def __init__(self, api_key: str, profile: AIProfile = AIProfile.FAST,
+                  preferred_model: Optional[str] = None):
+        """preferred_model formato: 'provider/model' (ej. 'cerebras/gpt-oss-120b').
+        Si está seteado, _enumerate_attempts lo emite PRIMERO antes del chain
+        default. Si falla, cae al chain por resiliencia.
+        """
         # api_key se trata como override de OPENROUTER_API_KEY (back-compat
         # con el código que existía cuando solo hablábamos con OpenRouter).
         # Los otros providers leen su env var dedicada.
@@ -160,6 +151,7 @@ class AIChain:
         self.profile = profile
         self.settings = PROFILE_SETTINGS[profile]
         self._providers: List[_ProviderRuntime] = self._discover_providers()
+        self.preferred_model = (preferred_model or "").strip() or None
 
     def _discover_providers(self) -> List[_ProviderRuntime]:
         """Enumera providers con key configurada. OpenRouter usa el key del
@@ -177,12 +169,26 @@ class AIChain:
         return out
 
     def _enumerate_attempts(self):
-        """Yield (provider, model) pairs en orden de prioridad, capeado por
-        max_models_to_try (el cap global, no per-provider)."""
+        """Yield (provider, model) en orden: preferred_model primero (si configurado
+        y disponible), después el chain default. Capeado por max_models_to_try."""
         cap = self.settings["max_models_to_try"]
         n = 0
+        yielded: set = set()
+
+        if self.preferred_model and "/" in self.preferred_model:
+            prov_name, model_name = self.preferred_model.split("/", 1)
+            prov = next((p for p in self._providers
+                         if p.definition.name == prov_name), None)
+            if prov and model_name in prov.definition.models:
+                if n < cap:
+                    yield prov, model_name
+                    yielded.add((prov_name, model_name))
+                    n += 1
+
         for provider in self._providers:
             for model in provider.definition.models:
+                if (provider.definition.name, model) in yielded:
+                    continue
                 if n >= cap:
                     return
                 yield provider, model
@@ -194,7 +200,7 @@ class AIChain:
             raise PipelineError(
                 ErrorCode.AI_SATURATED,
                 "No hay ningún proveedor de IA configurado. Setea al menos una de: "
-                "GROQ_API_KEY, CEREBRAS_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY.",
+                "CEREBRAS_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY.",
                 user_action="report_bug",
             )
 
@@ -284,9 +290,6 @@ class AIChain:
         if provider.definition.style == "openai_compat":
             return self._call_openai_compat(provider, model, prompt, system_msg,
                                               temperature)
-        if provider.definition.style == "gemini":
-            return self._call_gemini(provider, model, prompt, system_msg,
-                                       temperature)
         raise _Fatal(f"unknown provider style: {provider.definition.style}")
 
     def _call_openai_compat(self, provider: _ProviderRuntime, model: str,
@@ -341,71 +344,6 @@ class AIChain:
             return content
         except (KeyError, IndexError, ValueError) as e:
             raise _Fatal(f"malformed response: {e}")
-
-    def _call_gemini(self, provider: _ProviderRuntime, model: str,
-                       prompt: str, system_msg: str, temperature: float) -> str:
-        """Gemini API tiene su propio request/response shape distinto a
-        OpenAI Chat Completions. URL: base_url/{model}:generateContent?key=KEY."""
-        url = f"{provider.definition.base_url}/{model}:generateContent"
-        payload = {
-            "contents": [{
-                "role": "user",
-                # Gemini no separa system+user igual que OpenAI; mergeamos.
-                "parts": [{"text": f"{system_msg}\n\n{prompt}"}],
-            }],
-            "generationConfig": {
-                "temperature": temperature,
-                # Forza JSON output — clave para que el plan parseable salga
-                # sin markdown wrapping.
-                "responseMimeType": "application/json",
-            },
-        }
-        headers = {"Content-Type": "application/json"}
-
-        try:
-            resp = requests.post(
-                url, headers=headers, json=payload,
-                params={"key": provider.api_key},
-                timeout=self.settings["timeout_per_call"],
-            )
-        except requests.Timeout:
-            raise _Retryable("timeout", "request timed out")
-        except requests.RequestException as e:
-            raise _Retryable("network_error", str(e))
-
-        text = resp.text or ""
-        lower = text.lower()
-
-        if resp.status_code == 429:
-            retry_after = _parse_retry_after(resp.headers, lower)
-            raise _Retryable("rate_limited", text[:200], retry_after=retry_after)
-        if not resp.ok:
-            if any(t in lower for t in RATE_LIMIT_TOKENS):
-                raise _Retryable("rate_limited", text[:200])
-            if any(t in lower for t in TRANSIENT_TOKENS):
-                raise _Retryable("transient", text[:200])
-            raise _Retryable(f"http_{resp.status_code}", text[:200])
-
-        try:
-            data = resp.json()
-            # Gemini response: candidates[0].content.parts[0].text
-            candidates = data.get("candidates") or []
-            if not candidates:
-                # Algunas safety policies devuelven 200 con candidates vacío.
-                # Tratar como retryable — otro modelo puede tener config menos
-                # restrictiva.
-                pf = data.get("promptFeedback", {})
-                raise _Retryable("safety_block", json.dumps(pf)[:200])
-            content_obj = candidates[0].get("content") or {}
-            parts = content_obj.get("parts") or []
-            if not parts:
-                raise _Fatal("empty parts in candidate")
-            content = parts[0].get("text", "")
-            if not content:
-                raise _Fatal("empty content")
-            return content
-        except (KeyError, IndexError, ValueError) as e:
-            raise _Fatal(f"malformed gemini response: {e}")
 
     # Back-compat shim: tests viejos parchean `requests.post` y esperan que
     # `_call_one(model, ...)` use OpenRouter directamente. Lo dejamos como

@@ -1,7 +1,18 @@
+import os
 import pytest
 from pathlib import Path
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
+
+
+# Aislar tests de cualquier API key real que tenga el usuario en el shell o
+# .env. Sin esto, tests que esperan "openrouter/..." se rompen cuando hay
+# CEREBRAS_API_KEY/GROQ_API_KEY en env (Cerebras se prueba primero).
+@pytest.fixture(autouse=True)
+def _isolate_provider_env(monkeypatch):
+    for var in ("CEREBRAS_API_KEY", "GROQ_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    yield
 
 @pytest.fixture
 def fixtures_dir():
