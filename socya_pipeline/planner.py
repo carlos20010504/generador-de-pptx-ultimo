@@ -180,12 +180,8 @@ def _format_money(v) -> str:
 
 
 def _build_fallback_bullets(wb: WorkbookData, table_block) -> list:
-    """Construye bullets que pasan el validator de provenance. Citan stats
-    de columnas DEL TABLE_BLOCK directamente (validator construye su haystack
-    desde la sheet+cols del supports_block, no de otros bloques).
-
-    El validator ahora también incluye los nombres de columnas en el haystack,
-    así que podemos referenciarlas por nombre en los bullets."""
+    """Construye 5-6 bullets que pasan el validator de provenance. Citan
+    stats de columnas DEL TABLE_BLOCK directamente."""
     sheet = next((s for s in wb.sheets if s.name == table_block.provenance.sheet),
                   None)
     if not sheet:
@@ -194,8 +190,6 @@ def _build_fallback_bullets(wb: WorkbookData, table_block) -> list:
     relevant = [c for c in sheet.columns if c.name in cols_set]
     bullets: list = []
 
-    # Bullet 1: total de la columna numérica con mayor sum (típicamente el
-    # monto principal). El validator hace match contra col.sum directamente.
     money_cols = [c for c in relevant
                   if c.dtype in ("currency", "numeric") and c.sum is not None]
     money_cols.sort(key=lambda c: abs(c.sum or 0), reverse=True)
@@ -204,15 +198,10 @@ def _build_fallback_bullets(wb: WorkbookData, table_block) -> list:
         bullets.append(
             f"El total acumulado de '{top.name}' suma {_format_money(top.sum)}.")
 
-    # Bullet 2: cantidad total de registros en la tabla. El validator añade
-    # sheet.shape[0] al haystack_nums explícitamente.
     n_rows = sheet.shape[0] if sheet.shape else 0
     if n_rows:
         bullets.append(f"Se analizaron {n_rows} registros en la tabla.")
 
-    # Bullet 3: top categoría del primer cat columna. Tanto el nombre de la
-    # categoría (ej. 'Bogotá') como el conteo (ej. 53) están en col.top_values
-    # → ambos en haystack.
     cat_cols = [c for c in relevant
                 if c.dtype == "categorical" and (c.top_values or [])]
     if cat_cols:
@@ -225,13 +214,32 @@ def _build_fallback_bullets(wb: WorkbookData, table_block) -> list:
         bullets.append(
             f"En '{c.name}' destaca '{top_label}' con {top_count_int} registros.")
 
-    # Bullet 4 (opcional): máximo de la columna monetaria principal.
     if money_cols and money_cols[0].max is not None:
         top = money_cols[0]
         bullets.append(
             f"El valor máximo registrado en '{top.name}' es {_format_money(top.max)}.")
 
-    return bullets[:3]  # max 3 bullets para no saturar la slide
+    if money_cols and money_cols[0].min is not None:
+        top = money_cols[0]
+        bullets.append(
+            f"El valor mínimo en '{top.name}' es {_format_money(top.min)}.")
+
+    if cat_cols and len(cat_cols[0].top_values or []) >= 2:
+        c = cat_cols[0]
+        total_in_top = sum(int(v) for _, v in (c.top_values or [])
+                            if isinstance(v, (int, float)))
+        if total_in_top > 0:
+            second_label, second_count = c.top_values[1][0], c.top_values[1][1]
+            try:
+                second_count_int = int(second_count)
+                pct = (second_count_int / total_in_top) * 100
+                bullets.append(
+                    f"La segunda categoría más frecuente en '{c.name}' es "
+                    f"'{second_label}' con {second_count_int} ({pct:.0f}%).")
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+
+    return bullets[:6]
 
 
 def _deterministic_plan_fallback(wb: WorkbookData, blocks,
