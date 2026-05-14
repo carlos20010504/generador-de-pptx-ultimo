@@ -17,7 +17,7 @@ interface Props {
  * `position: fixed` is not captured by transformed ancestors (animate-*
  * classes create a containing block which would mis-position the drawer).
  */
-export default function AdvancedDrawer({ open, onClose, children, title = 'Panel avanzado' }: Props) {
+export default function AdvancedDrawer({ open, onClose, children, title = 'Audiencia y tema' }: Props) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
 
@@ -60,7 +60,7 @@ export default function AdvancedDrawer({ open, onClose, children, title = 'Panel
             type="button"
             onClick={onClose}
             className="adv-close press-on-active"
-            aria-label="Cerrar panel avanzado"
+            aria-label="Cerrar audiencia y tema"
           >
             <X size={16} />
           </button>

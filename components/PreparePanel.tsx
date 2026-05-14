@@ -536,8 +536,8 @@ export default function PreparePanel({
 
             {onOpenAdvanced && (
               <p className="prep-refine-hint">
-                ¿Necesitas más control (tema, audiencia, sugerencias completas)? Abre el{' '}
-                <button type="button" className="prep-link" onClick={onOpenAdvanced}>panel avanzado</button>.
+                ¿Necesitas cambiar audiencia, idioma o tema visual? Abre{' '}
+                <button type="button" className="prep-link" onClick={onOpenAdvanced}>Audiencia y tema</button>.
               </p>
             )}
           </div>
