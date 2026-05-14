@@ -106,6 +106,7 @@ export async function POST(req: NextRequest) {
       ai_status: plan.ai_status ?? {},
       audit: plan.audit ?? {},
       prompt_suggestions: plan.prompt_suggestions ?? [],
+      intent_report: plan.intent_report ?? null,
     });
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; code?: string; killed?: boolean; message?: string };
