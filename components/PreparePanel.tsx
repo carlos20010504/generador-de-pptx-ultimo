@@ -7,6 +7,7 @@ import {
   Lightbulb, CheckSquare, Square, Table2, FileText, LayoutDashboard,
   GripVertical, Pencil, Check as CheckIcon,
 } from 'lucide-react';
+import { MODEL_PRESETS, presetToModelString } from '@/lib/model-presets';
 
 /* ──────────────────────────────────────────────────────────────
    Types — mirror what /api/quick-summary and /api/preview-plan return
@@ -94,6 +95,8 @@ interface Props {
     overrides: { titles?: Record<number, string>; order?: number[] | null }
   ) => void;
   onOpenAdvanced?: () => void;
+  preferredModelId: string;
+  onPreferredModelChange: (id: string) => void;
 }
 
 // Themes para el PPT generado. Sincronizado con AIControlPanel.THEME_OPTIONS.
@@ -125,6 +128,7 @@ export default function PreparePanel({
   file, userPrompt, onPromptChange,
   audience, language, theme, onThemeChange, mode, onModeChange,
   onConfirm, onOpenAdvanced,
+  preferredModelId, onPreferredModelChange,
 }: Props) {
   const [summary, setSummary] = useState<QuickSummary | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -233,6 +237,10 @@ export default function PreparePanel({
         const fd = new FormData();
         fd.append('file', file);
         if (userPrompt.trim()) fd.append('userPrompt', userPrompt.trim());
+        const preferredModelStr = presetToModelString(preferredModelId);
+        if (preferredModelStr) {
+          fd.append('preferredModel', preferredModelStr);
+        }
         fd.append('audience', audience);
         fd.append('language', language);
         const res = await fetch('/api/preview-plan', {
@@ -259,7 +267,7 @@ export default function PreparePanel({
     })();
     return () => { cancelled = true; clearTimeout(timer); ctrl.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [promptKey, audience, language]);
+  }, [promptKey, audience, language, preferredModelId]);
 
   const stats = useMemo(() => {
     if (!plan) return { total: 0, kept: 0, byType: {} as Record<string, number> };
@@ -465,6 +473,20 @@ export default function PreparePanel({
 
         {refineOpen && (
           <div className="prep-refine-body animate-fade-in">
+            <div className="prep-model-row">
+              <label className="prep-model-label">Modelo IA</label>
+              <select
+                value={preferredModelId}
+                onChange={(e) => onPreferredModelChange(e.target.value)}
+                className="prep-model-select"
+              >
+                {MODEL_PRESETS.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.label} — {p.sub}
+                  </option>
+                ))}
+              </select>
+            </div>
             <textarea
               value={userPrompt}
               onChange={(e) => onPromptChange(e.target.value)}
@@ -1458,4 +1480,33 @@ const PREP_STYLES = `
 }
 .prep-intent-list strong { font-weight: 700; }
 .prep-intent-warn { color: #7a5e00; }
+
+/* ── Model selector ── */
+.prep-model-row {
+  display: flex; align-items: center; gap: 0.6rem;
+  margin-bottom: 0.5rem;
+}
+.prep-model-label {
+  color: var(--c-text-secondary);
+  font-family: var(--font-heading);
+  font-size: 0.66rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+.prep-model-select {
+  flex: 1;
+  padding: 0.45rem 0.6rem;
+  background: var(--c-bg-elevated);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-md);
+  color: var(--c-text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.prep-model-select:focus {
+  outline: none;
+  border-color: var(--c-primary);
+  box-shadow: 0 0 0 3px rgba(8, 112, 98, 0.15);
+}
 `;

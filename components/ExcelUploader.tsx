@@ -17,6 +17,7 @@ import AdvancedDrawer from './AdvancedDrawer';
 import PreviewPanel from './PreviewPanel';
 import { useT } from '@/utils/i18n';
 import { formatErrorForUser, isPipelineError, PipelineErrorPayload } from '@/utils/error-codes';
+import { DEFAULT_PRESET_ID, PREFERRED_MODEL_LS_KEY, presetToModelString } from '@/lib/model-presets';
 
 type Status = 'idle' | 'processing' | 'previewing' | 'success' | 'organized' | 'error';
 
@@ -93,6 +94,16 @@ export default function ExcelUploader() {
   const [backendHealth, setBackendHealth] = useState<BackendHealth | null>(null);
   const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [userPrompt, setUserPrompt] = useState('');
+  const [preferredModelId, setPreferredModelId] = useState<string>(() => {
+    if (typeof window === 'undefined') return DEFAULT_PRESET_ID;
+    return window.localStorage.getItem(PREFERRED_MODEL_LS_KEY) || DEFAULT_PRESET_ID;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(PREFERRED_MODEL_LS_KEY, preferredModelId);
+  }, [preferredModelId]);
+
   const [presentationContext, setPresentationContext] = useState<PresentationContext>({
     audience: 'ejecutivos',
     language: 'Español',
@@ -262,6 +273,8 @@ export default function ExcelUploader() {
     formData.append('file', file);
     formData.append('visualMode', orgMode === 'auto' ? 'mixed' : orgMode);
     if (userPrompt.trim()) formData.append('userPrompt', userPrompt.trim());
+    const preferredModelStr = presetToModelString(preferredModelId);
+    if (preferredModelStr) formData.append('preferredModel', preferredModelStr);
     formData.append('audience', presentationContext.audience);
     formData.append('language', presentationContext.language);
     formData.append('theme', JSON.stringify(presentationContext.theme));
@@ -755,6 +768,8 @@ export default function ExcelUploader() {
                 setTimeout(() => handleGenerate(), 50);
               }}
               onOpenAdvanced={() => setShowAdvanced(true)}
+              preferredModelId={preferredModelId}
+              onPreferredModelChange={setPreferredModelId}
             />
           )}
 
