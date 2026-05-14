@@ -86,15 +86,41 @@ def cmd_plan(args):
             outcome.slides, inv, wb, args.input,
             xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
         before_complete = len(rendered)
+        # Si el usuario pidió N slides, ese es el target real del padding —
+        # no el 7 default. Si N > material disponible, auto_complete devuelve
+        # menos de N y count_honored se marca false abajo.
+        target = (intent.requested_slide_count
+                  if intent.requested_slide_count is not None else 7)
         rendered = auto_complete_slides(
-            rendered, inv, wb, args.input, target_count=7,
+            rendered, inv, wb, args.input, target_count=target,
             xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
+        # Reconciliar intent_report con el conteo FINAL post-validator/extractor.
+        # El report del planner se calcula sobre el plan crudo (antes de que el
+        # validator dropee slides por provenance inválida). El usuario ve este
+        # número en el banner, así que tiene que reflejar la realidad rendered.
+        intent_report = plan.get("_intent_report")
+        if intent_report is not None:
+            intent_report["actual_slide_count"] = len(rendered)
+            requested = intent_report.get("requested_slide_count")
+            intent_report["count_honored"] = (
+                requested is None or len(rendered) == requested
+            )
+            # Recalcular slide_indices para required_sheets sobre rendered.
+            rendered_sheets_by_idx: dict = {}
+            for i, s in enumerate(rendered):
+                sheet = (s.get("provenance") or {}).get("sheet")
+                if sheet:
+                    rendered_sheets_by_idx.setdefault(sheet, []).append(i)
+            for entry in intent_report.get("required_sheets") or []:
+                matched = entry.get("matched")
+                entry["slide_indices"] = (rendered_sheets_by_idx.get(matched, [])
+                                           if matched else [])
         result = {
             "presentation_meta": plan.get("presentation_meta", {}),
             "slides": rendered,
             "prompt_suggestions": plan.get("prompt_suggestions", []),
             "ai_status": plan.get("_meta", {}),
-            "intent_report": plan.get("_intent_report"),
+            "intent_report": intent_report,
             "audit": {
                 "slides_planned": len(plan.get("slides", [])),
                 "slides_validated": len(outcome.slides),
@@ -167,8 +193,11 @@ def cmd_generate(args):
             outcome.slides, inv, wb, args.input,
             xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
         before_complete = len(rendered)
+        # Honra requested_slide_count cuando el user lo especificó (ver cmd_plan).
+        target = (intent.requested_slide_count
+                  if intent.requested_slide_count is not None else 7)
         rendered = auto_complete_slides(
-            rendered, inv, wb, args.input, target_count=7,
+            rendered, inv, wb, args.input, target_count=target,
             xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
 
         # Optional user-driven filter: drop the slides the UI marked off in

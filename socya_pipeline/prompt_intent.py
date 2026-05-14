@@ -34,6 +34,17 @@ _STOPWORDS = frozenset({
     "lámina", "láminas", "lamina", "laminas", "deck", "presentación",
     "presentacion", "powerpoint", "ppt", "pptx",
     "más", "mas", "menos", "que", "como", "asi", "así",
+    # Verbos imperativos comunes que el usuario usa para dirigirse a la AI:
+    # "hazme un deck...", "incluye Riesgos Core". Sin esto, "hazme" como
+    # primer token capitalizado pasa el filtro de "name-ish" y dispara
+    # closest-fallback espurios contra hojas como "Hallazgos".
+    "hazme", "haznos", "haz", "dame", "danos", "muestrame", "muéstrame",
+    "muestranos", "muéstranos", "muestra", "ponme", "pon", "saca",
+    "sacame", "incluye", "incluyeme", "agrega", "agregame", "añade",
+    "anade", "añademe", "anademe", "quiero", "necesito", "deseo",
+    "genera", "generame", "genérame", "crea", "creame", "créame",
+    "comite", "comité", "ejecutivo", "ejecutivos", "junta", "directorio",
+    "gerencia", "ceo", "cfo", "principales", "principal",
 })
 
 
