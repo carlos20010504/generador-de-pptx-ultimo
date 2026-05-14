@@ -155,9 +155,12 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
                           ) -> List[dict]:
     """Add high-quality slides from unused inventory blocks when `rendered`
     is short. `xls` / `sheets_cache` / `dtype_map` should be the same objects
-    passed to `extract_for_render` to avoid re-opening the Excel."""
-    if len(rendered) >= target_count:
-        return rendered
+    passed to `extract_for_render` to avoid re-opening the Excel.
+
+    Nota: ya no early-returneamos cuando rendered == target — los pasos
+    internos respetan el cap individualmente. Eliminamos el early return
+    para que `_add_hallazgos_per_sheet` tenga oportunidad de correr y
+    decida según su propio cap_external."""
 
     if dtype_map is None:
         dtype_map = _build_dtype_map(wb)
@@ -204,6 +207,20 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
 
     extra: List[dict] = []
     needed = target_count - len(rendered)
+
+    # 0. PRIORITY: hallazgos por hoja cubierta. Si rendered tiene un chart de
+    # 'Riesgos' sin slide de hallazgos propia, sandwicheamos uno aquí ANTES
+    # de meter chart filler. Hallazgos > charts genéricos cuando hay budget
+    # apretado (target_count del user). El cap interno también limita.
+    blocks_by_id_now = {b.id: b for b in inventory}
+    rendered = _add_hallazgos_per_sheet(rendered, inventory, wb,
+                                          blocks_by_id_now,
+                                          target_count=target_count)
+    if len(rendered) >= target_count:
+        if xls_owned:
+            try: xls.close()
+            except Exception: pass
+        return rendered
 
     # 1. Add a kpi_row of the best unused KPI candidates
     unused_kpis = [b for b in inventory
@@ -329,19 +346,14 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
                                 "columns": table_data.get("headers", [])},
             })
 
-    # Merge: keep the title slide first, then alternate richness.
+    # Merge: keep the title slide first, then alternate richness. Hallazgos
+    # ya se sandwichearon en el paso 0 antes del padding — no re-correr.
     title_slides = [s for s in rendered if s.get("type") == "title"]
     other = [s for s in rendered if s.get("type") != "title"]
-    merged = title_slides + other + extra
-    # Sandwich hallazgos per cubierta: inserta text_bullets después del
-    # chart/table de cada hoja importante que no tenga ya su slide de
-    # hallazgos. Cap interno a MAX_AUTO_HALLAZGOS para no inflar.
-    blocks_by_id = {b.id: b for b in inventory}
-    merged = _add_hallazgos_per_sheet(merged, inventory, wb, blocks_by_id)
     if xls_owned:
         try: xls.close()
         except Exception: pass
-    return merged
+    return title_slides + other + extra
 
 
 def _col_norm(s: str) -> str:
@@ -386,11 +398,14 @@ def _bullet_dedup_key(bullet: str) -> str:
 
 
 def _add_hallazgos_per_sheet(rendered: list, inventory, wb: WorkbookData,
-                              blocks_by_id: dict) -> list:
+                              blocks_by_id: dict,
+                              target_count: Optional[int] = None) -> list:
     """Para cada hoja cubierta por chart/table en `rendered` que NO tiene
     text_bullets, inserta una slide de hallazgos justo después.
 
-    Cap MAX_AUTO_HALLAZGOS para no inflar el deck.
+    Cap interno MAX_AUTO_HALLAZGOS para no inflar el deck. Si `target_count`
+    está especificado, también respeta ese límite — para honrar el
+    `requested_slide_count` del usuario.
     """
     from socya_pipeline.planner import _build_insight_bullets
 
@@ -408,8 +423,14 @@ def _add_hallazgos_per_sheet(rendered: list, inventory, wb: WorkbookData,
             if sh and sh not in seen_sheets:
                 seen_sheets.append(sh)
 
+    # Cap por MAX_AUTO_HALLAZGOS (interno) Y por target_count (externo del user).
+    # Si el user pidió 9 slides y rendered ya tiene 7, podemos añadir hasta 2.
+    cap_internal = MAX_AUTO_HALLAZGOS
+    cap_external = (max(0, target_count - len(rendered))
+                    if target_count is not None else cap_internal)
+    cap = min(cap_internal, cap_external)
     targets = [sh for sh in seen_sheets
-               if sh and sh not in sheets_with_text_bullets][:MAX_AUTO_HALLAZGOS]
+               if sh and sh not in sheets_with_text_bullets][:cap]
     if not targets:
         return rendered
 
