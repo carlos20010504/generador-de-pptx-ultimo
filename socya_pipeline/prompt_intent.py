@@ -62,8 +62,29 @@ def extract(user_prompt: str, available_sheet_names: List[str]) -> PromptIntent:
         requested_slide_count=_extract_slide_count(user_prompt),
         required_sheets=_extract_required_sheets(user_prompt,
                                                    available_sheet_names),
-        topic_hints=[],   # Task 3
+        topic_hints=_extract_topic_hints(user_prompt),
     )
+
+
+def _extract_topic_hints(prompt: str) -> List[str]:
+    """Extrae palabras significativas (≥4 chars, no stop-words, no dígitos)."""
+    norm = _normalize(prompt)
+    if not norm:
+        return []
+    seen: set = set()
+    out: List[str] = []
+    for token in norm.split():
+        if len(token) < 4:
+            continue
+        if token in _STOPWORDS:
+            continue
+        if token.isdigit():
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
 
 
 def _extract_slide_count(prompt: str) -> Optional[int]:

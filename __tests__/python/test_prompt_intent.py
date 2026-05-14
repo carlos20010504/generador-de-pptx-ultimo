@@ -97,3 +97,31 @@ def test_no_sheet_mentions_returns_empty():
 def test_empty_sheet_list_returns_empty():
     intent = extract("incluye Riesgos Core", available_sheet_names=[])
     assert intent.required_sheets == []
+
+
+# ─── topic hints (keywords sueltas) ──────────────────────────────
+
+def test_topic_hints_extracts_meaningful_words():
+    intent = extract("muéstrame riesgos críticos y comisiones aprobadas",
+                     available_sheet_names=[])
+    hints = set(intent.topic_hints)
+    assert "riesgos" in hints
+    assert "criticos" in hints   # accent stripped
+    assert "comisiones" in hints
+    assert "aprobadas" in hints
+
+
+def test_topic_hints_excludes_stopwords_and_short():
+    intent = extract("y de en con para por", [])
+    assert intent.topic_hints == []
+
+
+def test_topic_hints_does_not_include_slide_count_words():
+    intent = extract("hazme 9 slides", [])
+    assert "slides" not in intent.topic_hints
+    assert "9" not in intent.topic_hints
+
+
+def test_topic_hints_unique_lowercased():
+    intent = extract("Riesgos riesgos RIESGOS críticos", [])
+    assert intent.topic_hints.count("riesgos") == 1
