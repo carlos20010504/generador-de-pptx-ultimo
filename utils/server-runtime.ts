@@ -54,7 +54,12 @@ async function detectPipeline(): Promise<boolean> {
       ['-c', 'import socya_pipeline; from socya_pipeline import cli, parser, planner, renderer; print("ok")'],
       {
         encoding: 'utf8',
-        timeout: 15 * 1000,
+        // 30s — Python cold-start en Windows puede tardar >15s con todos los
+        // imports (pandas, openpyxl, prompt_intent stdlib re/unicodedata/difflib).
+        // Si el primer detectPipeline timeoutea, el `pipeline:false` se cachea
+        // 30s y bloquea TODOS los requests posteriores con el error genérico
+        // "El backend no tiene todas sus dependencias de analisis operativas".
+        timeout: 30 * 1000,
         windowsHide: true,
         env: { ...process.env, PYTHONUTF8: '1' },
       }

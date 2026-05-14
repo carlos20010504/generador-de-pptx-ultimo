@@ -72,7 +72,12 @@ function parseTheme(value: FormDataEntryValue | null) {
 }
 
 export async function POST(req: NextRequest) {
-  const depStatus = await getRuntimeDependencyStatus(false);
+  // Retry con forceRefresh si el cached status falla — evita 30s de bloqueo
+  // por un cold-start que ya se resolvió.
+  let depStatus = await getRuntimeDependencyStatus(false);
+  if (!depStatus.capabilities.generation) {
+    depStatus = await getRuntimeDependencyStatus(true);
+  }
   if (!depStatus.capabilities.generation) {
     return NextResponse.json(
       {

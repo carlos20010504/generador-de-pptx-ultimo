@@ -31,7 +31,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const runtime = await getRuntimeDependencyStatus();
+  // Si el cached status dice "fail", reintentamos UNA vez con forceRefresh —
+  // así no nos comemos 30s de error por un cold-start que ya se resolvió.
+  let runtime = await getRuntimeDependencyStatus();
+  if (!runtime.ok) {
+    runtime = await getRuntimeDependencyStatus(true);
+  }
   if (!runtime.ok) {
     return NextResponse.json(
       { error: getRuntimeFailureMessage(runtime) },

@@ -34,8 +34,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Runtime dependency check — fail fast if Python pipeline isn't reachable
-  const runtime = await getRuntimeDependencyStatus();
+  // Runtime dependency check — fail fast if Python pipeline isn't reachable.
+  // Si el cached status dice "fail", reintentamos UNA vez con forceRefresh
+  // para no servir 30s de error por un cold-start que ya se resolvió.
+  let runtime = await getRuntimeDependencyStatus();
+  if (!runtime.ok) {
+    runtime = await getRuntimeDependencyStatus(true);
+  }
   if (!runtime.ok) {
     return NextResponse.json(
       { error: getRuntimeFailureMessage(runtime) },
