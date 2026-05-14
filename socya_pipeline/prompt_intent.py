@@ -28,6 +28,7 @@ _FUZZY_THRESHOLD = 0.65
 
 _STOPWORDS = frozenset({
     "todo", "todos", "toda", "todas", "el", "la", "los", "las",
+    "un", "una", "unos", "unas",   # artículos indefinidos
     "y", "o", "u", "de", "del", "en", "con", "para", "por",
     "datos", "información", "informacion", "info", "hoja", "hojas",
     "tabla", "tablas", "slide", "slides", "diapositiva", "diapositivas",
@@ -249,8 +250,23 @@ def _extract_required_sheets(prompt: str,
                 ratio=round(best_overall_ratio, 3),
             ))
 
-    seen_sheets: dict = {}
+    # Dedup en dos ejes:
+    # 1. Por n-gram requested: cuando un mismo ngram matchea varias hojas
+    #    (caso típico: el ngram "riesgos core" matchea tanto "Riesgos CORE"
+    #    perfectamente como "Riesgos acciones" parcialmente porque comparten
+    #    el token "riesgos"), conservar solo el mejor — el ngram apuntaba a
+    #    UNA hoja específica, no a las dos.
+    # 2. Por sheet: si dos ngrams distintos apuntan a la misma hoja
+    #    (caso raro), nos quedamos con el de mayor confianza.
+    by_ng: dict = {}
     for m in matches:
+        if m.matched is None:
+            continue  # closest entries van por separado
+        if m.requested not in by_ng or m.ratio > by_ng[m.requested].ratio:
+            by_ng[m.requested] = m
+
+    seen_sheets: dict = {}
+    for m in list(by_ng.values()) + [m for m in matches if m.matched is None]:
         key = m.matched or f"NONE_{m.requested}"
         if key not in seen_sheets or m.ratio > seen_sheets[key].ratio:
             seen_sheets[key] = m
