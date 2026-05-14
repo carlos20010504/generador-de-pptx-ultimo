@@ -47,13 +47,15 @@ def cmd_plan(args):
     profile = (AIProfile.PATIENT if (os.environ.get("SOCYA_AI_PROFILE", "fast")
                                        .lower() == "patient")
                  else AIProfile.FAST)
-    # Inicializo afuera del try para que el finally siempre vea xls (None si
-    # nunca llegamos a abrirlo). Sin esto, Windows bloquea el archivo entre
-    # uploads del mismo Excel hasta que el GC lo libere.
     xls = None
     try:
         wb = parse_workbook(args.input, api_key=api_key)
         inv = build_inventory(wb)
+        from socya_pipeline.prompt_intent import extract as extract_intent
+        intent = extract_intent(
+            request.get("prompt", ""),
+            available_sheet_names=[s.name for s in wb.sheets],
+        )
         plan = plan_presentation(
             wb, inv,
             user_prompt=request.get("prompt", ""),
@@ -62,6 +64,7 @@ def cmd_plan(args):
             api_key=api_key,
             profile=profile,
             file_path=Path(args.input),
+            intent=intent,
         )
         outcome = validate_plan(plan, inv, wb)
         if not outcome.slides:
@@ -91,6 +94,7 @@ def cmd_plan(args):
             "slides": rendered,
             "prompt_suggestions": plan.get("prompt_suggestions", []),
             "ai_status": plan.get("_meta", {}),
+            "intent_report": plan.get("_intent_report"),
             "audit": {
                 "slides_planned": len(plan.get("slides", [])),
                 "slides_validated": len(outcome.slides),
@@ -121,6 +125,11 @@ def cmd_generate(args):
     try:
         wb = parse_workbook(args.input, api_key=api_key)
         inv = build_inventory(wb)
+        from socya_pipeline.prompt_intent import extract as extract_intent
+        intent = extract_intent(
+            request.get("prompt", ""),
+            available_sheet_names=[s.name for s in wb.sheets],
+        )
         plan = plan_presentation(
             wb, inv,
             user_prompt=request.get("prompt", ""),
@@ -129,6 +138,7 @@ def cmd_generate(args):
             api_key=api_key,
             profile=profile,
             file_path=Path(args.input),
+            intent=intent,
         )
         # Optional second-pass critique (refiner). Off por default; opt-in
         # via env SOCYA_AI_REFINE=1. Best-effort — fallos no rompen la
