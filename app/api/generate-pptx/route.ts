@@ -110,6 +110,7 @@ export async function POST(req: NextRequest) {
   const userPrompt = String(formData.get('userPrompt') ?? '').trim();
   const audience = String(formData.get('audience') ?? 'ejecutivos').trim();
   const language = String(formData.get('language') ?? 'Español').trim();
+  const preferredModel = String(formData.get('preferredModel') ?? '').trim() || undefined;
   const theme = parseTheme(formData.get('theme'));
   // From the PreparePanel: 0-based indices the user toggled OFF.
   // Forwarded to Python which drops them right before render.
@@ -204,6 +205,7 @@ export async function POST(req: NextRequest) {
         excludeSlideIndices,
         slideTitles,
         slideOrder,
+        preferredModel,
       });
 
       const templatePath = path.join(process.cwd(), 'Plantilla_Presentacion_Socya (1) (1).pptx');

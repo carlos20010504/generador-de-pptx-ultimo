@@ -65,9 +65,10 @@ export async function POST(req: NextRequest) {
     const userPrompt = String(formData.get('userPrompt') ?? '').trim();
     const audience = String(formData.get('audience') ?? 'ejecutivos').trim();
     const language = String(formData.get('language') ?? 'es').trim();
+    const preferredModel = String(formData.get('preferredModel') ?? '').trim() || undefined;
 
     const requestPayload = JSON.stringify({
-      prompt: userPrompt, audience, language,
+      prompt: userPrompt, audience, language, preferredModel,
     });
 
     const { stdout } = await execFileAsync(
