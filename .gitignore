@@ -48,6 +48,7 @@ next-env.d.ts
 *.xlsx
 !__tests__/baseline-snapshots/*.xlsx
 !__tests__/fixtures/*.xlsx
+!tests/fixtures/*.xlsx
 *.pptx
 *.json
 !package.json
