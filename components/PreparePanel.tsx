@@ -42,10 +42,26 @@ interface SlidePreview {
   mandatory?: boolean;
 }
 
+interface IntentReportSheet {
+  requested: string;
+  matched: string | null;
+  closest: string | null;
+  slide_indices: number[];
+}
+
+interface IntentReport {
+  requested_slide_count: number | null;
+  actual_slide_count: number;
+  count_honored: boolean;
+  required_sheets: IntentReportSheet[];
+  skipped_sheets: string[];
+}
+
 interface PreviewResponse {
   meta: { title?: string; subtitle?: string };
   slides: SlidePreview[];
   ai_status?: { model?: string; cache_hit?: boolean };
+  intent_report?: IntentReport | null;
 }
 
 type Mode = 'mixed' | 'charts' | 'tables' | 'boardroom' | 'auto';
@@ -120,7 +136,7 @@ export default function PreparePanel({
 
   const [excluded, setExcluded] = useState<Set<number>>(new Set());
   const [expandedSlide, setExpandedSlide] = useState<number | null>(null);
-  const [refineOpen, setRefineOpen] = useState(false);
+  const [refineOpen, setRefineOpen] = useState(true);  // abierto por default — único lugar para el prompt
 
   // Cheap stable identity — depending on the File object itself causes
   // re-fetches on every parent re-render which abort in-flight requests.
@@ -430,7 +446,106 @@ export default function PreparePanel({
       </section>
 
       {/* ────────────────────────────────────────────────
-           Section 2 — Plan de slides
+           Section 2 — Tu instrucción para la IA (único lugar)
+         ──────────────────────────────────────────────── */}
+      <section className="prep-section prep-refine">
+        <button
+          type="button"
+          onClick={() => setRefineOpen(o => !o)}
+          className="prep-refine-toggle"
+        >
+          <span className="prep-refine-left">
+            {refineOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <span className="prep-refine-label">Tu instrucción para la IA</span>
+          </span>
+          <span className="prep-refine-right">
+            <span className="prep-mode-pill">{MODE_LABELS[mode] || 'Mixto'}</span>
+          </span>
+        </button>
+
+        {refineOpen && (
+          <div className="prep-refine-body animate-fade-in">
+            <textarea
+              value={userPrompt}
+              onChange={(e) => onPromptChange(e.target.value)}
+              placeholder="Ej: hazme 9 slides incluyendo Riesgos Core y Riesgos Acciones"
+              className="prep-prompt"
+              rows={2}
+            />
+
+            {summary && summary.suggestions.length > 0 && (
+              <div className="prep-suggestions">
+                <p className="prep-sugg-label">
+                  <Lightbulb size={11} />
+                  Ideas rápidas
+                </p>
+                <div className="prep-sugg-row">
+                  {summary.suggestions.slice(0, 4).map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => handleSuggestionClick(s)}
+                      className={`prep-sugg ${userPrompt === s.prompt ? 'is-active' : ''}`}
+                      title={s.why}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="prep-mode-row">
+              <label className="prep-mode-label">Estilo visual</label>
+              <div className="prep-mode-options">
+                {(['mixed', 'charts', 'tables', 'boardroom'] as Mode[]).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => onModeChange(m)}
+                    className={`prep-mode-opt ${mode === m ? 'is-active' : ''}`}
+                  >
+                    {MODE_LABELS[m]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {onThemeChange && (
+              <div className="prep-mode-row">
+                <label className="prep-mode-label">Tema visual</label>
+                <div className="prep-theme-options">
+                  {PREP_THEMES.map((t) => (
+                    <button
+                      key={t.key}
+                      type="button"
+                      onClick={() => onThemeChange(t)}
+                      className={`prep-theme-opt ${theme.key === t.key ? 'is-active' : ''}`}
+                      title={`${t.name}: primario ${t.primary_hex}, acento ${t.accent_hex}`}
+                    >
+                      <span className="prep-theme-swatch" aria-hidden>
+                        <span style={{ background: t.primary_hex }} />
+                        <span style={{ background: t.accent_hex }} />
+                      </span>
+                      {t.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {onOpenAdvanced && (
+              <p className="prep-refine-hint">
+                ¿Necesitas más control (tema, audiencia, sugerencias completas)? Abre el{' '}
+                <button type="button" className="prep-link" onClick={onOpenAdvanced}>panel avanzado</button>.
+              </p>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* ────────────────────────────────────────────────
+           Section 3 — Plan de slides
          ──────────────────────────────────────────────── */}
       <section className="prep-section">
         <div className="prep-section-head">
@@ -452,6 +567,9 @@ export default function PreparePanel({
           </div>
         ) : plan ? (
           <>
+            {plan.intent_report && (
+              <IntentBanner report={plan.intent_report} />
+            )}
             <p className="prep-slide-hint">
               Click para activar/desactivar · arrastra <GripVertical size={11} style={{ verticalAlign: 'middle' }} /> para reordenar · usa <Pencil size={11} style={{ verticalAlign: 'middle' }} /> para editar el título.
             </p>
@@ -608,105 +726,6 @@ export default function PreparePanel({
       </section>
 
       {/* ────────────────────────────────────────────────
-           Section 3 — Refinar (collapsed by default)
-         ──────────────────────────────────────────────── */}
-      <section className="prep-section prep-refine">
-        <button
-          type="button"
-          onClick={() => setRefineOpen(o => !o)}
-          className="prep-refine-toggle"
-        >
-          <span className="prep-refine-left">
-            {refineOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            <span className="prep-refine-label">Refinar prompt y contexto</span>
-          </span>
-          <span className="prep-refine-right">
-            <span className="prep-mode-pill">{MODE_LABELS[mode] || 'Mixto'}</span>
-          </span>
-        </button>
-
-        {refineOpen && (
-          <div className="prep-refine-body animate-fade-in">
-            <textarea
-              value={userPrompt}
-              onChange={(e) => onPromptChange(e.target.value)}
-              placeholder="Ej: enfócate en métricas trimestrales, comparativas regionales, riesgos críticos…"
-              className="prep-prompt"
-              rows={2}
-            />
-
-            {summary && summary.suggestions.length > 0 && (
-              <div className="prep-suggestions">
-                <p className="prep-sugg-label">
-                  <Lightbulb size={11} />
-                  Ideas rápidas
-                </p>
-                <div className="prep-sugg-row">
-                  {summary.suggestions.slice(0, 4).map((s) => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onClick={() => handleSuggestionClick(s)}
-                      className={`prep-sugg ${userPrompt === s.prompt ? 'is-active' : ''}`}
-                      title={s.why}
-                    >
-                      {s.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="prep-mode-row">
-              <label className="prep-mode-label">Estilo visual</label>
-              <div className="prep-mode-options">
-                {(['mixed', 'charts', 'tables', 'boardroom'] as Mode[]).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => onModeChange(m)}
-                    className={`prep-mode-opt ${mode === m ? 'is-active' : ''}`}
-                  >
-                    {MODE_LABELS[m]}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {onThemeChange && (
-              <div className="prep-mode-row">
-                <label className="prep-mode-label">Tema visual</label>
-                <div className="prep-theme-options">
-                  {PREP_THEMES.map((t) => (
-                    <button
-                      key={t.key}
-                      type="button"
-                      onClick={() => onThemeChange(t)}
-                      className={`prep-theme-opt ${theme.key === t.key ? 'is-active' : ''}`}
-                      title={`${t.name}: primario ${t.primary_hex}, acento ${t.accent_hex}`}
-                    >
-                      <span className="prep-theme-swatch" aria-hidden>
-                        <span style={{ background: t.primary_hex }} />
-                        <span style={{ background: t.accent_hex }} />
-                      </span>
-                      {t.name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {onOpenAdvanced && (
-              <p className="prep-refine-hint">
-                ¿Necesitas más control (tema, audiencia, sugerencias completas)? Abre el{' '}
-                <button type="button" className="prep-link" onClick={onOpenAdvanced}>panel avanzado</button>.
-              </p>
-            )}
-          </div>
-        )}
-      </section>
-
-      {/* ────────────────────────────────────────────────
            CTA
          ──────────────────────────────────────────────── */}
       <button
@@ -737,6 +756,53 @@ export default function PreparePanel({
 /* ──────────────────────────────────────────────────────────────
    Small subcomponents
    ────────────────────────────────────────────────────────────── */
+
+function IntentBanner({ report }: { report: IntentReport }) {
+  const matchedSheets = report.required_sheets.filter(s => s.matched);
+  const unmatchedSheets = report.required_sheets.filter(s => !s.matched);
+  const countLine = report.requested_slide_count !== null
+    ? (report.count_honored
+        ? `${report.actual_slide_count} slides (como pediste)`
+        : `${report.actual_slide_count} slides — pediste ${report.requested_slide_count} pero el Excel sólo tiene material para ${report.actual_slide_count}`)
+    : null;
+  const allHonored = (report.count_honored
+                       && unmatchedSheets.length === 0
+                       && report.skipped_sheets.length === 0);
+
+  if (!countLine && matchedSheets.length === 0 && unmatchedSheets.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className={`prep-intent ${allHonored ? 'is-ok' : 'is-warn'}`}>
+      <div className="prep-intent-icon" aria-hidden>
+        {allHonored ? <CheckIcon size={13} /> : <AlertTriangle size={13} />}
+      </div>
+      <div className="prep-intent-body">
+        <p className="prep-intent-title">
+          {allHonored ? 'Detecté en tu instrucción:' : 'Detecté parcialmente en tu instrucción:'}
+        </p>
+        <ul className="prep-intent-list">
+          {countLine && <li>{countLine}</li>}
+          {matchedSheets.map((s, i) => (
+            <li key={`m-${i}`}>
+              <strong>{s.matched}</strong>
+              {s.slide_indices.length
+                ? ` — slide${s.slide_indices.length > 1 ? 's' : ''} ${s.slide_indices.map(n => n + 1).join(', ')}`
+                : ' — incluida en el plan'}
+            </li>
+          ))}
+          {unmatchedSheets.map((s, i) => (
+            <li key={`u-${i}`} className="prep-intent-warn">
+              <em>"{s.requested}"</em> no se encontró
+              {s.closest ? <> — la hoja más parecida es <strong>{s.closest}</strong></> : null}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
 
 function Stat({ icon: Ic, label, value, color }: {
   icon: React.ComponentType<{ size?: number; color?: string }>;
@@ -1350,4 +1416,46 @@ const PREP_STYLES = `
   background: var(--c-text-muted);
   box-shadow: none;
 }
+
+/* ── Intent banner ── */
+.prep-intent {
+  display: flex; align-items: flex-start; gap: 0.55rem;
+  padding: 0.7rem 0.85rem;
+  border-radius: var(--r-md);
+  margin-bottom: 0.65rem;
+  font-size: 0.74rem; line-height: 1.5;
+}
+.prep-intent.is-ok {
+  background: rgba(105, 190, 40, 0.10);
+  border: 1px solid rgba(105, 190, 40, 0.35);
+  color: #2a5510;
+}
+.prep-intent.is-warn {
+  background: #FEF7E0;
+  border: 1px solid rgba(243, 196, 0, 0.45);
+  color: #7a5e00;
+}
+.prep-intent-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.prep-intent-body { flex: 1; min-width: 0; }
+.prep-intent-title {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.3rem;
+}
+.prep-intent-list {
+  list-style: none;
+  padding: 0; margin: 0;
+  display: flex; flex-direction: column; gap: 0.2rem;
+}
+.prep-intent-list li {
+  font-size: 0.74rem;
+}
+.prep-intent-list strong { font-weight: 700; }
+.prep-intent-warn { color: #7a5e00; }
 `;
