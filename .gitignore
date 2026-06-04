@@ -49,7 +49,12 @@ next-env.d.ts
 !__tests__/baseline-snapshots/*.xlsx
 !__tests__/fixtures/*.xlsx
 !tests/fixtures/*.xlsx
+# Los .pptx generados (AUDIT_*, COMISIONES_*, etc.) son artefactos de prueba y
+# NO deben ensuciar git status. Se restauró este patrón tras una regresión que
+# lo había borrado. La plantilla del producto SÍ se versiona (excepción abajo).
 *.pptx
+!Plantilla_Presentacion_Socya (1) (1).pptx
+
 *.json
 !package.json
 !package-lock.json
@@ -68,6 +73,11 @@ next-env.d.ts
 /ppt_review_*/
 __pycache__/
 *.pyc
+
+# Cache de planes IA generado por socya_pipeline/ai_cache.py. Por defecto ahora
+# vive fuera del árbol del proyecto (ver ai_cache.py), pero ignoramos .cache/
+# por si un override SOCYA_CACHE_DIR lo apunta acá o por instalaciones viejas.
+.cache/
 
 # AI tooling state — these are auto-synced from global skill registries
 # and shouldn't pollute the repo (every clone would re-sync them anyway).

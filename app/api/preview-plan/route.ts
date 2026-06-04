@@ -10,14 +10,16 @@ import { getRuntimeDependencyStatus, getRuntimeFailureMessage } from '@/utils/se
 const execFileAsync = promisify(execFile);
 
 export const runtime = 'nodejs';
-export const maxDuration = 300;
+export const maxDuration = 600;  // 10 min — tolera cold-start de Python en Windows + AI free-tier saturado
 
 // Preview-plan endpoint: runs the AI planner ONCE (cached by file hash) and
 // returns the slide list so the UI can render checkboxes BEFORE the user
 // commits to rendering the .pptx. Subsequent /api/generate-pptx calls with
 // the same file + prompt will hit the plan cache → zero extra AI tokens.
 export async function POST(req: NextRequest) {
-  // Pre-warm: ver comentario en /api/quick-summary/route.ts.
+  // Pre-warm: el cliente hace POST /api/preview-plan?warmup=1 al montar para
+  // forzar a Next a compilar esta ruta on-demand ANTES del primer request real.
+  // Cortocircuitamos acá (sin spawnear Python) y devolvemos 200 al instante.
   const url = new URL(req.url);
   if (url.searchParams.get('warmup') === '1') {
     return NextResponse.json({ ok: true, warmup: true }, { status: 200 });
@@ -76,10 +78,21 @@ export async function POST(req: NextRequest) {
       ['-m', 'socya_pipeline', 'plan', '--input', inputPath, '--request', requestPayload],
       {
         maxBuffer: 30 * 1024 * 1024,
-        timeout: 280_000,
-        // Force UTF-8 stdio so non-ASCII output (em-dashes, narrow-spaces, ñ)
-        // doesn't crash on Windows where the default code page is cp1252.
-        env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+        // 8 min — preview-plan ahora usa profile PATIENT (200s budget AI con
+        // chain multi-provider). Más cold-start de Python en Windows (puede
+        // ser 20s+ si Defender escanea, pero el instrumentation pre-warm
+        // ayuda). 480s da margen amplio sin frustrar al usuario.
+        timeout: 480_000,
+        env: {
+          ...process.env,
+          PYTHONUTF8: '1',
+          PYTHONIOENCODING: 'utf-8',
+          // PATIENT profile: hasta 13 modelos a través de Cerebras/Groq/
+          // OpenRouter con 200s de budget total. Con FAST (default) el chain
+          // probaba 1 solo modelo y fallaba con AI_SATURATED si Groq estaba
+          // rate-limited. PATIENT da resiliencia real al usuario.
+          SOCYA_AI_PROFILE: 'patient',
+        },
         windowsHide: true,
       }
     );
@@ -103,7 +116,9 @@ export async function POST(req: NextRequest) {
       subtitle: s.subtitle ?? '',
       narrative: s.narrative ?? '',
       provenance: s.provenance ?? null,
-      mandatory: s.type === 'title',  // title slide is always kept
+      // Title (portada) y closing (¡Gracias!) son siempre mandatory — el usuario
+      // no los puede excluir ni reordenar desde la UI.
+      mandatory: s.type === 'title' || s.type === 'closing',
     }));
 
     return NextResponse.json({
@@ -117,8 +132,13 @@ export async function POST(req: NextRequest) {
   } catch (err: unknown) {
     const e = err as { stdout?: string; stderr?: string; code?: string; killed?: boolean; message?: string };
     if (e.code === 'ETIMEDOUT' || e.killed) {
+      // Surface stderr if Python emitted partial progress before being killed —
+      // helps diagnose whether it was AI saturation, parse hang, or render slowness.
+      const stderrTail = (e.stderr || '').toString().split('\n').filter(Boolean).slice(-2).join(' | ').slice(0, 300);
       return NextResponse.json(
-        { error: 'La generación del plan demoró demasiado. Intenta con un Excel más pequeño.' },
+        { error: stderrTail
+            ? `La generación del plan demoró más de 8 minutos. Último estado del backend: ${stderrTail}. Probá reintentar — los free tiers de IA suelen mejorar cuando bajan de carga.`
+            : 'La generación del plan demoró más de 8 minutos. Probá reintentar en un par de minutos (los free tiers de IA suelen estar saturados en horas pico) o reduce el tamaño del Excel.' },
         { status: 408 }
       );
     }
@@ -130,8 +150,12 @@ export async function POST(req: NextRequest) {
         }
       } catch { /* not JSON */ }
     }
+    // Surface stderr (Python tracebacks) when available — beats a generic 500.
+    const stderrSnippet = (e.stderr || '').toString().split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 500);
     return NextResponse.json(
-      { error: 'No se pudo generar el plan del PowerPoint.' },
+      { error: stderrSnippet
+          ? `No se pudo generar el plan del PowerPoint. Detalle: ${stderrSnippet}`
+          : 'No se pudo generar el plan del PowerPoint.' },
       { status: 500 }
     );
   } finally {

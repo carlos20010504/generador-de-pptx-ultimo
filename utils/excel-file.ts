@@ -145,22 +145,40 @@ export async function validateExcelContents(file: File): Promise<string | null> 
         }
       }
 
+      // Validación de columnas "numéricas" por nombre (Monto/Total/Valor…).
+      // ANTES: rechazaba el archivo entero ante la PRIMERA celda de texto en
+      // esas columnas. Eso bloqueaba Exceles perfectamente válidos donde una
+      // columna de dinero trae etiquetas legítimas como "Pendiente", "N/A" o
+      // "Ver anexo" mezcladas con números — algo que el backend Python maneja
+      // sin problema (pd.to_numeric con errors='coerce' las vuelve NaN).
+      // AHORA: solo rechazamos cuando una columna con nombre numérico es
+      // 100% texto sobre una muestra significativa (≥6 valores no vacíos),
+      // que sí es señal de un archivo realmente malformado/mal parseado.
+      // Si la columna tiene aunque sea UN número, dejamos pasar y que el
+      // backend la procese.
       if (numericColumns.length > 0) {
-        for (let rowIdx = 0; rowIdx < bodyRows.length; rowIdx++) {
-          const row = bodyRows[rowIdx];
-          if (!row || !row.length) continue;
-
-          for (const colIdx of numericColumns) {
+        for (const colIdx of numericColumns) {
+          let numericCount = 0;
+          let nonNumericCount = 0;
+          let firstBadValue = '';
+          for (const row of bodyRows) {
+            if (!row || !row.length) continue;
             const val = row[colIdx];
-            if (isMeaningfulCell(val)) {
-              if (typeof val === 'string') {
-                const cleaned = val.replace(/[$,\s%]/g, '');
-                if (Number.isNaN(Number(cleaned))) {
-                  const excelRowNumber = headerIndex + rowIdx + 2;
-                  return `Error de validacion en la hoja '${sheetName}', fila ${excelRowNumber}: la columna '${headerNames[colIdx]}' debe contener valores numericos, pero se encontro texto ("${val}"). Por favor corrige el Excel y vuelve a intentar.`;
-                }
-              }
+            if (!isMeaningfulCell(val)) continue;
+            if (typeof val === 'number') {
+              numericCount++;
+              continue;
             }
+            const cleaned = String(val).replace(/[$,\s%]/g, '');
+            if (cleaned !== '' && !Number.isNaN(Number(cleaned))) {
+              numericCount++;
+            } else {
+              nonNumericCount++;
+              if (!firstBadValue) firstBadValue = String(val);
+            }
+          }
+          if (numericCount === 0 && nonNumericCount >= 6) {
+            return `La columna '${headerNames[colIdx]}' en la hoja '${sheetName}' parece de tipo numérico por su nombre pero no contiene ningún valor numérico (ej.: "${firstBadValue}"). Verifica que esa columna tenga cifras o renómbrala, y vuelve a intentar.`;
           }
         }
       }

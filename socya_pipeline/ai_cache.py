@@ -1,10 +1,34 @@
 """Content-hash persistent cache for IA-generated plans."""
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "plans"
+
+def _default_cache_dir() -> Path:
+    """Ubicación del cache de planes.
+
+    IMPORTANTE: vive FUERA del árbol del proyecto. Antes era
+    `<project_root>/.cache/plans`, lo que metía escrituras JSON dentro del
+    directorio que el dev server de Next observa. Aunque el watcher de webpack
+    no reacciona a archivos fuera del module graph, mantenerlo afuera elimina
+    de raíz cualquier riesgo de que un file-watcher (Turbopack, una versión
+    futura, un editor) dispare un reload del dev server justo mientras la IA
+    planifica — el síntoma de "el programa se cierra durante el plan".
+
+    Override explícito vía env SOCYA_CACHE_DIR. Default: subcarpeta estable en
+    el temp del sistema (persiste entre corridas; el SO la limpia eventualmente,
+    lo cual es aceptable para un cache).
+    """
+    override = (os.environ.get("SOCYA_CACHE_DIR") or "").strip()
+    if override:
+        return Path(override)
+    return Path(tempfile.gettempdir()) / "socya_plan_cache"
+
+
+DEFAULT_CACHE_DIR = _default_cache_dir()
 
 def compute_cache_key(file_bytes: bytes, prompt: str, audience: str,
                        language: str, planner_version: str) -> str:
