@@ -12,3 +12,9 @@ requests>=2.31,<3.0
 
 # xlrd is needed for legacy .xls reading (pandas drops it from the default).
 xlrd>=2.0,<3.0
+
+# pdf2image rasterizes the LibreOffice-produced PDF into per-slide PNGs on
+# Linux (preview.py). Pure Python; the actual rasterizer is poppler-utils,
+# installed as a system package in the Docker image. Harmless on Windows
+# (the PowerPoint COM path is used there, so pdf2image is never imported).
+pdf2image>=1.16,<2.0

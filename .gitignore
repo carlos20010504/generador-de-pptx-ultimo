@@ -36,6 +36,8 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...pero el ejemplo SÍ se versiona (documenta las claves sin valores).
+!.env.example
 
 # vercel
 .vercel

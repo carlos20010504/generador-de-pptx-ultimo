@@ -1,0 +1,30 @@
+# Render Blueprint — despliegue de la app como servicio web Docker.
+# Crear con: Render Dashboard -> New -> Blueprint, apuntando a este repo.
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: socya-pptx
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # PLAN — decisión de costo/fiabilidad:
+    #   free     : 512 MB RAM, se duerme tras ~15 min de inactividad (cold start
+    #              ~30-60s). LibreOffice + pandas + matplotlib + Node pueden
+    #              superar 512 MB en decks grandes -> riesgo de OOM.
+    #   starter  : ~$7/mes, no se duerme, pero también 512 MB (mismo riesgo OOM).
+    #   standard : ~$25/mes, 2 GB RAM -> opción segura para previews LibreOffice.
+    # Empezamos en free para validar; subí a standard si ves OOM con decks reales.
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Claves de IA — se cargan como secretos en el dashboard (sync:false impide
+      # que Render las pida en el Blueprint y NO quedan en el repo ni en la imagen).
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: CEREBRAS_API_KEY
+        sync: false
+      # Saca el caché de IA del árbol del proyecto (filesystem efímero del contenedor).
+      - key: SOCYA_CACHE_DIR
+        value: /tmp/socya_cache
