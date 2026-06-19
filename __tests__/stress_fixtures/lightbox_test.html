@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Lightbox standalone test</title>
+<style>
+:root {
+  --r-md: 8px;
+  --font-heading: Georgia, serif;
+}
+body { margin: 0; padding: 0; font-family: system-ui; }
+
+.prv-lightbox {
+  position: fixed; inset: 0;
+  z-index: 200;
+  background: rgba(18, 60, 73, 0.92);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.prv-lightbox-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 1.25rem;
+  background: rgba(0, 0, 0, 0.55);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+.prv-lightbox-pos {
+  color: white;
+  font-family: var(--font-heading);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.prv-lightbox-btn {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.55rem 0.8rem;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: var(--r-md);
+  color: white;
+  font-family: var(--font-heading);
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.prv-lightbox-content {
+  padding: 1.5rem;
+}
+
+.prv-lightbox-img {
+  display: block;
+  margin: 0 auto;
+  border-radius: var(--r-md);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  height: auto;
+}
+
+.prv-lightbox-img.is-medium {
+  width: min(1400px, 95vw);
+  max-width: 100%;
+  cursor: zoom-in;
+}
+
+.prv-lightbox-img.is-big {
+  width: max(1800px, 150vw);
+  max-width: none;
+  cursor: zoom-out;
+}
+</style>
+</head>
+<body>
+
+<div class="prv-lightbox" id="lightbox">
+  <div class="prv-lightbox-bar">
+    <span class="prv-lightbox-pos">Slide <strong>1</strong> / 15</span>
+    <button class="prv-lightbox-btn" id="btn-zoom">Ampliar</button>
+    <button class="prv-lightbox-btn" id="btn-close">Cerrar</button>
+  </div>
+  <div class="prv-lightbox-content">
+    <!-- Imagen falsa: SVG grande con dimensiones explícitas para simular slide -->
+    <img id="img" class="prv-lightbox-img is-medium" alt="Test slide"
+         src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1920 1080'%3E%3Crect width='1920' height='1080' fill='%23087062'/%3E%3Ctext x='960' y='540' text-anchor='middle' fill='white' font-family='Georgia' font-size='160' font-weight='bold'%3ETest Slide%3C/text%3E%3C/svg%3E">
+  </div>
+</div>
+
+<script>
+const img = document.getElementById('img');
+const btn = document.getElementById('btn-zoom');
+btn.addEventListener('click', () => {
+  const isBig = img.classList.toggle('is-big');
+  img.classList.toggle('is-medium', !isBig);
+  btn.textContent = isBig ? 'Reducir' : 'Ampliar';
+});
+img.addEventListener('click', () => btn.click());
+
+// Helpers exposed for testing
+window.__test = {
+  getLightbox: () => document.getElementById('lightbox'),
+  getImg: () => img,
+  getZoomBtn: () => btn,
+  scroll: (top, left) => {
+    const lb = document.getElementById('lightbox');
+    lb.scrollTop = top;
+    lb.scrollLeft = left;
+    return { top: lb.scrollTop, left: lb.scrollLeft };
+  },
+  measure: () => {
+    const lb = document.getElementById('lightbox');
+    return {
+      scrollHeight: lb.scrollHeight,
+      clientHeight: lb.clientHeight,
+      scrollWidth: lb.scrollWidth,
+      clientWidth: lb.clientWidth,
+      imgWidth: img.offsetWidth,
+      imgHeight: img.offsetHeight,
+      hasVerticalScroll: lb.scrollHeight > lb.clientHeight,
+      hasHorizontalScroll: lb.scrollWidth > lb.clientWidth,
+    };
+  },
+};
+</script>
+
+</body>
+</html>

@@ -172,13 +172,9 @@ export default function ExcelUploader() {
   // Pre-warm en mount: ataca el cold-start de dev mode (Next compila routes
   // on-demand + Python tarda ~5s en importar pandas/openpyxl).
   //
-  // /api/health hace `python -c 'import socya_pipeline...'` que valida deps
-  // y de paso warm-loadea los módulos pesados de Python.
-  // /api/quick-summary y /api/preview-plan reciben `?warmup=1` que las hace
-  // retornar 200 instantáneo (las routes detectan el query param y short-
-  // circuitean ANTES de spawnear Python o validar nada). Eso fuerza a Next
-  // a compilarlas. Antes hacíamos POST vacío que devolvía 500 pollucionando
-  // logs y hasta podía interferir con uploads concurrentes del usuario.
+  // /api/health verifica deps y /api/preview-plan recibe `?warmup=1` que la
+  // hace retornar 200 instantáneo (la route detecta el query param y short-
+  // circuitea ANTES de spawnear Python). Eso fuerza a Next a compilarla.
   useEffect(() => {
     const ctrl = new AbortController();
     fetch('/api/health', { method: 'GET', cache: 'no-store', signal: ctrl.signal })
@@ -190,7 +186,6 @@ export default function ExcelUploader() {
         });
       })
       .catch(() => undefined);
-    fetch('/api/quick-summary?warmup=1', { method: 'POST', signal: ctrl.signal }).catch(() => undefined);
     fetch('/api/preview-plan?warmup=1',  { method: 'POST', signal: ctrl.signal }).catch(() => undefined);
     return () => ctrl.abort();
   }, []);

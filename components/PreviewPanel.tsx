@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from 'react';
-import { Download, ArrowLeft, Loader2, AlertCircle, X, FileText } from 'lucide-react';
+import { Download, ArrowLeft, Loader2, AlertCircle, X, FileText, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 
 interface Props {
   token: string;
@@ -22,6 +22,18 @@ export default function PreviewPanel({
   token, count, filename, onConfirm, onBack, isDownloading,
 }: Props) {
   const [zoomIdx, setZoomIdx] = useState<number | null>(null);
+  // imgZoomed: false = fit-to-view (ve la slide entera, sin scroll).
+  // true = tamaño grande (desborda viewport → aparece scroll real). Click en
+  // la imagen alterna entre los dos modos. Reset a false al cambiar de slide.
+  const [imgZoomed, setImgZoomed] = useState(false);
+  // Estado de carga de la imagen en el lightbox. Sin esto, si el server
+  // devuelve 404 (token expirado, preview borrado), el <img> queda invisible
+  // y el usuario solo ve "Slide N / total" sin entender qué pasó.
+  const [imgState, setImgState] = useState<'loading' | 'ready' | 'error'>('loading');
+  // Cache-buster por sesión de lightbox — si el usuario reabre la misma
+  // slide después de un fallo, fuerza nuevo request en vez de servir el 404
+  // cacheado por el browser.
+  const [imgNonce, setImgNonce] = useState(0);
   const [pdfState, setPdfState] = useState<'idle' | 'fetching' | 'error'>('idle');
   const [pdfError, setPdfError] = useState<string | null>(null);
 
@@ -51,11 +63,20 @@ export default function PreviewPanel({
     }
   };
 
-  // Cerrar zoom con ESC + bloquear scroll mientras está abierto
+  // ESC cierra, flechas ←/→ navegan entre slides. Bloqueamos el scroll del
+  // body mientras el lightbox está abierto para que solo scrollee el modal.
   useEffect(() => {
     if (zoomIdx === null) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setZoomIdx(null);
+      if (e.key === 'Escape') {
+        setZoomIdx(null);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        setZoomIdx((cur) => (cur === null ? cur : Math.min(count - 1, cur + 1)));
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setZoomIdx((cur) => (cur === null ? cur : Math.max(0, cur - 1)));
+      }
     };
     window.addEventListener('keydown', onKey);
     const prev = document.body.style.overflow;
@@ -64,7 +85,27 @@ export default function PreviewPanel({
       window.removeEventListener('keydown', onKey);
       document.body.style.overflow = prev;
     };
+  }, [zoomIdx, count]);
+
+  const goPrev = () => setZoomIdx((cur) => (cur === null ? cur : Math.max(0, cur - 1)));
+  const goNext = () => setZoomIdx((cur) => (cur === null ? cur : Math.min(count - 1, cur + 1)));
+
+  // Reset el modo zoom + estado de carga cada vez que el usuario salta a
+  // otra slide. Si no reseteamos imgState, el spinner queda "viejo" de la
+  // slide anterior y el usuario ve estado inconsistente.
+  useEffect(() => {
+    if (zoomIdx !== null) {
+      setImgZoomed(false);
+      setImgState('loading');
+    }
   }, [zoomIdx]);
+
+  // Handler para reintentar carga manualmente cuando hay error. Bumpea el
+  // nonce → cambia el src → React monta nueva <img> → nuevo fetch al server.
+  const retryImage = () => {
+    setImgState('loading');
+    setImgNonce((n) => n + 1);
+  };
 
   return (
     <div className="prv-card animate-fade-in-up">
@@ -152,26 +193,119 @@ export default function PreviewPanel({
         Archivo: <span className="prv-foot-name">{filename}</span>
       </p>
 
-      {/* Lightbox */}
+      {/* Lightbox v3 — patrón simple bulletproof:
+          - Container fijo a viewport con overflow:auto → SIEMPRE puede scrollear
+          - Toolbar sticky top:0 → siempre visible mientras scrolleás
+          - Imagen como BLOCK con margin:0 auto → centrada horizontal sin flex
+          - Sin "modos" complejos: dos clases simples (medium/big) que cambian
+            ancho. Click en imagen alterna entre las dos.
+          - Click en backdrop fuera de la imagen cierra. */}
       {zoomIdx !== null && (
-        <div className="prv-lightbox" onClick={() => setZoomIdx(null)} role="dialog" aria-modal="true">
-          <button
-            type="button"
-            className="prv-lightbox-close"
-            onClick={(e) => { e.stopPropagation(); setZoomIdx(null); }}
-            aria-label="Cerrar vista ampliada"
-          >
-            <X size={20} />
-          </button>
-          <div className="prv-lightbox-pos">
-            Slide {zoomIdx + 1} / {count}
+        <div
+          className="prv-lightbox"
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => {
+            // Solo cerrar si el click fue en el container backdrop, no en
+            // contenido interno (toolbar, imagen, flechas). Sin esto, el
+            // click en cualquier parte cierra demasiado fácil.
+            if (e.target === e.currentTarget) setZoomIdx(null);
+          }}
+        >
+          {/* Toolbar SIEMPRE visible (sticky top) */}
+          <div className="prv-lightbox-bar">
+            <span className="prv-lightbox-pos">
+              Slide <strong>{zoomIdx + 1}</strong> / {count}
+            </span>
+            <div className="prv-lightbox-actions">
+              {zoomIdx > 0 && (
+                <button
+                  type="button"
+                  className="prv-lightbox-btn"
+                  onClick={goPrev}
+                  aria-label="Slide anterior"
+                  title="Anterior (←)"
+                >
+                  <ChevronLeft size={18} />
+                </button>
+              )}
+              {zoomIdx < count - 1 && (
+                <button
+                  type="button"
+                  className="prv-lightbox-btn"
+                  onClick={goNext}
+                  aria-label="Slide siguiente"
+                  title="Siguiente (→)"
+                >
+                  <ChevronRight size={18} />
+                </button>
+              )}
+              <button
+                type="button"
+                className="prv-lightbox-btn"
+                onClick={() => setImgZoomed((z) => !z)}
+                aria-label={imgZoomed ? 'Reducir' : 'Ampliar'}
+                title={imgZoomed ? 'Reducir' : 'Ampliar (clic en imagen)'}
+              >
+                {imgZoomed ? <ZoomOut size={16} /> : <ZoomIn size={16} />}
+                <span className="prv-lightbox-btn-label">
+                  {imgZoomed ? 'Reducir' : 'Ampliar'}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="prv-lightbox-btn prv-lightbox-btn-close"
+                onClick={() => setZoomIdx(null)}
+                aria-label="Cerrar vista ampliada"
+                title="Cerrar (Esc)"
+              >
+                <X size={18} />
+                <span className="prv-lightbox-btn-label">Cerrar</span>
+              </button>
+            </div>
           </div>
-          <img
-            src={`/api/pptx-preview?token=${encodeURIComponent(token)}&slide=${zoomIdx}`}
-            alt={`Slide ${zoomIdx + 1}`}
-            className="prv-lightbox-img"
-            onClick={(e) => e.stopPropagation()}
-          />
+
+          {/* Contenido: la imagen vive directamente acá. El container padre
+              (prv-lightbox) tiene overflow:auto → scrollea cuando la imagen
+              + padding excede el viewport. SIN flex centering. */}
+          <div className="prv-lightbox-content">
+            {imgState === 'loading' && (
+              <div className="prv-lightbox-msg">
+                <Loader2 size={28} style={{ animation: 'spin 1s linear infinite' }} />
+                <span>Cargando vista previa…</span>
+              </div>
+            )}
+            {imgState === 'error' && (
+              <div className="prv-lightbox-msg prv-lightbox-msg-err">
+                <AlertCircle size={28} />
+                <span>No se pudo cargar la vista previa.</span>
+                <span className="prv-lightbox-msg-hint">
+                  La vista previa puede haber expirado. Probá reintentar o
+                  cerrá y volvé a abrir.
+                </span>
+                <button
+                  type="button"
+                  className="prv-lightbox-btn"
+                  onClick={retryImage}
+                >
+                  Reintentar
+                </button>
+              </div>
+            )}
+            <img
+              key={`${zoomIdx}-${imgNonce}`}
+              src={`/api/pptx-preview?token=${encodeURIComponent(token)}&slide=${zoomIdx}&t=${imgNonce}`}
+              alt={`Slide ${zoomIdx + 1}`}
+              className={`prv-lightbox-img ${imgZoomed ? 'is-big' : 'is-medium'}`}
+              onLoad={() => setImgState('ready')}
+              onError={() => setImgState('error')}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (imgState === 'ready') setImgZoomed((z) => !z);
+              }}
+              style={{ display: imgState === 'ready' ? 'block' : 'none' }}
+            />
+          </div>
         </div>
       )}
 
@@ -425,47 +559,130 @@ const PRV_STYLES = `
   font-weight: 700;
 }
 
-/* Lightbox */
+/* ──────────────────────────────────────────────────────────────────
+   Lightbox v3 — patrón super simple. Container fijo con overflow:auto
+   (SIEMPRE scrolleable), toolbar sticky top, imagen block con margin
+   auto. Sin flex centering, sin wrapper-div, sin "safe" — solo CSS
+   básico que funciona en todos los browsers.
+   ────────────────────────────────────────────────────────────────── */
 .prv-lightbox {
   position: fixed; inset: 0;
-  background: rgba(18, 60, 73, 0.85);
-  backdrop-filter: blur(6px);
   z-index: 200;
-  display: flex; align-items: center; justify-content: center;
-  padding: 1.5rem;
-  cursor: zoom-out;
+  background: rgba(18, 60, 73, 0.92);
+  backdrop-filter: blur(6px);
+  /* Aquí está la clave: el container ENTERO scrollea. Cuando la imagen
+     es alta, el scroll natural del navegador funciona sin trucos. */
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
   animation: fadeIn 0.18s ease-out;
 }
-.prv-lightbox-close {
-  position: absolute;
-  top: 1rem; right: 1rem;
-  width: 2.4rem; height: 2.4rem;
-  border-radius: var(--r-md);
-  background: rgba(255, 255, 255, 0.10);
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  color: white;
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer;
-  transition: background 0.18s;
+
+/* Toolbar sticky → siempre visible aunque scrollees hacia abajo. */
+.prv-lightbox-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem clamp(0.75rem, 2vw, 1.25rem);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
 }
-.prv-lightbox-close:hover { background: rgba(255, 255, 255, 0.20); }
 .prv-lightbox-pos {
-  position: absolute;
-  top: 1.2rem; left: 1.2rem;
+  color: rgba(255, 255, 255, 0.85);
+  font-family: var(--font-heading);
+  font-size: 0.78rem; font-weight: 600;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  white-space: nowrap;
+}
+.prv-lightbox-pos strong {
+  color: white; font-weight: 800;
+}
+.prv-lightbox-actions {
+  display: flex; gap: 0.4rem;
+  flex-wrap: nowrap;
+}
+.prv-lightbox-btn {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  padding: 0.55rem 0.8rem;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: var(--r-md);
   color: white;
   font-family: var(--font-heading);
-  font-size: 0.78rem; font-weight: 700;
+  font-size: 0.74rem; font-weight: 700;
   letter-spacing: 0.06em; text-transform: uppercase;
-  background: rgba(0, 0, 0, 0.40);
-  padding: 0.4rem 0.75rem;
-  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition: background 0.18s, transform 0.18s;
+  white-space: nowrap;
 }
+.prv-lightbox-btn:hover { background: rgba(255, 255, 255, 0.22); }
+.prv-lightbox-btn:active { transform: translateY(1px); }
+.prv-lightbox-btn-close {
+  background: rgba(212, 56, 56, 0.35);
+  border-color: rgba(255, 130, 130, 0.55);
+}
+.prv-lightbox-btn-close:hover { background: rgba(212, 56, 56, 0.65); }
+
+/* Content wrapper — solo padding. La imagen vive directamente acá. NO
+   tiene overflow propio: el scroll lo provee el container padre. */
+.prv-lightbox-content {
+  padding: clamp(0.75rem, 2vw, 1.5rem);
+}
+
 .prv-lightbox-img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
+  display: block;
+  margin: 0 auto;        /* centrado horizontal sin flex */
   border-radius: var(--r-md);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
-  cursor: default;
+  height: auto;
+  transition: width 0.2s ease;
+}
+/* Tamaño "mediano" — entra cómodo en cualquier viewport. */
+.prv-lightbox-img.is-medium {
+  width: min(1400px, 95vw);
+  max-width: 100%;
+  cursor: zoom-in;
+}
+/* Tamaño "grande" — fuerza scroll horizontal+vertical. max() garantiza
+   que en pantallas anchas (>1920px) la imagen igual desborde. */
+.prv-lightbox-img.is-big {
+  width: max(1800px, 150vw);
+  max-width: none;
+  cursor: zoom-out;
+}
+
+/* Mensajes loading/error — se posicionan donde iría la imagen. */
+.prv-lightbox-msg {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  margin: 4rem auto;
+  color: rgba(255, 255, 255, 0.85);
+  font-family: var(--font-heading);
+  font-size: 0.95rem; font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: center;
+  max-width: 28rem;
+  padding: 1.5rem;
+}
+.prv-lightbox-msg-err { color: #FFC4C4; }
+.prv-lightbox-msg-hint {
+  font-size: 0.78rem; font-weight: 400;
+  color: rgba(255, 255, 255, 0.65);
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+/* Mobile: oculto labels, achico padding. */
+@media (max-width: 560px) {
+  .prv-lightbox-btn { padding: 0.5rem 0.55rem; gap: 0.3rem; }
+  .prv-lightbox-btn-label { display: none; }
+  .prv-lightbox-bar { padding: 0.6rem 0.75rem; }
 }
 `;

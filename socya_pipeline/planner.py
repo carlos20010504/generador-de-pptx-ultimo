@@ -9,7 +9,7 @@ from socya_pipeline.inventory import Block
 from socya_pipeline.parser import WorkbookData
 from socya_pipeline import insights
 
-PLANNER_VERSION = "p5"  # bump when prompt template changes — invalidates cache
+PLANNER_VERSION = "p7"  # bump when prompt template changes — invalidates cache
 
 MAX_PAYLOAD_CHARS = 24_000  # rough 6K-token budget (~4 chars/token)
 MAX_SAMPLES_PER_COL = 8
@@ -109,15 +109,18 @@ REGLAS CRÍTICAS:
 
 4. **Bullets específicos y abundantes**: cada slide `text_bullets` debe tener **5-7 bullets**, cada uno con al menos una cifra concreta o un nombre propio del bloque. PROHIBIDO bullets genéricos como "los datos muestran variabilidad" o "es importante revisar".
 
-5. **Narrativas tipo analista (NO descriptivas)**: cada `narrative` de un chart debe explicar QUÉ pasa Y POR QUÉ importa. Incluir mínimo 2 datos concretos y al menos uno de estos ángulos:
-   - **Concentración** ("top 3 destinos = 78% del total → riesgo de dependencia"),
-   - **Outlier** ("ANTIOQUIA - EL BAGRE concentra 19, 9x la mediana → caso atípico"),
-   - **Brecha** ("solo 12% aprobado vs 88% pendiente → cuello de botella"),
-   - **Tendencia** ("decreció 47% entre 2023Q3 y 2026Q1 → caída sostenida").
+5. **Narrativas tipo analista (NO descriptivas)**: cada `narrative` de un chart debe explicar QUÉ pasa Y POR QUÉ importa. Incluir mínimo 2 datos concretos y al menos uno de estos ángulos. Los ejemplos siguientes son PATRONES de FORMATO — sustituye SIEMPRE los datos por los del Excel cargado:
+   - **Concentración** (patrón: "top 3 <categoría> = X% del total → riesgo de dependencia"),
+   - **Outlier** (patrón: "<entidad> concentra N, Yx la mediana → caso atípico"),
+   - **Brecha** (patrón: "solo X% aprobado vs Y% pendiente → cuello de botella"),
+   - **Tendencia** (patrón: "decreció X% entre <periodo1> y <periodo2> → caída sostenida").
 
 6. **Estructura recomendada** (ordenada para máximo impacto narrativo):
    - 1 slide `title` (portada)
-   - 1 slide `kpi_row` con 2-4 KPIs principales. PREFIERE: (a) bloques con `quality_flags: ["derived"]` (% derivados como "% Aprobación") por encima de todo, (b) currency totales SIN flag `subsumed_by_total`, (c) NUNCA elijas KPIs marcados `subsumed_by_total` salvo que no haya alternativa — esos son sub-totales redundantes.
+   - 1 slide `kpi_row` con 2-4 KPIs principales. PREFIERE en este orden: (a) bloques con `quality_flags: ["effective_total"]` (suma filtrada por estado — el dinero **realmente ejecutado**, sin rechazados); (b) bloques `["derived"]` (% derivados); (c) currency totales SIN flag `subsumed_by_total`; (d) NUNCA pongas en headline un KPI `["needs_status_disclaimer"]` si existe su contrapartida `["effective_total"]` para la misma columna — esos `needs_status_disclaimer` son sumas brutas que **incluyen registros rechazados** y son engañosos como headline. Si los usas, debe ser solo en una bullet/narrative que **mencione explícitamente el desglose por estado** (cuántos rechazados, cuántos efectivos).
+   - **REGLA ANTI-ALUCINACIÓN-FINANCIERA**: cuando un bloque KPI tiene `status_filter` en su `extra`, su `value` es la SUMA CRUDA de toda la columna (incluye estados negativos como RECHAZADO). NO digas que es "lo que la empresa movió", "lo ejecutado", "lo desembolsado". El total real ejecutado está en el bloque hermano con flag `effective_total`. Si necesitas mencionar el bruto, di "bruto solicitado" o "valor total solicitado (incluye rechazados)" y cita el desglose desde `status_filter.positive_sum`, `status_filter.negative_sum`.
+   - **FORMATO DE MONEDA OBLIGATORIO — NUNCA uses "B"**: en español "billón" = 10¹² (mil veces más grande que la "B" americana = 10⁹), por lo que "$1.5B" sería leído como "$1,500,000,000,000". Para CUALQUIER monto monetario ≥ 1,000,000,000 (mil millones), exprésalo en millones con separador de miles: "$1,504M", "$258M", "$1,226M". Para montos entre 1M y 999M usa "$X.XM" (ej. "$412.7M"). Para entre 1K y 999K usa "$X.XK". Esta regla aplica a NARRATIVES, BULLETS y CUALQUIER texto generado.
+   - **PROHIBIDO ATRIBUIR EXTREMOS A REGISTROS QUE NO EXISTAN JUNTOS**: si dices "el máximo de columna C es $X (atribución)", la atribución (persona/ciudad/estado) debe venir de la MISMA fila donde está $X — NO mezcles "máximo de C" con "top de otra columna D". Si las bullets pre-generadas (`insight_bullets`) ya traen el monto con `(Persona, Ciudad, Estado)` entre paréntesis, ÚSALAS TAL CUAL — no las recombines. Si no traes la atribución completa, omite la atribución en lugar de inventarla.
    - 2-4 slides `chart` con distintos cortes (mezcla `bar`, `pie`, `line` según los `kind` disponibles)
    - 1-2 slides `table` con cortes detallados (T*) — usa `columns_subset` con solo 4-6 columnas relevantes (NO IDs, NO observaciones largas)
    - 1-2 slides `text_bullets` con hallazgos accionables (5-7 bullets con cifras; cada bullet debe incluir un dato concreto del bloque referenciado)
@@ -125,6 +128,8 @@ REGLAS CRÍTICAS:
 7. **Variedad visual**: si tienes ≥2 distribuciones categóricas, usa una `bar` y una `pie`. Si hay serie temporal `S*`, dale un `line`.
 
 8. **Calidad de KPIs**: prefiere bloques `K*` cuyo nombre **no** contenga "id", "código", "número", "folio", "consecutivo". Esos son identificadores, no KPIs.
+
+8b. **Hojas autoritativas vs muestras** — REGLA DE FUENTE: si un bloque (K, C, T, S) tiene `quality_flags` que incluye `"redundant_sheet"`, su hoja es una MUESTRA o COPIA de otra hoja más grande del mismo libro. PROHIBIDO usar bloques `redundant_sheet` en charts, KPIs o tablas cuando exista otro bloque NO redundante con la misma columna semántica (ej.: "Ciudad Destino" en Hoja1 (31 filas, redundant) vs "Comisiones- Base" (1852 filas, autoritativa) → usa SIEMPRE Comisiones- Base). Decir "Bogotá lidera con 19 (61%)" cuando el universo real es de 1852 registros donde Bogotá tiene 252 es un error de auditoría grave. Solo está permitido usar un bloque `redundant_sheet` si NO hay alternativa con esa misma columna en otra hoja.
 
 9. **Títulos editorial**: títulos atractivos en español ("Concentración geográfica de destinos", no "Gráfica de Datos"). Subtítulos opcionales con contexto.
 
@@ -135,48 +140,44 @@ REGLAS CRÍTICAS:
   "slides": [
     {{ "type": "title", "data": {{ "title": "Título portada", "subtitle": "Bajada" }} }},
     {{ "type": "kpi_row", "title": "Indicadores Clave", "block_refs": ["K1","K2","K3"] }},
-    {{ "type": "chart", "chart_type": "bar", "title": "Distribución por Ciudad",
-       "block_ref": "C1", "narrative": "Bogotá concentra 53 registros (53%), seguida por Medellín (23%) y Cali (15%)." }},
-    {{ "type": "chart", "chart_type": "pie", "title": "Composición por Estado",
-       "block_ref": "C2", "narrative": "El 75% está en estado CONTABILIZADO, mientras 13% está RECHAZADO." }},
-    {{ "type": "chart", "chart_type": "histogram", "title": "Distribución de Montos Solicitados",
-       "block_ref": "K2", "narrative": "La mayoría se concentra entre $50K y $200K; cola larga hasta $2M." }},
+    {{ "type": "chart", "chart_type": "bar", "title": "Distribución por <Categoría>",
+       "block_ref": "C1", "narrative": "<top-categoría> concentra N registros (X%), seguida por <2da> y <3era>." }},
+    {{ "type": "chart", "chart_type": "pie", "title": "Composición por <Categoría>",
+       "block_ref": "C2", "narrative": "El X% está en estado <ESTADO-DOMINANTE>, mientras Y% está <ESTADO-2DO>." }},
+    {{ "type": "chart", "chart_type": "histogram", "title": "Distribución de <Columna Numérica>",
+       "block_ref": "K2", "narrative": "La mayoría se concentra entre $X y $Y; cola larga hasta $Z." }},
     {{ "type": "table", "title": "Detalle Operativo", "block_ref": "T1",
-       "columns_subset": ["Mes","Total","Ciudad","Estado"], "max_rows": 10 }},
+       "columns_subset": ["<col1>","<col2>","<col3>","<col4>"], "max_rows": 10 }},
     {{ "type": "text_bullets", "title": "Hallazgos Accionables", "supports_block": "T1",
        "bullets": [
-         "El monto máximo individual asciende a $1.000.000 en ANTIOQUIA - EL BAGRE.",
-         "Existen 192 comisiones en estado RECHAZADO que requieren revisión.",
-         "La concentración geográfica se ubica en MEDELLÍN con el mayor número de registros.",
-         "El total acumulado de montos solicitados suma $250.2M.",
-         "Bogotá representa el 53% del volumen, evidenciando concentración geográfica.",
-         "El monto promedio por solicitud es $2.5M, con 192 outliers sobre 2x ese valor."
+         "El monto máximo individual asciende a $<X> en <fila real del max>.",
+         "Existen <N> registros en estado <ESTADO-NEGATIVO> que requieren revisión.",
+         "La concentración se ubica en <top-entidad> con el mayor número de registros.",
+         "El total acumulado de <Columna> suma $<sum>.",
+         "<top-entidad> representa el X% del volumen, evidenciando concentración.",
+         "El monto promedio por registro es $<mean>, con <N> outliers sobre 2x ese valor."
        ] }}
   ],
   "prompt_suggestions": [
-    "Detalla el análisis por trimestre",
-    "Compara montos por centro de costos",
-    "Resalta los 5 solicitantes con mayor monto"
+    "Detalla el análisis por <dimensión temporal>",
+    "Compara métricas por <dimensión categórica>",
+    "Resalta los 5 <entidades> con mayor <métrica>"
   ]
 }}
+
+**IMPORTANTE — los `<placeholders>` arriba son del template; SIEMPRE reemplázalos con los datos reales del Excel cargado. Nunca dejes `<...>` literal en tu output.**
 
 Datos disponibles:
 {payload_json}
 """
 
 def _format_money(v) -> str:
-    """Formato de moneda compacto: 1500000 → '$1.5M', 12345 → '$12K'."""
-    try:
-        n = float(v)
-    except (TypeError, ValueError):
-        return str(v)
-    if abs(n) >= 1_000_000_000:
-        return f"${n / 1_000_000_000:.1f}B"
-    if abs(n) >= 1_000_000:
-        return f"${n / 1_000_000:.1f}M"
-    if abs(n) >= 1_000:
-        return f"${n / 1_000:.0f}K"
-    return f"${n:,.0f}"
+    """Formato de moneda compacto en convención hispana (sin "B"; valores
+    grandes se expresan en millones con separador): 1500000 → '$1.5M',
+    1504462283 → '$1,504M', 12345 → '$12K'. Delega en `format_compact`
+    para mantener una sola fuente de verdad cross-módulo."""
+    from socya_pipeline.insights import format_compact
+    return format_compact(v, prefix="$", fallback="$0")
 
 
 def _build_insight_bullets(wb: WorkbookData, table_block,
@@ -206,12 +207,19 @@ def _build_insight_bullets(wb: WorkbookData, table_block,
     cat_cols = [c for c in relevant
                 if c.dtype == "categorical" and (c.top_values or [])]
 
+    # Load the actual dataframe so max/min generators can include the full
+    # row attribution (Solicitante / Ciudad / Estado). Without this, the AI
+    # tends to invent a city for the "$8.1M max" by picking the top city of
+    # an unrelated distribution — a real hallucination caught during audit.
+    df_for_extremes = _load_sheet_df_for_attribution(wb, sheet.name)
+
     # Generators (each appends 0 or 1 bullet to `out`)
-    _gen_total(out, money_cols)
+    _gen_total(out, money_cols, sheet)
     _gen_count(out, sheet)
     _gen_top_cat(out, cat_cols)
-    _gen_max(out, money_cols)
-    _gen_min(out, money_cols)
+    _gen_effective_breakdown(out, money_cols, sheet)
+    _gen_max(out, money_cols, df_for_extremes)
+    _gen_min(out, money_cols, df_for_extremes)
     _gen_second_cat(out, cat_cols)
     _gen_pareto(out, cat_cols)
     _gen_outlier(out, cat_cols)
@@ -219,12 +227,120 @@ def _build_insight_bullets(wb: WorkbookData, table_block,
     return out[:max_candidates]
 
 
-def _gen_total(out: list, money_cols: list) -> None:
+# Columns whose value at the extreme row makes the bullet self-contained
+# (the reader sees what record holds the max/min, where, and its status).
+_ATTRIBUTION_COLUMN_HINTS = (
+    "solicitante", "responsable", "encargado", "beneficiario",
+    "ciudad destino", "ciudad", "destino", "estado", "status",
+    "centro de costos", "area", "área", "proyecto", "categor",
+)
+
+
+def _load_sheet_df_for_attribution(wb, sheet_name: str):
+    """Read just the sheet that the extreme bullet will quote, so we can
+    pull the full row at argmax/argmin. Best-effort: returns None on any
+    failure (the generator then falls back to the pre-fix behaviour)."""
+    try:
+        import pandas as pd
+        path = getattr(wb, "filename", None)
+        if not path:
+            return None
+        xl = pd.ExcelFile(path)
+        if sheet_name not in xl.sheet_names:
+            return None
+        # Heuristic for header row: first row that contains a non-Unnamed
+        # string in column 0. Matches the parser's behaviour without
+        # depending on it (the parser does deeper cleaning we don't need
+        # for row-level attribution).
+        df_h0 = pd.read_excel(path, sheet_name=sheet_name, header=0)
+        if all(str(c).startswith("Unnamed") or str(c).strip().lower() in ("nan",)
+               for c in df_h0.columns):
+            df_h1 = pd.read_excel(path, sheet_name=sheet_name, header=1)
+            return df_h1
+        return df_h0
+    except Exception:
+        return None
+
+
+def _row_attribution(df, idx) -> str:
+    """Pick the most informative columns from a row and format them as
+    a compact parenthetical: '(Miguel Angel Gomez Torres, Atlantico - Sabanalarga, RECHAZADO)'.
+    """
+    try:
+        if df is None or idx is None or idx not in df.index:
+            return ""
+    except Exception:
+        return ""
+    parts = []
+    for col in df.columns:
+        name_l = str(col).strip().lower()
+        if not any(h in name_l for h in _ATTRIBUTION_COLUMN_HINTS):
+            continue
+        try:
+            v = df.at[idx, col]
+        except Exception:
+            continue
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s or s.lower() in ("nan", "none", "null"):
+            continue
+        parts.append(s)
+        if len(parts) >= 3:
+            break
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _gen_total(out: list, money_cols: list, sheet=None) -> None:
     if not money_cols:
         return
     top = money_cols[0]
+    # When the sheet has a status filter for this column, prefer the
+    # honest "efectivo" number as the headline bullet — otherwise the
+    # planner happily cites $1.5B "total" while $258M of that was rejected.
+    bd = ((sheet.status_breakdowns or {}).get(top.name)
+          if sheet is not None else None)
+    if bd and bd.get("negative_count", 0) > 0 and (bd.get("positive_sum") or 0) > 0:
+        pos = _format_money(bd["positive_sum"])
+        gross = _format_money(bd["gross_sum"])
+        neg = _format_money(bd["negative_sum"])
+        neg_c = bd.get("negative_count") or 0
+        out.append(("total",
+            f"El total efectivo de '{top.name}' suma {pos} "
+            f"(de un bruto solicitado de {gross}; {neg} en {neg_c} registros "
+            f"rechazados o anulados)."))
+        return
     out.append(("total",
         f"El total acumulado de '{top.name}' suma {_format_money(top.sum)}."))
+
+
+def _gen_effective_breakdown(out: list, money_cols: list, sheet) -> None:
+    """Adds a second bullet enumerating the per-state slices of the most
+    relevant currency column. Only fires when the sheet has a status filter
+    with at least one negative state — that's exactly when readers benefit
+    from seeing the deck not hide the rejected slice."""
+    if sheet is None or not money_cols:
+        return
+    breakdowns = getattr(sheet, "status_breakdowns", None) or {}
+    if not breakdowns:
+        return
+    top = money_cols[0]
+    bd = breakdowns.get(top.name)
+    if not bd or bd.get("negative_count", 0) == 0:
+        return
+    parts = []
+    for bucket in ("positive", "negative", "pending"):
+        cnt = bd.get(f"{bucket}_count") or 0
+        if cnt == 0:
+            continue
+        s = _format_money(bd.get(f"{bucket}_sum") or 0)
+        verb = {"positive": "ejecutados",
+                 "negative": "rechazados",
+                 "pending":  "en trámite"}[bucket]
+        parts.append(f"{cnt} {verb} ({s})")
+    if len(parts) >= 2:
+        out.append(("status_breakdown",
+            f"Desglose de '{top.name}' por estado: " + "; ".join(parts) + "."))
 
 
 def _gen_count(out: list, sheet) -> None:
@@ -246,20 +362,40 @@ def _gen_top_cat(out: list, cat_cols: list) -> None:
         f"En '{c.name}' destaca '{label}' con {ci} registros."))
 
 
-def _gen_max(out: list, money_cols: list) -> None:
+def _gen_max(out: list, money_cols: list, df=None) -> None:
     if not money_cols or money_cols[0].max is None:
         return
     top = money_cols[0]
+    attr = ""
+    if df is not None and top.name in df.columns:
+        try:
+            import pandas as pd
+            s = pd.to_numeric(df[top.name], errors="coerce")
+            idx = s.idxmax()
+            attr = _row_attribution(df, idx)
+        except Exception:
+            attr = ""
     out.append(("max",
-        f"El valor máximo registrado en '{top.name}' es {_format_money(top.max)}."))
+        f"El valor máximo registrado en '{top.name}' es "
+        f"{_format_money(top.max)}{attr}."))
 
 
-def _gen_min(out: list, money_cols: list) -> None:
+def _gen_min(out: list, money_cols: list, df=None) -> None:
     if not money_cols or money_cols[0].min is None:
         return
     top = money_cols[0]
+    attr = ""
+    if df is not None and top.name in df.columns:
+        try:
+            import pandas as pd
+            s = pd.to_numeric(df[top.name], errors="coerce")
+            idx = s.idxmin()
+            attr = _row_attribution(df, idx)
+        except Exception:
+            attr = ""
     out.append(("min",
-        f"El valor mínimo en '{top.name}' es {_format_money(top.min)}."))
+        f"El valor mínimo en '{top.name}' es "
+        f"{_format_money(top.min)}{attr}."))
 
 
 def _gen_second_cat(out: list, cat_cols: list) -> None:

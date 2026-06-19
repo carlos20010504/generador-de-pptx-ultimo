@@ -3,35 +3,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Sparkles, FileSpreadsheet, AlertTriangle, AlertCircle,
-  TrendingUp, Layers, BarChart2, Loader2, ChevronDown, ChevronRight,
-  Lightbulb, CheckSquare, Square, Table2, FileText, LayoutDashboard,
-  GripVertical, Pencil, Check as CheckIcon,
+  Loader2, ChevronDown, ChevronRight,
+  CheckSquare, Square, Table2, FileText, LayoutDashboard,
+  BarChart2, GripVertical, Pencil, Check as CheckIcon,
 } from 'lucide-react';
 import { MODEL_PRESETS, presetToModelString } from '@/lib/model-presets';
 
 /* ──────────────────────────────────────────────────────────────
-   Types — mirror what /api/quick-summary and /api/preview-plan return
+   Types — mirror what /api/preview-plan returns
    ────────────────────────────────────────────────────────────── */
-
-interface QuickSummary {
-  filename: string;
-  totals: {
-    sheets: number;
-    rows: number;
-    columns: number;
-    kpi_candidates: number;
-    categorical_distributions: number;
-    time_series: number;
-  };
-  kpis_preview: Array<{ label: string; value: string; kind: string; sheet: string }>;
-  warnings: Array<{ severity: 'info' | 'warn' | 'error'; icon: string; title: string; detail: string }>;
-  suggestions: Array<{ id: string; label: string; prompt: string; why: string }>;
-  deck_estimate: { min_slides: number; max_slides: number; expected_sections: string[] };
-  // PII detected at parse time (emails, doc IDs, phones, etc.). Already
-  // exposed by the warnings list; surfaced separately here so we can give
-  // it dedicated UX (icon + count + per-column list).
-  pii_findings?: Array<{ sheet: string; column: string; kind: string; label: string }>;
-}
 
 interface SlidePreview {
   index: number;
@@ -113,6 +93,7 @@ const SLIDE_TYPE_META: Record<string, { Ic: React.ComponentType<{ size?: number;
   chart:        { Ic: BarChart2,       label: 'Gráfico',   color: '#00A0DF' }, // sky
   table:        { Ic: Table2,          label: 'Tabla',     color: '#69BE28' }, // logo-green
   text_bullets: { Ic: FileText,        label: 'Hallazgos', color: '#FF8300' }, // orange
+  closing:      { Ic: CheckIcon,       label: '¡Gracias!', color: '#C9A227' }, // gold (cierre)
   unknown:      { Ic: FileText,        label: 'Slide',     color: '#4D4F53' }, // logo-gray
 };
 
@@ -130,10 +111,6 @@ export default function PreparePanel({
   onConfirm, onOpenAdvanced,
   preferredModelId, onPreferredModelChange,
 }: Props) {
-  const [summary, setSummary] = useState<QuickSummary | null>(null);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
-  const [summaryLoading, setSummaryLoading] = useState(true);
-
   const [plan, setPlan] = useState<PreviewResponse | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(true);
@@ -141,6 +118,26 @@ export default function PreparePanel({
   const [excluded, setExcluded] = useState<Set<number>>(new Set());
   const [expandedSlide, setExpandedSlide] = useState<number | null>(null);
   const [refineOpen, setRefineOpen] = useState(true);  // abierto por default — único lugar para el prompt
+
+  // Local input mirror: typing updates this immediately (so the textarea
+  // stays responsive) but we only push to the parent — and therefore only
+  // re-fetch the plan — after the user pauses typing. Without this, every
+  // keystroke aborted the in-flight /api/preview-plan request and spawned a
+  // new Python process, which caused "Failed to fetch" and (with the React
+  // Compiler) tripped React's update-depth guard at the textarea onChange.
+  const [promptDraft, setPromptDraft] = useState(userPrompt);
+  // Si el padre cambia el prompt (sugerencias del AIControlPanel, reset),
+  // sincronizamos el draft local — sólo cuando el padre realmente difiere
+  // del último valor que nosotros enviamos.
+  useEffect(() => {
+    setPromptDraft(prev => (prev === userPrompt ? prev : userPrompt));
+  }, [userPrompt]);
+  // Debounce: empuja el draft al padre 500ms después del último tecleo.
+  useEffect(() => {
+    if (promptDraft === userPrompt) return;
+    const t = setTimeout(() => onPromptChange(promptDraft), 500);
+    return () => clearTimeout(t);
+  }, [promptDraft, userPrompt, onPromptChange]);
 
   // Cheap stable identity — depending on the File object itself causes
   // re-fetches on every parent re-render which abort in-flight requests.
@@ -176,59 +173,14 @@ export default function PreparePanel({
     return Array.from({ length: total }, (_, i) => i);
   }, [customOrder, plan?.slides?.length]);
 
-  // Timeouts client-side: deben ser >= al budget del backend, sino abortamos
-  // requests que iban a responder bien. Backend actual:
-  //   - quick-summary maxDuration = 60s (determinístico pero Python tiene
-  //     cold-start lento en Windows con archivos grandes).
-  //   - preview-plan maxDuration = 300s, AIChain.PATIENT.total_budget = 200s.
-  // Damos buffer encima para que el backend gane la carrera de abortar
-  // primero (con mensaje útil) en vez del cliente — antes ambos timeouts
-  // estaban POR DEBAJO del budget, abortando requests que iban a responder.
-  const QUICK_SUMMARY_TIMEOUT_MS = 70_000;       // 60s backend + 10s buffer
-  const PREVIEW_PLAN_TIMEOUT_MS = 240_000;       // 200s budget + 40s buffer
-
-  // Quick-summary: refetches only when file changes.
-  useEffect(() => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), QUICK_SUMMARY_TIMEOUT_MS);
-    let cancelled = false;
-    (async () => {
-      setSummaryLoading(true);
-      setSummaryError(null);
-      try {
-        const fd = new FormData();
-        fd.append('file', file);
-        const res = await fetch('/api/quick-summary', {
-          method: 'POST', body: fd, signal: ctrl.signal,
-        });
-        if (cancelled) return;
-        if (!res.ok) {
-          const j = await res.json().catch(() => null);
-          const msg = typeof j?.error === 'string' ? j.error : (j?.error?.message || `Error ${res.status}`);
-          throw new Error(msg);
-        }
-        const data: QuickSummary = await res.json();
-        if (!cancelled) setSummary(data);
-      } catch (err: unknown) {
-        if (cancelled) return;
-        const isAbort = err instanceof DOMException && err.name === 'AbortError';
-        setSummaryError(isAbort
-          ? 'El análisis del Excel tardó más de 70 segundos. Esto suele pasar con archivos muy grandes o con muchas hojas. Probá con uno más pequeño.'
-          : (err as Error).message || 'No se pudo analizar el archivo.');
-      } finally {
-        clearTimeout(timer);
-        if (!cancelled) setSummaryLoading(false);
-      }
-    })();
-    return () => { cancelled = true; clearTimeout(timer); ctrl.abort(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileKey]);
+  // Sin AbortController de timeout: el backend tiene sus propios límites y
+  // surface errores reales (cold-start lento de Python ya no se confunde con
+  // un fallo). Mantenemos solo cancelación por unmount/cambio de deps.
 
   // Preview-plan: refetches when file or prompt change. Cache hit on backend
   // for same (file, prompt) — safe to re-run without quota cost.
   useEffect(() => {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), PREVIEW_PLAN_TIMEOUT_MS);
     let cancelled = false;
     (async () => {
       setPlanLoading(true);
@@ -257,15 +209,13 @@ export default function PreparePanel({
       } catch (err: unknown) {
         if (cancelled) return;
         const isAbort = err instanceof DOMException && err.name === 'AbortError';
-        setPlanError(isAbort
-          ? 'La IA está saturada (todos los modelos free tier tardaron más de 4 minutos en responder). Esperá un par de minutos y volvé a intentar.'
-          : (err as Error).message || 'No se pudo generar el plan.');
+        if (isAbort) return;  // unmount/dep change — no UI noise
+        setPlanError((err as Error).message || 'No se pudo generar el plan.');
       } finally {
-        clearTimeout(timer);
         if (!cancelled) setPlanLoading(false);
       }
     })();
-    return () => { cancelled = true; clearTimeout(timer); ctrl.abort(); };
+    return () => { cancelled = true; ctrl.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [promptKey, audience, language, preferredModelId]);
 
@@ -279,16 +229,6 @@ export default function PreparePanel({
     });
     return { total, kept, byType };
   }, [plan, excluded]);
-
-  // Filter warnings: hide info-only, group as "+N avisos menores" if any.
-  const visibleWarnings = useMemo(() => {
-    if (!summary) return { major: [], minorCount: 0 };
-    const major = summary.warnings.filter(w => w.severity === 'warn' || w.severity === 'error');
-    const minorCount = summary.warnings.length - major.length;
-    return { major, minorCount };
-  }, [summary]);
-
-  const topKpis = summary?.kpis_preview.slice(0, 3) ?? [];
 
   const toggle = (idx: number, mandatory: boolean) => {
     if (mandatory) return;
@@ -361,100 +301,10 @@ export default function PreparePanel({
     setDragOverIdx(null);
   };
 
-  const handleSuggestionClick = (s: QuickSummary['suggestions'][0]) => {
-    onPromptChange(s.prompt);
-    setRefineOpen(true);
-  };
-
-  const headerStats = summary ? (
-    <p className="prep-head-stats">
-      <strong className="prep-head-strong">Análisis listo:</strong>{' '}
-      {summary.totals.sheets} hoja{summary.totals.sheets !== 1 ? 's' : ''}
-      {' · '}{summary.totals.rows.toLocaleString('es-CO')} filas
-      {' · '}{summary.totals.kpi_candidates} KPIs
-      {' · ~'}{summary.deck_estimate.min_slides}–{summary.deck_estimate.max_slides} slides
-    </p>
-  ) : (
-    <p className="prep-head-stats prep-head-stats-loading">Analizando archivo…</p>
-  );
-
   return (
     <div className="prep-card animate-fade-in-up">
       {/* ────────────────────────────────────────────────
-           Header (compact stats — file name lives in the dropzone)
-         ──────────────────────────────────────────────── */}
-      <div className="prep-header">
-        <div className="prep-head-icon">
-          <Sparkles size={16} color="#087062" />
-        </div>
-        <div className="prep-head-text">
-          {headerStats}
-        </div>
-      </div>
-
-      {/* ────────────────────────────────────────────────
-           Section 1 — Detección (chips + KPIs + warnings)
-         ──────────────────────────────────────────────── */}
-      <section className="prep-section">
-        {summaryLoading && !summary ? (
-          <SectionSkeleton label="Analizando estructura del Excel…" />
-        ) : summaryError ? (
-          <div className="prep-banner is-warn">
-            <AlertTriangle size={14} />
-            <span>{summaryError}</span>
-          </div>
-        ) : summary ? (
-          <>
-            <div className="prep-stats">
-              <Stat icon={TrendingUp} label="KPIs" value={summary.totals.kpi_candidates} color="#087062" />
-              <Stat icon={BarChart2} label="Distribuciones" value={summary.totals.categorical_distributions} color="#00A0DF" />
-              <Stat icon={Layers} label="Series" value={summary.totals.time_series} color="#69BE28" />
-              <Stat
-                icon={Sparkles}
-                label="Slides est."
-                value={`${summary.deck_estimate.min_slides}–${summary.deck_estimate.max_slides}`}
-                color="#F3C400"
-              />
-            </div>
-
-            {topKpis.length > 0 && (
-              <div className="prep-kpi-row">
-                {topKpis.map((k, i) => (
-                  <span key={i} className="prep-kpi-chip" title={k.label}>
-                    <span className="prep-kpi-val">{k.value}</span>
-                    <span className="prep-kpi-lbl">{k.label}</span>
-                  </span>
-                ))}
-                {summary.kpis_preview.length > 3 && (
-                  <span className="prep-kpi-more">+{summary.kpis_preview.length - 3}</span>
-                )}
-              </div>
-            )}
-
-            {(visibleWarnings.major.length > 0 || visibleWarnings.minorCount > 0) && (
-              <div className="prep-warnings">
-                {visibleWarnings.major.map((w, i) => {
-                  const Ic = w.severity === 'error' ? AlertCircle : AlertTriangle;
-                  return (
-                    <div key={i} className={`prep-warn is-${w.severity}`}>
-                      <Ic size={12} />
-                      <span><strong>{w.title}.</strong> {w.detail}</span>
-                    </div>
-                  );
-                })}
-                {visibleWarnings.minorCount > 0 && (
-                  <div className="prep-warn-minor">
-                    +{visibleWarnings.minorCount} aviso{visibleWarnings.minorCount !== 1 ? 's' : ''} menor{visibleWarnings.minorCount !== 1 ? 'es' : ''}
-                  </div>
-                )}
-              </div>
-            )}
-          </>
-        ) : null}
-      </section>
-
-      {/* ────────────────────────────────────────────────
-           Section 2 — Tu instrucción para la IA (único lugar)
+           Tu instrucción para la IA (único lugar)
          ──────────────────────────────────────────────── */}
       <section className="prep-section prep-refine">
         <button
@@ -488,34 +338,13 @@ export default function PreparePanel({
               </select>
             </div>
             <textarea
-              value={userPrompt}
-              onChange={(e) => onPromptChange(e.target.value)}
+              value={promptDraft}
+              onChange={(e) => setPromptDraft(e.target.value)}
+              onBlur={() => { if (promptDraft !== userPrompt) onPromptChange(promptDraft); }}
               placeholder="Ej: hazme 9 slides incluyendo Riesgos Core y Riesgos Acciones"
               className="prep-prompt"
               rows={2}
             />
-
-            {summary && summary.suggestions.length > 0 && (
-              <div className="prep-suggestions">
-                <p className="prep-sugg-label">
-                  <Lightbulb size={11} />
-                  Ideas rápidas
-                </p>
-                <div className="prep-sugg-row">
-                  {summary.suggestions.slice(0, 4).map((s) => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onClick={() => handleSuggestionClick(s)}
-                      className={`prep-sugg ${userPrompt === s.prompt ? 'is-active' : ''}`}
-                      title={s.why}
-                    >
-                      {s.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
 
             <div className="prep-mode-row">
               <label className="prep-mode-label">Estilo visual</label>
@@ -822,21 +651,6 @@ function IntentBanner({ report }: { report: IntentReport }) {
           ))}
         </ul>
       </div>
-    </div>
-  );
-}
-
-function Stat({ icon: Ic, label, value, color }: {
-  icon: React.ComponentType<{ size?: number; color?: string }>;
-  label: string; value: string | number; color: string;
-}) {
-  return (
-    <div className="prep-stat">
-      <span className="prep-stat-icon" style={{ background: `${color}1f`, border: `1px solid ${color}40` }}>
-        <Ic size={12} color={color} />
-      </span>
-      <span className="prep-stat-val" style={{ color }}>{value}</span>
-      <span className="prep-stat-lbl">{label}</span>
     </div>
   );
 }

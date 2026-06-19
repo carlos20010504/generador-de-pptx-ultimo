@@ -151,33 +151,28 @@ export async function autoOrganizeExcel(file: File, mode: OrganizerMode = 'auto'
           const cleanRows = rawRows.filter(r => r && r.some((c: any) => c !== null && c !== undefined && String(c).trim() !== ''));
           if (!cleanRows.length) continue;
 
+          // Find the real header row (skips title rows / merged cells at the top)
           const headerIdx = findHeaderRow(cleanRows);
-          const { title: inferredTitle, subtitle: inferredSubtitle } = inferTitle(cleanRows.slice(0, headerIdx));
-
           const rawHeaders = cleanRows[headerIdx] ?? [];
           const bodyRows = cleanRows.slice(headerIdx + 1);
 
+          // Drop columns that are 'Unnamed' or have <8% data
           const { headers: cleanHeaders, rows: filteredRows } = cleanColumns(rawHeaders, bodyRows);
 
-          // Decide visualization type
-          const vizType = decideType(cleanHeaders, filteredRows, mode);
-
-          // Build label
-          const finalTitle = inferredTitle || sheetName;
-          const finalSubtitle = inferredSubtitle || `Organizado automáticamente — ${vizType}`;
-
-          // Build output rows
-          const outRows: any[][] = [];
-          outRows.push([`TITLE: ${finalTitle}`]);
-          outRows.push([`SUBTITLE: ${finalSubtitle}`]);
-          outRows.push([`TYPE: ${vizType}`]);
-          outRows.push([]); // blank row
-          outRows.push(cleanHeaders);
+          // Skip the visualization-type hint and inferred title metadata.
+          // That info is NOT consumed by the Python pipeline — adding it as
+          // extra rows just forces the parser to skip them again, and on
+          // single-column sheets it can corrupt the header detection.
+          // The organizer's value is now: clean headers + clean body, no noise.
+          const outRows: any[][] = [cleanHeaders];
           filteredRows.forEach(row => outRows.push(row));
 
           const newWs = XLSX.utils.aoa_to_sheet(outRows);
           XLSX.utils.book_append_sheet(newWb, newWs, sheetName);
 
+          // Type is computed only for telemetry / future use, no longer
+          // written into the output sheet.
+          const vizType = decideType(cleanHeaders, filteredRows, mode);
           console.log(`[Organizer] "${sheetName}" → ${vizType} (${filteredRows.length} filas, ${cleanHeaders.length} cols)`);
         }
 

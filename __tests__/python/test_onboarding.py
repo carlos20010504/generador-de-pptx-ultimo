@@ -48,7 +48,7 @@ class TestQuickSummary:
         assert summary["kpis_preview"]
         for k in summary["kpis_preview"]:
             assert isinstance(k["value"], str)
-            assert any(s in k["value"] for s in ("$", "K", "M", "B", "%"))
+            assert any(s in k["value"] for s in ("$", "K", "M", "%"))
 
     def test_warnings_for_missing_dates(self, tmp_path):
         df = pd.DataFrame({

@@ -35,6 +35,44 @@ def _emit_error(err: PipelineError):
     sys.stdout.write(json.dumps({"error": payload}, ensure_ascii=True))
     sys.exit(2)
 
+
+# Progress streaming: cli.py emite líneas con prefijo `__PROGRESS__:` a stderr
+# para que el route Node (generate-pptx) las parsee y las reenvíe vía SSE al
+# cliente. Sin esto, el usuario ve "Consultando IA…" estático durante toda la
+# llamada Python (que puede ser parsing + AI planning + render = 30-200s).
+def _emit_progress(phase: str, message: str) -> None:
+    try:
+        payload = json.dumps({"phase": phase, "message": message}, ensure_ascii=False)
+        sys.stderr.write(f"__PROGRESS__:{payload}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass  # progress es best-effort — nunca rompe el pipeline
+
+
+# Closing slide ("¡Gracias!") siempre va al final del deck. Es mandatory:
+# el usuario no puede excluirlo ni reordenarlo desde la UI. El renderer lo
+# detecta por type='closing' y usa el layout 'Items 2' de la plantilla
+# (que ya tiene "¡Gracias!" diseñado en el master). Si la plantilla no
+# tiene ese layout, el renderer cae a una versión hand-built equivalente.
+def _make_closing_slide() -> dict:
+    return {
+        "type": "closing",
+        "title": "¡Gracias!",
+        "subtitle": "",
+        "narrative": "Slide de cierre — siempre va al final del deck.",
+        "mandatory": True,
+        "data": {"title": "¡Gracias!"},
+    }
+
+
+def _append_closing_if_needed(rendered: list) -> list:
+    """Garantiza que el deck termine con UN slide closing. Idempotente:
+    si ya hay un closing al final, no duplica. Si hay closings en medio,
+    los mueve al final (caso edge — no debería pasar pero es defensivo)."""
+    closings = [s for s in rendered if s.get("type") == "closing"]
+    non_closing = [s for s in rendered if s.get("type") != "closing"]
+    return non_closing + ([closings[-1]] if closings else [_make_closing_slide()])
+
 def _load_request(raw: str) -> dict:
     try:
         return json.loads(raw or "{}")
@@ -49,13 +87,16 @@ def cmd_plan(args):
                  else AIProfile.FAST)
     xls = None
     try:
+        _emit_progress("parsing", "Leyendo Excel…")
         wb = parse_workbook(args.input, api_key=api_key)
+        _emit_progress("inventory", "Construyendo inventario…")
         inv = build_inventory(wb)
         from socya_pipeline.prompt_intent import extract as extract_intent
         intent = extract_intent(
             request.get("prompt", ""),
             available_sheet_names=[s.name for s in wb.sheets],
         )
+        _emit_progress("planning", f"Consultando IA (profile={profile.value})…")
         plan = plan_presentation(
             wb, inv,
             user_prompt=request.get("prompt", ""),
@@ -67,6 +108,9 @@ def cmd_plan(args):
             intent=intent,
             preferred_model=request.get("preferredModel"),
         )
+        if plan.get("_meta", {}).get("cache_hit"):
+            _emit_progress("planning", "Plan reutilizado del cache (sin llamada IA)")
+        _emit_progress("validating", "Validando plan…")
         outcome = validate_plan(plan, inv, wb)
         if not outcome.slides:
             raise PipelineError(
@@ -83,6 +127,7 @@ def cmd_plan(args):
         sheets_cache: dict = {}
         dtype_map = _build_dtype_map(wb)
 
+        _emit_progress("extracting", "Extrayendo datos por slide…")
         rendered, extraction_dropped = extract_for_render(
             outcome.slides, inv, wb, args.input,
             xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
@@ -90,11 +135,16 @@ def cmd_plan(args):
         # Si el usuario pidió N slides, ese es el target real del padding —
         # no el 7 default. Si N > material disponible, auto_complete devuelve
         # menos de N y count_honored se marca false abajo.
+        # Reservamos UN slot para el closing (¡Gracias!): N solicitadas =
+        # (N-1) contenido + 1 cierre. Si user pide 15 → 14 contenido + Gracias.
         target = (intent.requested_slide_count
                   if intent.requested_slide_count is not None else 7)
+        content_target = max(1, target - 1)
         rendered = auto_complete_slides(
-            rendered, inv, wb, args.input, target_count=target,
+            rendered, inv, wb, args.input, target_count=content_target,
             xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
+        # Inyectar el slide ¡Gracias! como último — mandatory, no toggleable.
+        rendered = _append_closing_if_needed(rendered)
         # Reconciliar intent_report con el conteo FINAL post-validator/extractor.
         # El report del planner se calcula sobre el plan crudo (antes de que el
         # validator dropee slides por provenance inválida). El usuario ve este
@@ -150,13 +200,16 @@ def cmd_generate(args):
     profile = AIProfile.PATIENT
     xls = None  # ver comentario en cmd_plan
     try:
+        _emit_progress("parsing", "Leyendo Excel…")
         wb = parse_workbook(args.input, api_key=api_key)
+        _emit_progress("inventory", "Construyendo inventario de datos…")
         inv = build_inventory(wb)
         from socya_pipeline.prompt_intent import extract as extract_intent
         intent = extract_intent(
             request.get("prompt", ""),
             available_sheet_names=[s.name for s in wb.sheets],
         )
+        _emit_progress("planning", "Consultando IA para planificar slides…")
         plan = plan_presentation(
             wb, inv,
             user_prompt=request.get("prompt", ""),
@@ -168,6 +221,11 @@ def cmd_generate(args):
             intent=intent,
             preferred_model=request.get("preferredModel"),
         )
+        # Si el plan vino del cache, decírselo al usuario para que sepa por
+        # qué fue tan rápido (y que no estamos quemando tokens de su quota).
+        cache_hit = bool(plan.get("_meta", {}).get("cache_hit"))
+        if cache_hit:
+            _emit_progress("planning", "Plan reutilizado del cache (sin llamada IA)")
         # Optional second-pass critique (refiner). Off por default; opt-in
         # via env SOCYA_AI_REFINE=1. Best-effort — fallos no rompen la
         # generación. Se aplica sólo en cmd_generate (no en cmd_plan)
@@ -175,6 +233,7 @@ def cmd_generate(args):
         # cuando el refiner está apagado (caso default).
         from socya_pipeline.refiner import refine_plan
         plan = refine_plan(plan, api_key=api_key, profile=profile)
+        _emit_progress("validating", "Validando datos del plan…")
         outcome = validate_plan(plan, inv, wb)
         if not outcome.slides:
             raise PipelineError(
@@ -191,28 +250,45 @@ def cmd_generate(args):
         sheets_cache: dict = {}
         dtype_map = _build_dtype_map(wb)
 
+        _emit_progress("extracting", "Extrayendo datos por slide…")
         rendered, extraction_dropped = extract_for_render(
             outcome.slides, inv, wb, args.input,
             xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
         before_complete = len(rendered)
         # Honra requested_slide_count cuando el user lo especificó (ver cmd_plan).
+        # Reservamos UN slot para el closing (¡Gracias!): N solicitadas =
+        # (N-1) contenido + 1 cierre. Siempre.
         target = (intent.requested_slide_count
                   if intent.requested_slide_count is not None else 7)
+        content_target = max(1, target - 1)
         rendered = auto_complete_slides(
-            rendered, inv, wb, args.input, target_count=target,
+            rendered, inv, wb, args.input, target_count=content_target,
             xls=xls, sheets_cache=sheets_cache, dtype_map=dtype_map)
+        # Inyectar el slide ¡Gracias! como último ANTES de aplicar overrides
+        # del usuario, para que los índices que mandó la UI desde preview-plan
+        # (que también incluye el closing) coincidan exactamente.
+        rendered = _append_closing_if_needed(rendered)
 
         # Optional user-driven filter: drop the slides the UI marked off in
         # the preview step. Indices are 0-based positions in the final list.
-        # The title slide (index 0) is always kept regardless of input.
+        # Title slide (index 0) y closing (último) son mandatory siempre.
         excluded_raw = request.get("excludeSlideIndices") or []
         excluded = {int(i) for i in excluded_raw if isinstance(i, (int, float))}
         excluded.discard(0)  # title slide is mandatory
+        # El closing slide también es mandatory — el usuario no puede excluirlo
+        # por más que mande su índice. Lo identificamos por type='closing'.
+        closing_indices = {i for i, s in enumerate(rendered)
+                           if s.get("type") == "closing"}
+        excluded -= closing_indices
         excluded_count = 0
         if excluded:
             kept = [s for i, s in enumerate(rendered) if i not in excluded]
             excluded_count = len(rendered) - len(kept)
             rendered = kept
+        # Después de excluir, garantizar que el closing siga siendo el último.
+        # (Si por algún motivo no quedó closing —ej. el usuario reordenó
+        # raro—, el helper lo re-inyecta.)
+        rendered = _append_closing_if_needed(rendered)
 
         # Optional user override: per-slide title edits. Same indexing
         # convention as `excludeSlideIndices` — positions in the rendered
@@ -259,14 +335,21 @@ def cmd_generate(args):
             except (TypeError, ValueError):
                 pass
 
+        # Después de TODOS los overrides, garantizar UNA vez más que el
+        # closing siga al final del deck (defensa contra reorders que lo
+        # hayan movido). Idempotente.
+        rendered = _append_closing_if_needed(rendered)
+
         from socya_pipeline.renderer import render_pptx
         template = Path(args.template)
         # Theme comes through the request from the UI selector. The renderer
         # falls back to its built-in Socya defaults if `theme` is missing.
         theme = request.get("theme") if isinstance(request.get("theme"), dict) else None
+        _emit_progress("rendering", f"Renderizando {len(rendered)} slides en PowerPoint…")
         render_pptx(rendered, plan.get("presentation_meta", {}),
                      template_path=template, output_path=Path(args.output),
                      theme=theme)
+        _emit_progress("rendering", "PowerPoint listo, escribiendo archivo…")
 
         # Write audit JSON next to output
         audit = {

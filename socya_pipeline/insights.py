@@ -43,20 +43,59 @@ ID_NAME_TOKENS: tuple = (
     "folio", "consecutivo", "uuid", "key",
 )
 
+# Status-column detection. Used to spot columns like "Estado" / "Status"
+# that filter a money column into ejecutado vs rechazado. Without this,
+# a KPI like "Total Valor Solicitado = $1.5B" misleads the reader because
+# it includes rows that were rejected and never moved money.
+STATUS_COLUMN_NAME_TOKENS: tuple = (
+    "estado", "status", "situaci", "resultado", "decisi",
+    "etapa", "fase", "tramite", "trámite", "condicion", "condición",
+)
+
+# Substrings (uppercased) that indicate a row's value was NOT executed.
+# Match is case-insensitive substring (matches "RECHAZADO" and
+# "RECHAZADO DESEMBOLSO"). Keep the stem short to catch conjugations.
+NEGATIVE_STATUS_TOKENS: tuple = (
+    "RECHAZAD", "ANULAD", "CANCELAD", "DENEGAD", "INVALID",
+    "ELIMINAD", "BORRAD", "DESCARTAD", "NO APROB", "DESAPROB",
+    "DEVUELT", "REVERSAD", "INADMI",
+)
+
+# Substrings that indicate a row IS executed (real money moved / committed).
+POSITIVE_STATUS_TOKENS: tuple = (
+    "CONTABILIZAD", "DESEMBOLSAD", "EJECUTAD", "LEGALIZAD",
+    "PAGAD", "REALIZAD", "FINALIZAD", "COMPLETAD", "FACTURAD",
+    "CERRAD", "LIQUIDAD",
+)
+
+# Substrings that indicate a row is in-flight (not rejected, not executed).
+PENDING_STATUS_TOKENS: tuple = (
+    "PENDIENT", "EN ESPER", "EN PROCES", "EN AJUST", "EN CONTABIL",
+    "EN REVIS", "APROBADO LIDER", "APROBAD", "SOLICITAD",
+    "EN TRAMITE", "EN TRÁMITE", "EN CURSO", "ABIERT",
+)
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Shared formatters
 # ─────────────────────────────────────────────────────────────────────
 
-def format_compact(value, *, prefix: str = "", big_decimals: int = 2,
+def format_compact(value, *, prefix: str = "", big_decimals: int = 0,
                      mid_decimals: int = 1, fallback: str = "—") -> str:
     """Format a number as a compact, human-readable string with optional unit
-    prefix. Single source of truth for K/M/B formatting across the pipeline.
+    prefix. Single source of truth for K/M formatting across the pipeline.
+
+    We deliberately **do NOT use "B"** — in Spanish "billón" is 10^12, while
+    the American "B" is 10^9. A KPI label "1.5B pesos" reads as
+    "$1,500,000,000,000" to a Spanish reader (a thousand times larger). All
+    values ≥ 1B are expressed in millions with a thousands separator
+    (e.g. "$1,504M"), matching LatAm financial-press convention.
 
     Examples:
       format_compact(1500)              → "1.5K"
       format_compact(1_500_000)         → "1.5M"
-      format_compact(1_500_000_000)     → "1.50B"
+      format_compact(1_500_000_000)     → "1,500M"
+      format_compact(1_504_462_283)     → "1,504M"
       format_compact(1500, prefix="$")  → "$1.5K"
       format_compact(None)              → "—"
       format_compact(float("nan"))      → "—"
@@ -71,12 +110,20 @@ def format_compact(value, *, prefix: str = "", big_decimals: int = 2,
         return fallback
     sign = "-" if f < 0 else ""
     a = abs(f)
-    if a >= 1_000_000_000:
-        return f"{sign}{prefix}{a/1_000_000_000:.{big_decimals}f}B"
     if a >= 1_000_000:
-        return f"{sign}{prefix}{a/1_000_000:.{mid_decimals}f}M"
+        millions = a / 1_000_000
+        # ≥ 1,000M: drop the decimal point — "1,504M" is cleaner than
+        # "1504.5M" and avoids the ambiguous "B" suffix in Spanish.
+        if millions >= 1000:
+            return f"{sign}{prefix}{millions:,.{big_decimals}f}M"
+        if millions == int(millions):
+            return f"{sign}{prefix}{int(millions)}M"
+        return f"{sign}{prefix}{millions:.{mid_decimals}f}M"
     if a >= 1_000:
-        return f"{sign}{prefix}{a/1_000:.{mid_decimals}f}K"
+        k = a / 1_000
+        if k == int(k):
+            return f"{sign}{prefix}{int(k)}K"
+        return f"{sign}{prefix}{k:.{mid_decimals}f}K"
     if f.is_integer():
         return f"{sign}{prefix}{int(a)}"
     return f"{sign}{prefix}{a:.{mid_decimals}f}"
@@ -852,20 +899,24 @@ def subsumed_kpi_ids(kpi_blocks: List, tolerance: float = 0.05
     """
     if not kpi_blocks:
         return []
-    by_sheet: dict = {}
+    # Group by (sheet, state_bucket) so an "effective total" headline can
+    # subsume its sub-components without being incorrectly compared against
+    # the rejected-bucket KPIs (which would never sum to it).
+    by_group: dict = {}
     for b in kpi_blocks:
         if b.kind != "kpi_candidate":
             continue
-        if b.extra.get("agg") != "sum":
+        if b.extra.get("agg") not in ("sum", "sum_filtered"):
             continue
         v = b.extra.get("value")
         if v is None:
             continue
         sheet = b.provenance.sheet
-        by_sheet.setdefault(sheet, []).append(b)
+        bucket = b.extra.get("state_bucket")  # None for raw sums
+        by_group.setdefault((sheet, bucket), []).append(b)
 
     subsumed: set = set()
-    for sheet, blocks in by_sheet.items():
+    for _key, blocks in by_group.items():
         for big in blocks:
             big_v = float(big.extra.get("value") or 0)
             if big_v <= 0:
@@ -987,15 +1038,46 @@ def _names_close(a: str, b: str) -> bool:
 # Multi-sheet awareness
 # ─────────────────────────────────────────────────────────────────────
 
+_MERGED_HEADER_PREFIX_RE = re.compile(r"^[^>]+\s*>\s*")
+
+
+def _normalize_col_for_overlap(name) -> str:
+    """Strip merged-header prefix ("COMISIONES > Ciudad Destino" → "ciudad
+    destino") + 'Unnamed: N' artifacts + whitespace + case. Without this,
+    a sheet whose first physical row was a merged title gets prefixed
+    column names by the parser and never matches its smaller-sample twin,
+    so the smaller sample wins chart slots even though it's a subset of
+    the authoritative sheet."""
+    s = str(name or "").strip()
+    # Iteratively strip merged-header prefixes (handles nested "A > B > col")
+    while True:
+        new = _MERGED_HEADER_PREFIX_RE.sub("", s)
+        if new == s:
+            break
+        s = new
+    s = s.strip().lower()
+    # 'Unnamed: 0'-style headers carry no signal — drop them to a sentinel
+    # that won't match across sheets.
+    if s.startswith("unnamed:") or s in ("nan", "none", ""):
+        return ""
+    return s
+
+
 def redundant_sheet_ids(sheets) -> List[str]:
     """Return sheet names that are likely 'redundant' duplicates of another
     sheet in the same workbook.
 
-    A sheet is redundant when it shares ≥70% of column names with another
-    sheet AND one of the following:
-      - it has fewer rows (it's a sample / subset), OR
-      - it has the same row count but appears later in the workbook
-        (templates copy-pasted as 'Sheet1', 'Sheet2', ... → keep first only).
+    A sheet is redundant when it shares ≥70% of (normalized) column names
+    with another sheet AND it has fewer rows than that other sheet (it's
+    a sample / subset), OR identical row count but appears later in the
+    workbook (templates copy-pasted as 'Sheet1', 'Sheet2' → keep first).
+
+    Column-name normalization strips merged-header prefixes so that
+    "COMISIONES > Ciudad Destino" matches "Ciudad Destino" across the
+    sample/master split that's typical in audit workbooks. Without that,
+    the parser's prefix handling silently breaks the comparison and
+    smaller-sample sheets (Hoja1, 31 rows) stop being recognized as
+    subsets of authoritative ones (Comisiones- Base, 1852 rows).
 
     The earliest / largest sheet is kept; later/smaller copies are flagged.
     """
@@ -1005,13 +1087,15 @@ def redundant_sheet_ids(sheets) -> List[str]:
     for i, a in enumerate(sheets):
         if a.name in redundant:
             continue
-        cols_a = {str(c.name).strip().lower() for c in a.columns}
+        cols_a = {_normalize_col_for_overlap(c.name) for c in a.columns}
+        cols_a.discard("")
         if not cols_a:
             continue
         for j, b in enumerate(sheets):
             if i == j or b.name in redundant:
                 continue
-            cols_b = {str(c.name).strip().lower() for c in b.columns}
+            cols_b = {_normalize_col_for_overlap(c.name) for c in b.columns}
+            cols_b.discard("")
             if not cols_b:
                 continue
             overlap = len(cols_a & cols_b) / max(len(cols_a), len(cols_b))
@@ -1019,8 +1103,13 @@ def redundant_sheet_ids(sheets) -> List[str]:
                 continue
             rows_a = a.shape[0]
             rows_b = b.shape[0]
-            # Smaller sheet is the redundant one
-            if rows_a < rows_b and a.fill_ratio <= b.fill_ratio:
+            # Smaller sheet is the redundant one. We deliberately do NOT
+            # require a.fill_ratio <= b.fill_ratio: a 31-row scratchpad
+            # almost always has denser fill than a 1852-row production
+            # table (because optional columns are filled in the small
+            # curated sample but not in the big real one), and that
+            # historically blocked the redundancy flag.
+            if rows_a < rows_b:
                 redundant.add(a.name)
                 break
             # Identical row count → keep the FIRST one in the workbook
@@ -1062,6 +1151,127 @@ def infer_prompt(wb_filename: str, sheet_names: List[str],
     if hints:
         return f"Análisis ejecutivo de {topic}: {', '.join(hints)}."
     return f"Análisis ejecutivo de {topic}."
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Status-column awareness (filter detection)
+# ─────────────────────────────────────────────────────────────────────
+
+def classify_status_value(value) -> str:
+    """Classify a single status cell as 'positive', 'negative', 'pending', or
+    'unknown'. Case- and accent-insensitive substring match against curated
+    token lists. 'unknown' is returned when no token matches — we never guess.
+    """
+    if value is None:
+        return "unknown"
+    s = str(value).strip().upper()
+    if not s:
+        return "unknown"
+    for tok in NEGATIVE_STATUS_TOKENS:
+        if tok in s:
+            return "negative"
+    for tok in POSITIVE_STATUS_TOKENS:
+        if tok in s:
+            return "positive"
+    for tok in PENDING_STATUS_TOKENS:
+        if tok in s:
+            return "pending"
+    return "unknown"
+
+
+def is_status_filter_column(col_name: str, top_values) -> bool:
+    """True iff a column looks like a workflow status filter (its name hints at
+    'Estado'/'Status' AND at least one of its frequent values is a negative
+    token like RECHAZADO/ANULADO). Conservative: requires BOTH gates to fire
+    so a column named 'Tipo' or a status column without any rejected rows
+    does not trigger the disclaimer pipeline.
+    """
+    name_l = (col_name or "").strip().lower()
+    if not name_l:
+        return False
+    if not any(tok in name_l for tok in STATUS_COLUMN_NAME_TOKENS):
+        return False
+    if not top_values:
+        return False
+    for entry in top_values:
+        # top_values is List[[value, count]]
+        try:
+            v = entry[0]
+        except (TypeError, IndexError):
+            continue
+        if classify_status_value(v) == "negative":
+            return True
+    return False
+
+
+def compute_status_breakdown(df, currency_col: str, status_col: str) -> dict:
+    """Group `currency_col` by `status_col` and bucket the per-state sums into
+    positive / negative / pending / unknown. Returns a dict ready to attach
+    to a Block's `extra` field:
+
+        {
+          "status_column": "Estado",
+          "per_state": {"CONTABILIZADO": 1186_741_209.0, ...},
+          "positive_sum": float, "positive_count": int, "positive_states": [...],
+          "negative_sum": float, "negative_count": int, "negative_states": [...],
+          "pending_sum":  float, "pending_count":  int, "pending_states":  [...],
+          "unknown_sum":  float, "unknown_count":  int, "unknown_states":  [...],
+          "gross_sum":    float, "gross_count":    int,
+        }
+
+    Returns {} on any failure — caller treats absence as "no breakdown".
+    """
+    try:
+        import pandas as pd  # local import keeps the insights module dep-light
+    except Exception:
+        return {}
+    if df is None or currency_col not in df.columns or status_col not in df.columns:
+        return {}
+    try:
+        nums = pd.to_numeric(df[currency_col], errors="coerce")
+        nums = nums.replace([float("inf"), float("-inf")], pd.NA)
+        sub = df[[status_col]].assign(__val=nums).dropna(subset=["__val"])
+        if sub.empty:
+            return {}
+        grouped = sub.groupby(status_col, dropna=False)["__val"]
+        per_state_sum = grouped.sum().to_dict()
+        per_state_cnt = grouped.count().to_dict()
+    except Exception:
+        return {}
+
+    buckets = {
+        "positive": {"sum": 0.0, "count": 0, "states": []},
+        "negative": {"sum": 0.0, "count": 0, "states": []},
+        "pending":  {"sum": 0.0, "count": 0, "states": []},
+        "unknown":  {"sum": 0.0, "count": 0, "states": []},
+    }
+    per_state_clean: dict = {}
+    for state, total in per_state_sum.items():
+        try:
+            t = float(total)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(t):
+            continue
+        per_state_clean[str(state) if state is not None else ""] = t
+        bucket = classify_status_value(state)
+        buckets[bucket]["sum"] += t
+        buckets[bucket]["count"] += int(per_state_cnt.get(state, 0))
+        buckets[bucket]["states"].append(str(state) if state is not None else "")
+
+    gross_sum = sum(b["sum"] for b in buckets.values())
+    gross_count = sum(b["count"] for b in buckets.values())
+    out = {
+        "status_column": status_col,
+        "per_state": per_state_clean,
+        "gross_sum": gross_sum,
+        "gross_count": gross_count,
+    }
+    for k, v in buckets.items():
+        out[f"{k}_sum"] = v["sum"]
+        out[f"{k}_count"] = v["count"]
+        out[f"{k}_states"] = v["states"]
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────

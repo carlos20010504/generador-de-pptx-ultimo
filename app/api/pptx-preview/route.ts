@@ -48,6 +48,16 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Touch: refresca la expiración cada vez que el usuario accede a un
+  // preview. Mientras esté navegando entre slides, el deck no muere.
+  // Solo refresca si quedan menos de 25 min — evita escrituras innecesarias
+  // cuando el deck recién se generó.
+  const TTL_REFRESH_MS = 30 * 60_000;
+  const TTL_REFRESH_THRESHOLD_MS = 25 * 60_000;
+  if (entry.expires - Date.now() < TTL_REFRESH_THRESHOLD_MS) {
+    entry.expires = Date.now() + TTL_REFRESH_MS;
+  }
+
   const slides = entry.previewSlides || [];
   if (!entry.previewDir || slides.length === 0) {
     return NextResponse.json(

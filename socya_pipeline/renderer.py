@@ -10,6 +10,7 @@ Layout system inspired by SIG_Revision_Direccion_2025 (the 'good' reference deck
 - No fallbacks. No template fillers.
 """
 import io
+import math
 from pathlib import Path
 from typing import List, Optional, Tuple
 import matplotlib
@@ -19,7 +20,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR, MSO_AUTO_SIZE
 
 # ──────────────────── Design system ────────────────────
 
@@ -62,6 +63,24 @@ _LONG_TAIL_LEADER_X    = 10    # leader / median(rest) — aggressive grouping
 _LONG_TAIL_HEAD_TIGHT  = 5     # top-N kept when leader dominates
 _LONG_TAIL_HEAD_LOOSE  = 6     # top-N kept normally
 _LONG_TAIL_MAX_RATIO   = 0.20  # tail ≤20% of total → group into "Otros"
+
+# ── Table fit model — GUARANTEE: a table never overflows the slide.
+# A PowerPoint table row height is a *minimum*: rows auto-grow to fit
+# word-wrapped text, so a long cell (or many wrapping rows) silently pushes the
+# table off the bottom of the slide. We estimate the *rendered* height (cells
+# wrap, nothing truncated) and pick the largest font that fits the content
+# band; if a table is still too dense we reduce how many rows we show (the
+# extractor already samples, so this is just a tighter sample); only a
+# physically-impossible blob cell (thousands of chars in one cell) is
+# ellipsized, as an absolute last resort. K is deliberately a touch higher than
+# Calibri's real average advance (~0.48em) so we always over-estimate height
+# and never under-fit.
+_TBL_CHAR_K      = 0.62   # avg glyph advance as a fraction of the em (font pt)
+_TBL_LINE_FACTOR = 1.2    # line height = font_pt/72 * factor
+_TBL_VMARGIN     = 0.08   # cell top + bottom margins (0.04 + 0.04), inches
+_TBL_HMARGIN     = 0.16   # cell left + right margins (0.08 + 0.08), inches
+_TBL_BOLD_WIDEN  = 1.07   # bold/uppercase glyphs run a little wider
+_TBL_FONT_LADDER = [10.0, 9.5, 9.0, 8.5, 8.0, 7.5, 7.0]  # body pt; header +1, totals +0.5
 
 
 def _hex_to_rgb(hex_str) -> Optional[RGBColor]:
@@ -152,33 +171,135 @@ def render_pptx(slides: List[dict], presentation_meta: dict,
         # Force 16:9 widescreen
         prs.slide_width = Inches(SLIDE_W)
         prs.slide_height = Inches(SLIDE_H)
-        # Strip pre-existing slides from the template — we control the deck
-        while len(prs.slides._sldIdLst) > 0:
-            rId = prs.slides._sldIdLst[0].rId
-            prs.part.drop_rel(rId)
-            del prs.slides._sldIdLst[0]
 
-        blank_layout = _pick_blank_layout(prs)
         deck_title = (presentation_meta.get("title") or "").strip()
         deck_subtitle = (presentation_meta.get("subtitle") or "").strip()
         footer_tagline = _build_footer_tagline(deck_title)
 
+        # ── Path A: el template trae portada (slide 0) y cierre (última slide)
+        # ── instanciados como SLIDES REALES (no solo layouts). En ese caso,
+        # preservamos esas dos slides EXACTAS (con sus pictures, logos y
+        # decoraciones que viven en el slide-level, no en el layout) y
+        # solamente inyectamos contenido entre ellas.
+        if _template_has_brand_slides(prs):
+            n_template = len(prs.slides)
+            closing_idx_initial = n_template - 1  # última slide = cierre
+
+            # Llenar los placeholders de la portada con título + fecha — la
+            # picture y el branding del template quedan intactos porque la
+            # slide en sí no fue tocada (solo modificamos sus placeholders).
+            _fill_cover_template(prs.slides[0], deck_title, deck_subtitle)
+
+            # Layout para slides de contenido: 'Texto extenso' si está,
+            # sino BLANK. Texto extenso solo tiene un sidebar pequeño (L=0,
+            # W=1.42") que nuestro contenido respeta gracias al MARGIN.
+            data_layout = _pick_data_layout(prs)
+            blank_layout = _pick_blank_layout(prs)
+            content_layout = data_layout if data_layout is not None else blank_layout
+            # Cuando usamos el layout del template, NO pintamos bg propio
+            # (taparía el sidebar y cualquier decoración del layout).
+            paint_bg = data_layout is None
+
+            # Filtrar input slides: 'title' y 'closing' los aporta el template,
+            # así que no los re-renderizamos.
+            content_defs = [s for s in slides if s.get("type") not in ("title", "closing")]
+            n_content = len(content_defs)
+            total = 2 + n_content  # cover + content + closing
+
+            # ORDEN DE OPERACIONES IMPORTANTE para evitar duplicate-slide bugs
+            # de python-pptx:
+            #   1) Append content slides al final → cada una recibe su
+            #      partname unique (slide6, slide7, etc).
+            #   2) MUEVE el cierre original al final (después de los content)
+            #      via XML manipulation — solo reordena, no toca partnames.
+            #   3) BORRA las slides intermedias DEL TEMPLATE (las vacías
+            #      Items1, Encabezado, etc) que ya no necesitamos.
+            # Si invertimos el orden (delete antes de add), python-pptx puede
+            # reusar partnames y causar 'Duplicate name slide5.xml' warnings
+            # que dejan el PPTX corrupto y el cierre se pierde.
+
+            # PASO 1: append content slides
+            for i, slide_def in enumerate(content_defs):
+                slide = prs.slides.add_slide(content_layout)
+                if paint_bg:
+                    _add_page_background(slide)
+
+                stype = slide_def.get("type")
+                eyebrow = slide_def.get("eyebrow") or _eyebrow_from_type(stype, i)
+                _add_eyebrow(slide, eyebrow)
+                _add_title_block(slide, slide_def.get("title", ""),
+                                 _slide_subtitle(slide_def))
+                if stype == "kpi_row":
+                    _add_kpi_row(slide, slide_def)
+                elif stype == "chart":
+                    _add_chart_slide(slide, slide_def)
+                elif stype == "table":
+                    _add_table_slide(slide, slide_def)
+                elif stype == "text_bullets":
+                    _add_bullets_slide(slide, slide_def)
+                _add_footer(slide, footer_tagline, i + 2, total)
+
+            # PASO 2: mover el cierre del template (que estaba en la posición
+            # closing_idx_initial) a la última posición ABSOLUTA del deck.
+            # Tras el paso 1, las posiciones son: [P, I1, E, TE, Items2, C1, C2, C3]
+            # closing_idx_initial=4 (Items2). Lo movemos a len-1.
+            _move_slide(prs, closing_idx_initial, len(prs.slides) - 1)
+            # Ahora: [P, I1, E, TE, C1, C2, C3, Items2]
+
+            # PASO 3: borrar las slides intermedias del template (índices 1
+            # hasta closing_idx_initial-1, o sea Items1, Encabezado, Texto
+            # extenso). Iteramos en reverso para no invalidar índices.
+            for idx in range(closing_idx_initial - 1, 0, -1):
+                _delete_slide(prs, idx)
+            # Resultado final: [Portada, C1, C2, ..., Cn, Items2_Gracias]
+
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            prs.save(str(output_path))
+            return
+
+        # ── Path B: template atípico (no tiene la estructura Portada+Items 2).
+        # Caemos al render hand-built clásico: borrar todo, construir cada
+        # slide programáticamente. Esta es la lógica original previa,
+        # preservada como red de seguridad.
+        while len(prs.slides._sldIdLst) > 0:
+            _delete_slide(prs, 0)
+
+        blank_layout = _pick_blank_layout(prs)
+        closing_layout = _pick_closing_layout(prs)
+        cover_layout = _pick_cover_layout(prs)
+
         total = len(slides)
         for i, slide_def in enumerate(slides):
             stype = slide_def.get("type")
-            slide = prs.slides.add_slide(blank_layout)
-            _add_page_background(slide)
+
+            if stype == "closing":
+                if closing_layout is not None:
+                    slide = prs.slides.add_slide(closing_layout)
+                else:
+                    slide = prs.slides.add_slide(blank_layout)
+                    _add_page_background(slide)
+                    _add_closing_slide_fallback(slide, deck_title)
+                continue
 
             if stype == "title":
-                _add_title_slide(slide, slide_def, deck_title, deck_subtitle,
-                                 i + 1, total)
+                if cover_layout is not None:
+                    slide = prs.slides.add_slide(cover_layout)
+                    _fill_cover_template(slide, deck_title, deck_subtitle)
+                else:
+                    slide = prs.slides.add_slide(blank_layout)
+                    _add_page_background(slide)
+                    _add_title_slide(slide, slide_def, deck_title, deck_subtitle,
+                                     i + 1, total)
                 continue
+
+            slide = prs.slides.add_slide(blank_layout)
+            _add_page_background(slide)
 
             eyebrow = slide_def.get("eyebrow") or _eyebrow_from_type(stype, i)
             _add_eyebrow(slide, eyebrow)
             _add_title_block(slide, slide_def.get("title", ""),
                              _slide_subtitle(slide_def))
-
             if stype == "kpi_row":
                 _add_kpi_row(slide, slide_def)
             elif stype == "chart":
@@ -187,7 +308,6 @@ def render_pptx(slides: List[dict], presentation_meta: dict,
                 _add_table_slide(slide, slide_def)
             elif stype == "text_bullets":
                 _add_bullets_slide(slide, slide_def)
-
             _add_footer(slide, footer_tagline, i + 1, total)
 
         output_path = Path(output_path)
@@ -265,6 +385,39 @@ def _add_title_slide(slide, slide_def: dict, deck_title: str, deck_subtitle: str
               Inches(1.3), Inches(0.4),
               font=BODY_FONT, font_size=11, bold=True, color=GOLD,
               align="right")
+
+
+def _add_closing_slide_fallback(slide, deck_title: str) -> None:
+    """Hand-built closing/Gracias slide when the template doesn't expose an
+    'Items 2'-style layout. Mirrors the dark-cover aesthetic of the title
+    slide but with the focus on the closing message instead of the metadata.
+
+    Only used when _pick_closing_layout returns None (atypical templates).
+    """
+    bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0,
+                                  Inches(SLIDE_W), Inches(SLIDE_H))
+    bg.line.fill.background()
+    bg.fill.solid(); bg.fill.fore_color.rgb = FOREST_DARK
+
+    # Center vertical accent bar — reinforces the cover-style closure
+    bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,
+                                   Inches(SLIDE_W / 2 - 0.7), Inches(SLIDE_H / 2 - 1.4),
+                                   Inches(1.4), Inches(0.10))
+    bar.line.fill.background()
+    bar.fill.solid(); bar.fill.fore_color.rgb = GOLD
+
+    _put_text(slide, "¡Gracias!",
+              Inches(0), Inches(SLIDE_H / 2 - 1.0),
+              Inches(SLIDE_W), Inches(2.0),
+              font=HEADING_FONT, font_size=72, bold=True, color=WHITE,
+              align="center")
+
+    if deck_title:
+        _put_text(slide, deck_title.upper(),
+                  Inches(0), Inches(SLIDE_H / 2 + 1.1),
+                  Inches(SLIDE_W), Inches(0.5),
+                  font=BODY_FONT, font_size=12, bold=True, color=GOLD,
+                  align="center", letter_spacing_em=0.18)
 
 
 def _add_kpi_row(slide, slide_def: dict) -> None:
@@ -428,9 +581,160 @@ def _add_chart_slide(slide, slide_def: dict) -> None:
                   line_spacing=1.4, anchor="top")
 
 
+def _tbl_text_units(s) -> float:
+    """Approx display width of a string in 'average glyph' units. Full-width
+    (CJK / Hangul / fullwidth) glyphs count ~1.8; everything else 1.0."""
+    n = 0.0
+    for ch in str(s):
+        o = ord(ch)
+        wide = (0x1100 <= o <= 0x115F or 0x2E80 <= o <= 0xA4CF or
+                0xAC00 <= o <= 0xD7A3 or 0xF900 <= o <= 0xFAFF or
+                0xFE30 <= o <= 0xFE4F or 0xFF00 <= o <= 0xFF60 or
+                0xFFE0 <= o <= 0xFFE6)
+        n += 1.8 if wide else 1.0
+    return n
+
+
+def _tbl_cell_lines(text, col_w_in: float, font_pt: float, bold: bool = False) -> int:
+    """How many wrapped lines `text` needs in a column `col_w_in` wide at
+    `font_pt`. Splits on existing newlines, then character-budget wraps each."""
+    usable = max(0.12, col_w_in - _TBL_HMARGIN)
+    char_w = max(0.012, font_pt / 72.0 * _TBL_CHAR_K * (_TBL_BOLD_WIDEN if bold else 1.0))
+    cpl = max(1, int(usable / char_w))
+    total = 0
+    for seg in str(text).split("\n"):
+        total += max(1, int(math.ceil(_tbl_text_units(seg) / cpl)))
+    return max(1, total)
+
+
+def _tbl_line_h(font_pt: float) -> float:
+    return font_pt / 72.0 * _TBL_LINE_FACTOR
+
+
+def _alloc_table_col_widths(maxunits: list, table_w: float) -> list:
+    """Distribute `table_w` across columns proportional to their longest
+    content (clamped so one huge cell can't starve the rest). Always sums to
+    table_w; clamps keep every column at a readable minimum (~0.9in here)."""
+    n = len(maxunits)
+    if n == 0:
+        return []
+    weights = [min(42.0, max(5.0, mu)) for mu in maxunits]
+    tot = sum(weights) or float(n)
+    return [table_w * w / tot for w in weights]
+
+
+def _cap_row_to_fit(row: list, col_widths: list, body_font: float, budget_h: float) -> list:
+    """Last resort for a pathological cell: shorten each cell so the single
+    remaining body row fits in `budget_h` inches. Only reached when one cell
+    holds thousands of characters — realistic text never gets here."""
+    line_h = _tbl_line_h(body_font)
+    max_lines = max(1, int((budget_h - _TBL_VMARGIN) / line_h))
+    out = []
+    for j, txt in enumerate(row):
+        cw = col_widths[j] if j < len(col_widths) else col_widths[-1]
+        usable = max(0.12, cw - _TBL_HMARGIN)
+        char_w = max(0.012, body_font / 72.0 * _TBL_CHAR_K)
+        cpl = max(1, int(usable / char_w))
+        budget_chars = max(1, max_lines * cpl)
+        s = str(txt)
+        if len(s) > budget_chars:
+            s = s[:max(1, budget_chars - 1)].rstrip() + "…"
+        out.append(s)
+    return out
+
+
+def _fit_table_layout(header_cells: list, body_matrix: list, totals_cells,
+                       table_w: float, available_h: float) -> dict:
+    """Pick body font, per-column widths, per-row heights and (rarely) a
+    reduced row set so the table fits in `available_h` without truncating
+    realistic text. Strategy: keep all rows and shrink the font as far as the
+    ladder allows; if still too tall, drop rows from the end at the smallest
+    font; only if a single row is still too tall, cap that (blob) cell."""
+    n_cols = len(header_cells)
+
+    maxunits = []
+    for j in range(n_cols):
+        mu = _tbl_text_units(header_cells[j])
+        for row in body_matrix:
+            if j < len(row):
+                mu = max(mu, _tbl_text_units(row[j]))
+        if totals_cells and j < len(totals_cells):
+            mu = max(mu, _tbl_text_units(totals_cells[j]))
+        maxunits.append(mu)
+    col_widths = _alloc_table_col_widths(maxunits, table_w)
+
+    def row_heights_for(body, body_font):
+        header_font = body_font + 1.0
+        totals_font = body_font + 0.5
+        heights = []
+        hh = 0.0
+        for j in range(n_cols):
+            lines = _tbl_cell_lines(header_cells[j], col_widths[j], header_font, bold=True)
+            hh = max(hh, lines * _tbl_line_h(header_font) + _TBL_VMARGIN)
+        heights.append(hh)
+        for row in body:
+            rh = 0.0
+            for j in range(n_cols):
+                txt = row[j] if j < len(row) else ""
+                lines = _tbl_cell_lines(txt, col_widths[j], body_font)
+                rh = max(rh, lines * _tbl_line_h(body_font) + _TBL_VMARGIN)
+            heights.append(rh)
+        if totals_cells:
+            th = 0.0
+            for j in range(n_cols):
+                txt = totals_cells[j] if j < len(totals_cells) else ""
+                lines = _tbl_cell_lines(txt, col_widths[j], totals_font, bold=True)
+                th = max(th, lines * _tbl_line_h(totals_font) + _TBL_VMARGIN)
+            heights.append(th)
+        return heights
+
+    body = list(body_matrix)
+    chosen = None
+    # 1) Largest font that fits ALL rows.
+    for bf in _TBL_FONT_LADDER:
+        hs = row_heights_for(body, bf)
+        if sum(hs) <= available_h:
+            chosen = (bf, hs)
+            break
+    # 2) Still too tall at every font → smallest font, drop rows from the end.
+    if chosen is None:
+        bf = _TBL_FONT_LADDER[-1]
+        while len(body) > 1:
+            body = body[:-1]
+            hs = row_heights_for(body, bf)
+            if sum(hs) <= available_h:
+                chosen = (bf, hs)
+                break
+    # 3) A single body row is still too tall → one giant blob cell: cap it.
+    if chosen is None:
+        bf = _TBL_FONT_LADDER[-1]
+        body = body[:1]
+        overhead = sum(row_heights_for([], bf))   # header (+ totals) only
+        body = [_cap_row_to_fit(body[0], col_widths, bf, available_h - overhead)]
+        chosen = (bf, row_heights_for(body, bf))
+
+    body_font, heights = chosen
+    return {
+        "body": body,
+        "header_font": body_font + 1.0,
+        "body_font": body_font,
+        "totals_font": body_font + 0.5,
+        "col_widths": col_widths,
+        "row_heights": heights,
+    }
+
+
 def _add_table_slide(slide, slide_def: dict) -> None:
     """Table with colored header band, zebra-striped rows, opcional totals
-    row al final, y heatmap-style cell coloring para columnas numéricas."""
+    row al final, y heatmap-style cell coloring para columnas numéricas.
+
+    GARANTÍA: la tabla nunca se desborda de la slide. La altura de fila en
+    PowerPoint es un MÍNIMO (las filas crecen para envolver el texto), así que
+    estimamos la altura real, achicamos la fuente hasta que la tabla entre en
+    la banda de contenido y, sólo si sigue sin caber, mostramos menos filas.
+    El texto realista NUNCA se corta: únicamente una celda físicamente
+    imposible (miles de caracteres) se recorta con elipsis como último recurso.
+    """
     data = slide_def.get("data", {})
     headers = data.get("headers", [])
     rows = data.get("rows", [])
@@ -446,23 +750,50 @@ def _add_table_slide(slide, slide_def: dict) -> None:
     rows = [list(r)[:max_cols] for r in rows[:max_rows]]
     n_cols = len(headers)
     has_totals = bool(totals_row)
-    body_rows_n = len(rows)
-    n_rows = body_rows_n + 1 + (1 if has_totals else 0)
+
+    # Display strings — built once, measured AND rendered identically so the
+    # fit estimate matches what PowerPoint actually draws.
+    #   header: "Monto_Solicitado" → "MONTO SOLICITADO"
+    header_disp = [str(h).replace("_", " ").upper() for h in headers]
+    body_disp = [["" if v is None else str(v) for v in row] for row in rows]
+    totals_disp = None
+    if has_totals:
+        totals_disp = ["" if v is None else str(v) for v in list(totals_row)[:n_cols]]
+        while len(totals_disp) < n_cols:
+            totals_disp.append("")
 
     table_x = MARGIN
     table_y = CONTENT_TOP
     table_w = CONTENT_W
-    available_h = CONTENT_BOTTOM - CONTENT_TOP - 0.2
-    row_h = min(0.4, available_h / n_rows)
-    table_h = row_h * n_rows
+    available_h = CONTENT_BOTTOM - CONTENT_TOP - 0.25
+
+    fit = _fit_table_layout(header_disp, body_disp, totals_disp, table_w, available_h)
+    body_disp = fit["body"]
+    col_widths = fit["col_widths"]
+    row_heights = fit["row_heights"]
+    header_font = fit["header_font"]
+    body_font = fit["body_font"]
+    totals_font = fit["totals_font"]
+
+    body_rows_n = len(body_disp)
+    n_rows = body_rows_n + 1 + (1 if has_totals else 0)
+    table_h = sum(row_heights)
 
     table_shape = slide.shapes.add_table(n_rows, n_cols,
                                            Inches(table_x), Inches(table_y),
                                            Inches(table_w), Inches(table_h))
     tbl = table_shape.table
 
+    # Explicit per-column widths (sum == table_w) and per-row heights sized to
+    # the wrapped content, so PowerPoint won't grow rows past the slide.
+    for j in range(n_cols):
+        tbl.columns[j].width = Emu(int(round(col_widths[j] * 914400)))
+    for i in range(n_rows):
+        if i < len(row_heights):
+            tbl.rows[i].height = Emu(int(round(row_heights[i] * 914400)))
+
     # Header row
-    for j, h in enumerate(headers):
+    for j in range(n_cols):
         cell = tbl.cell(0, j)
         cell.text = ""
         cell.fill.solid(); cell.fill.fore_color.rgb = FOREST_DARK
@@ -474,15 +805,16 @@ def _add_table_slide(slide, slide_def: dict) -> None:
         # Numeric columns alineadas a derecha
         p.alignment = PP_ALIGN.RIGHT if j in numeric_col_indices else PP_ALIGN.LEFT
         run = p.add_run()
-        run.text = str(h).upper()
+        run.text = header_disp[j]
         run.font.name = BODY_FONT
-        run.font.size = Pt(11)
+        run.font.size = Pt(header_font)
         run.font.bold = True
         run.font.color.rgb = WHITE
 
     # Body rows
-    for i, row in enumerate(rows, start=1):
-        for j, val in enumerate(row):
+    for i, row in enumerate(body_disp, start=1):
+        for j in range(n_cols):
+            val = row[j] if j < len(row) else ""
             cell = tbl.cell(i, j)
             cell.text = ""
             # Heatmap shading para columnas numéricas (override del zebra).
@@ -502,15 +834,15 @@ def _add_table_slide(slide, slide_def: dict) -> None:
             p = tf.paragraphs[0]
             p.alignment = PP_ALIGN.RIGHT if j in numeric_col_indices else PP_ALIGN.LEFT
             run = p.add_run()
-            run.text = "" if val is None else str(val)
+            run.text = val
             run.font.name = BODY_FONT
-            run.font.size = Pt(10)
+            run.font.size = Pt(body_font)
             run.font.color.rgb = TEXT_DARK
 
     # Totals row
     if has_totals:
         row_idx = body_rows_n + 1
-        for j, val in enumerate(totals_row[:n_cols]):
+        for j in range(n_cols):
             cell = tbl.cell(row_idx, j)
             cell.text = ""
             cell.fill.solid()
@@ -522,9 +854,9 @@ def _add_table_slide(slide, slide_def: dict) -> None:
             p = tf.paragraphs[0]
             p.alignment = PP_ALIGN.RIGHT if j in numeric_col_indices else PP_ALIGN.LEFT
             run = p.add_run()
-            run.text = "" if val is None else str(val)
+            run.text = totals_disp[j]
             run.font.name = BODY_FONT
-            run.font.size = Pt(10.5)
+            run.font.size = Pt(totals_font)
             run.font.bold = True
             run.font.color.rgb = WHITE
 
@@ -643,15 +975,26 @@ def _add_eyebrow(slide, text: str) -> None:
     bar.fill.solid(); bar.fill.fore_color.rgb = GOLD
 
 
+def _humanize_for_display(text: str) -> str:
+    """Reemplaza guiones bajos por espacios en strings visibles para el usuario.
+    Pasa cuando el planner/auto-add genera títulos como "Distribución de
+    NEGATIVOS_CEROS" o "Análisis NaN_BOMB" usando el nombre raw de la hoja.
+    Casi siempre es seguro: nombres legítimos como 'gpt_4' son rarísimos en
+    títulos de slides ejecutivas."""
+    if not text:
+        return text
+    return text.replace("_", " ")
+
+
 def _add_title_block(slide, title: str, subtitle: str) -> None:
     if title:
-        _put_text(slide, _ellipsize(title, 110),
+        _put_text(slide, _ellipsize(_humanize_for_display(title), 110),
                   Inches(MARGIN), Inches(TITLE_Y),
                   Inches(CONTENT_W), Inches(0.95),
                   font=HEADING_FONT, font_size=28, bold=True, color=FOREST_DARK,
                   line_spacing=1.1)
     if subtitle:
-        _put_text(slide, _ellipsize(subtitle, 220),
+        _put_text(slide, _ellipsize(_humanize_for_display(subtitle), 220),
                   Inches(MARGIN), Inches(SUBTITLE_Y),
                   Inches(CONTENT_W), Inches(0.55),
                   font=BODY_FONT, font_size=12, color=TEXT_GRAY,
@@ -659,19 +1002,15 @@ def _add_title_block(slide, title: str, subtitle: str) -> None:
 
 
 def _ellipsize(text, max_chars: int) -> str:
-    """Trim long titles/subtitles with a visible ellipsis instead of letting
-    python-pptx truncate them silently to whatever fits the placeholder.
-    Honest truncation > stealth clipping."""
+    """DEPRECATED — antes truncaba con '…'. El usuario reportó que veía
+    textos cortados como 'el procedimiento es operativo, pero...' y pidió
+    que NADA se corte. Ahora es no-op: devuelve el texto completo y deja
+    que python-pptx auto_size + word_wrap se encarguen del fit visual.
+    Mantengo el parámetro `max_chars` por compatibilidad de llamadas, pero
+    no se usa."""
     if text is None:
         return ""
-    s = str(text).strip()
-    if len(s) <= max_chars:
-        return s
-    # Cut on a word boundary if reasonable
-    cutoff = s.rfind(" ", 0, max_chars - 1)
-    if cutoff < max_chars - 20:
-        cutoff = max_chars - 1
-    return s[:cutoff].rstrip(",.;:- ") + "…"
+    return str(text).strip()
 
 
 def _add_footer(slide, tagline: str, page: int, total: int) -> None:
@@ -1239,6 +1578,126 @@ def _pick_blank_layout(prs):
         return prs.slide_layouts[-1]
 
 
+def _pick_closing_layout(prs):
+    """Find the closing/Gracias layout in the template. Strategy:
+      1. Layout named 'Items 2' → it has "¡Gracias!" pre-built in the master.
+      2. Layout containing the literal text "gracias" anywhere.
+      3. None — caller falls back to a hand-built closing slide.
+    """
+    for layout in prs.slide_layouts:
+        name = (getattr(layout, "name", "") or "").lower()
+        if name == "items 2":
+            return layout
+    for layout in prs.slide_layouts:
+        for sh in layout.shapes:
+            if sh.has_text_frame and "gracias" in (sh.text_frame.text or "").lower():
+                return layout
+    return None
+
+
+def _pick_cover_layout(prs):
+    """Find the cover/Portada layout in the template. Strategy:
+      1. Layout named 'Portada' → its 2 BODY placeholders accept TITULO + FECHA.
+      2. Layout with placeholders containing "titulo" or "fecha" prompts.
+      3. None — caller falls back to the hand-built cover slide.
+    """
+    for layout in prs.slide_layouts:
+        name = (getattr(layout, "name", "") or "").lower()
+        if name == "portada":
+            return layout
+    # Heuristic fallback: find a layout whose placeholders default to TITULO/FECHA
+    for layout in prs.slide_layouts:
+        for ph in layout.placeholders:
+            if ph.has_text_frame:
+                txt = (ph.text_frame.text or "").strip().lower()
+                if txt in ("titulo", "título", "fecha"):
+                    return layout
+    return None
+
+
+def _pick_data_layout(prs):
+    """Find the 'Texto extenso' layout in the template — el user lo pidió
+    como el layout para slides de datos (KPIs, charts, tablas, hallazgos).
+    Tiene un Picture pequeño en el borde izquierdo (sidebar) que nuestro
+    contenido respeta gracias al MARGIN. Si no existe, caller usa BLANK."""
+    for layout in prs.slide_layouts:
+        name = (getattr(layout, "name", "") or "").lower()
+        if "texto extenso" in name:
+            return layout
+    return None
+
+
+def _template_has_brand_slides(prs) -> bool:
+    """True si el template trae INSTANCIAS reales de portada (slide 0) y
+    cierre (última slide). Cuando ambas existen, preservamos esas slides
+    EXACTAS (con todas sus shapes/pictures/branding) e inyectamos contenido
+    entre ellas. Si el template solo trae layouts vacíos, caemos al render
+    hand-built clásico para no romper templates atípicos."""
+    if len(prs.slides) < 2:
+        return False
+    first = prs.slides[0]
+    first_layout_name = (first.slide_layout.name or "").lower()
+    has_cover = "portada" in first_layout_name or any(
+        ph.has_text_frame and ph.text_frame.text.strip().lower() in ("titulo", "título")
+        for ph in first.placeholders
+    )
+    last = prs.slides[-1]
+    last_layout_name = (last.slide_layout.name or "").lower()
+    has_closing = "items 2" in last_layout_name or any(
+        sh.has_text_frame and "gracias" in (sh.text_frame.text or "").lower()
+        for sh in last.slide_layout.shapes
+    )
+    return has_cover and has_closing
+
+
+def _move_slide(prs, old_idx: int, new_idx: int) -> None:
+    """Re-ordena una slide en la presentación. python-pptx solo expone
+    add_slide() que appendea al final — para reorganizar manipulamos el
+    XML order list directamente. Necesario porque inyectamos las slides de
+    contenido AFTER la closing kept del template, y luego movemos la closing
+    al final."""
+    xml_slides = prs.slides._sldIdLst
+    slides_list = list(xml_slides)
+    slide = slides_list[old_idx]
+    xml_slides.remove(slide)
+    xml_slides.insert(new_idx, slide)
+
+
+def _delete_slide(prs, idx: int) -> None:
+    """Borra la slide en el índice dado, limpiando también la relación XML."""
+    rId = prs.slides._sldIdLst[idx].rId
+    prs.part.drop_rel(rId)
+    del prs.slides._sldIdLst[idx]
+
+
+def _fill_cover_template(slide, deck_title: str, deck_subtitle: str) -> None:
+    """Fill the Portada layout's TITULO and FECHA placeholders. The layout
+    supplies the visual design (logos, brand colors, accent shapes); we ONLY
+    write text into the two BODY placeholders. No background, no overlay,
+    no extra shapes — that would clash with the template's design.
+
+    The Portada layout exposes:
+      idx=1 → TITULO (BODY) at right side
+      idx=2 → FECHA (BODY) at right side
+    Subtitle goes into TITULO as a second line if present.
+    """
+    import datetime as _dt
+    today = _dt.date.today().strftime("%d.%m.%Y").upper()
+
+    title_text = (deck_title or "Presentación").strip()
+    if deck_subtitle:
+        title_text = f"{title_text}\n{deck_subtitle.strip()}"
+
+    for ph in slide.placeholders:
+        pf = ph.placeholder_format
+        if pf.idx == 1 and ph.has_text_frame:
+            # TITULO placeholder — write the deck title (and subtitle if any)
+            ph.text_frame.text = title_text
+        elif pf.idx == 2 and ph.has_text_frame:
+            # FECHA placeholder — today's date
+            ph.text_frame.text = today
+
+
 def _eyebrow_from_type(stype: str, idx: int) -> str:
     return {
         "kpi_row": "INDICADORES CLAVE",
@@ -1274,13 +1733,27 @@ def _put_text(slide, text, x, y, w, h, *, font: str = BODY_FONT,
               color: Optional[RGBColor] = None,
               align: str = "left", anchor: str = "top",
               line_spacing: float = 1.2,
-              letter_spacing_em: float = 0.0) -> None:
-    """Add a text box. align: left/center/right. anchor: top/middle/bottom."""
+              letter_spacing_em: float = 0.0,
+              auto_fit: bool = True) -> None:
+    """Add a text box. align: left/center/right. anchor: top/middle/bottom.
+
+    `auto_fit=True` (default) activa MSO_AUTO_SIZE.TEXT_TO_SHAPE: si el
+    texto no entra en la caja con el font_size dado, PowerPoint lo reduce
+    automáticamente hasta que entre. Sin esto, los títulos largos o
+    narrativas extensas se cortan visualmente (clip silencioso). El usuario
+    pidió expresamente que NADA salga cortado en el deck."""
     box = slide.shapes.add_textbox(x, y, w, h)
     tf = box.text_frame
     tf.word_wrap = True
     tf.margin_left = tf.margin_right = Inches(0.04)
     tf.margin_top = tf.margin_bottom = Inches(0.02)
+    if auto_fit:
+        # Algunas combinaciones (fonts custom, sin runs aún) hacen que la
+        # asignación falle silenciosa. Try/except defensivo.
+        try:
+            tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_SHAPE
+        except Exception:
+            pass
     if anchor == "middle":
         tf.vertical_anchor = MSO_ANCHOR.MIDDLE
     elif anchor == "bottom":

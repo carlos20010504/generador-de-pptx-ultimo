@@ -202,10 +202,18 @@ class TestTextEdgeCases:
         cols = {c.name: c.dtype for c in wb.sheets[0].columns}
         assert cols["descripcion"] == "text"
 
-    def test_table_cell_truncates_long_text(self):
-        long = "X" * 200
+    def test_table_cell_preserves_long_text(self):
+        """El extractor ya NO trunca textos largos. El renderer aplica
+        word_wrap + auto_size para que el texto entre sin cortarse. El
+        usuario reportó "el procedimiento es operativo, pero..." y pidió
+        que nada se corte JAMÁS."""
+        long = ("El procedimiento es operativo, pero requiere mejoras "
+                "estructurales en el flujo de aprobación y validación documental "
+                "para reducir tiempos de procesamiento.")
         out = _format_table_cell(long, None, "col", "text")
-        assert len(out) <= 38  # truncate cap
+        assert out == long.strip()
+        assert "…" not in out
+        assert "..." not in out
 
     def test_unicode_column_names(self, tmp_path):
         df = pd.DataFrame({
@@ -229,7 +237,11 @@ class TestFormatters:
         assert _format_currency_compact(100) == "$100"
         assert _format_currency_compact(1500).endswith("K") or "1,500" in _format_currency_compact(1500)
         assert _format_currency_compact(2_500_000).endswith("M")
-        assert _format_currency_compact(3_500_000_000).endswith("B")
+        # ≥ 1B no longer uses "B" (ambiguous in Spanish — "billón" = 10^12);
+        # values continue in millions with a thousands separator.
+        big = _format_currency_compact(3_500_000_000)
+        assert big.endswith("M")
+        assert "3,500" in big
 
     def test_currency_compact_negative(self):
         # Negative values shouldn't crash even if they're unusual for currency
@@ -242,7 +254,10 @@ class TestFormatters:
         assert _format_kpi_value(1000).endswith("K")
         assert _format_kpi_value(999_999.99).endswith("K")
         assert _format_kpi_value(1_000_000).endswith("M")
-        assert _format_kpi_value(1_000_000_000).endswith("B")
+        # Same rationale: 1B is shown as "1,000M" to avoid the Spanish
+        # billón/billion mismatch — readers see millions, never billions.
+        assert _format_kpi_value(1_000_000_000).endswith("M")
+        assert "1,000" in _format_kpi_value(1_000_000_000)
 
 
 # ─────────────────────────────────────────────────────────────────────

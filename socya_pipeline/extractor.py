@@ -8,7 +8,9 @@ Also exposes `auto_complete_slides` — a non-AI completer that adds slides
 from inventory blocks the planner didn't use, when the deck would otherwise
 be too short.
 """
+import datetime as _dt
 import math
+import re
 from pathlib import Path
 from typing import List, Tuple, Optional
 import pandas as pd
@@ -20,6 +22,128 @@ MAX_TABLE_COLS = 6
 MIN_BULLETS = 5
 MAX_BULLETS = 6
 MAX_AUTO_HALLAZGOS = 3  # cap auto-añadidos para no inflar el deck
+
+# Detecta strings con forma de timestamp ISO (con/sin hora). Lo usamos como
+# pre-filtro antes de pasar a pd.to_datetime, para evitar que el parser
+# coma strings ambiguos como "1-2-3" o "v1.0" y los devuelva como fecha.
+_ISO_TS_RE = re.compile(
+    r"^\d{4}-\d{1,2}-\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?)?$"
+)
+
+# Slash/dash date with two leading numeric fragments (DD/MM/YYYY or MM/DD/YYYY).
+# La presencia de slash o dash es un disparador para inferir el orden DD vs MM
+# por inspección de los valores (ver `_infer_dayfirst_from_string`).
+_SLASH_DATE_RE = re.compile(r"^\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})\s*$")
+
+
+def _infer_dayfirst_from_string(value) -> Optional[bool]:
+    """Mira UNA cadena `DD?/MM?/YYYY` y devuelve:
+      - True  → primer campo > 12 ⇒ es el día (LATAM)
+      - False → segundo campo > 12 ⇒ primero es mes (US)
+      - None  → ambos ≤ 12 ⇒ ambiguo, no hay señal
+    Devuelve None también si el string no matchea el patrón slash/dash."""
+    if not isinstance(value, str):
+        return None
+    m = _SLASH_DATE_RE.match(value)
+    if not m:
+        return None
+    try:
+        a, b = int(m.group(1)), int(m.group(2))
+    except ValueError:
+        return None
+    if a > 12 and b <= 12:
+        return True
+    if b > 12 and a <= 12:
+        return False
+    return None
+
+
+def _infer_dayfirst_from_series(values) -> Optional[bool]:
+    """Mira una serie de strings y vota por el orden más probable.
+
+    Estrategia: cualquier valor definitivo (día > 12 en posición 1, o
+    mes > 12 en posición 2) gana. Si no hay definitivos, devuelve None
+    (el caller decidirá el default). Esto evita parsear mal columnas
+    enteras por culpa de UN dato ambiguo."""
+    saw_dayfirst = False
+    saw_monthfirst = False
+    for v in values:
+        sig = _infer_dayfirst_from_string(v)
+        if sig is True:
+            saw_dayfirst = True
+        elif sig is False:
+            saw_monthfirst = True
+        if saw_dayfirst and saw_monthfirst:
+            # Columna inconsistente — no podemos decidir con confianza. La
+            # mezcla LATAM+US en la misma columna no debería pasar; si pasa
+            # devolvemos None y dejamos que pandas resuelva con su default.
+            return None
+    if saw_dayfirst:
+        return True
+    if saw_monthfirst:
+        return False
+    return None
+
+
+def _smart_to_datetime_series(s: pd.Series) -> pd.Series:
+    """Parsea una columna de fechas respetando convención LATAM cuando hay
+    ambigüedad.
+
+    Why: pandas por default usa MM/DD/YYYY si no le decimos otra cosa. Para
+    una columna como `['01/03/2024','05/03/2024',...]` (1-5 de marzo en
+    LATAM), eso se traduce silenciosamente a 3 de enero, 3 de mayo, etc., y
+    el chart de time series acaba mostrando ventas en meses inventados.
+
+    How: si la columna ya es datetime, passthrough. Si tiene `/` o `-`,
+    inspeccionamos los strings para detectar el orden por evidencia
+    (día > 12 o mes > 12). Si la evidencia es definitiva, usamos eso. Si
+    no hay evidencia (columna 100% ambigua), defaulteamos a `dayfirst=True`
+    porque el público primario del proyecto es LATAM (slides en español).
+    Para formato ISO (`2024-03-01`) o sin slash/dash, mantenemos el default
+    de pandas — ahí no hay ambigüedad."""
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s
+    samples = [v for v in s.dropna().head(50)
+               if isinstance(v, str) and ("/" in v or "-" in v)]
+    has_slash_or_dash = bool(samples)
+    if not has_slash_or_dash:
+        # Sin separador inspeccionable (ints, ISO sin guión visible, etc.):
+        # delegar al default de pandas.
+        return pd.to_datetime(s, errors="coerce")
+    inferred = _infer_dayfirst_from_series(samples)
+    if inferred is None:
+        # Ambiguo o mixto: ¿alguno luce ISO (YYYY-MM-DD)? Si sí, default
+        # pandas (que respeta ISO). Si no, asumimos LATAM.
+        iso_present = any(re.match(r"^\d{4}-", v) for v in samples)
+        dayfirst = False if iso_present else True
+    else:
+        dayfirst = inferred
+    return pd.to_datetime(s, errors="coerce", dayfirst=dayfirst)
+
+
+def _format_datetime_value(value) -> Optional[str]:
+    """Convierte un valor datetime-like a 'YYYY-MM-DD' (si la hora es 00:00:00)
+    o 'YYYY-MM-DD HH:MM'. Devuelve None si el valor no es interpretable como
+    fecha — el caller debe seguir con la lógica normal.
+
+    Para strings tipo `DD/MM/YYYY` infiere el orden por inspección del valor
+    en sí (día > 12 ⇒ dayfirst, mes > 12 ⇒ monthfirst). Si es totalmente
+    ambiguo, defaultea a LATAM (`dayfirst=True`) consistente con
+    `_smart_to_datetime_series`."""
+    sig = _infer_dayfirst_from_string(value)
+    dayfirst = True if sig is None else sig
+    try:
+        if isinstance(value, str) and _SLASH_DATE_RE.match(value):
+            ts = pd.to_datetime(value, errors="raise", dayfirst=dayfirst)
+        else:
+            ts = pd.to_datetime(value, errors="raise")
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if pd.isna(ts):
+        return None
+    if ts.hour == 0 and ts.minute == 0 and ts.second == 0:
+        return ts.strftime("%Y-%m-%d")
+    return ts.strftime("%Y-%m-%d %H:%M")
 
 
 def _build_dtype_map(wb: WorkbookData) -> dict:
@@ -141,6 +265,17 @@ def extract_for_render(validated_slides, inventory, wb: WorkbookData,
                 dropped.append({"type": stype, "reason": "bullets_empty",
                                 "block_ref": block.id})
 
+        else:
+            # Defensive: si el plan llegó con un type desconocido (AI alucinó
+            # o un futuro change agregó un type sin tocar este loop), NO
+            # silenciar — registrar en `dropped` para que el audit lo cuente
+            # y `_intent_report` no quede inflado con slides invisibles.
+            dropped.append({
+                "type": stype, "reason": "unsupported_slide_type",
+                "block_ref": (block.id if block else None),
+                "title": slide.get("title"),
+            })
+
     if xls_owned:
         try: xls.close()
         except Exception: pass
@@ -227,16 +362,40 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
                    if b.kind == "kpi_candidate"
                    and b.id not in used_block_ids
                    and b.extra.get("value") is not None]
-    # Prefer: derived ratios first (always interesting),
-    # then non-subsumed currency totals (the headline numbers),
-    # then everything else by magnitude.
+    # Prefer (lowest tuple wins):
+    #   1) "effective_total" KPIs (status-filtered honest headline) FIRST
+    #   2) derived ratios (% derivados)
+    #   3) non-subsumed currency totals
+    #   4) demote KPIs flagged "needs_status_disclaimer" (raw sums that
+    #      include rejected rows) below their effective counterpart so the
+    #      misleading $1.5B doesn't outrank the honest $1.19B in the slide.
+    #   5) "rejected_total" KPIs come last among useful KPIs (a deck of
+    #      4 KPI cards shouldn't be filled with rechazos)
     def _kpi_priority(b):
+        is_effective = "effective_total" in b.quality_flags
         is_derived = "derived" in b.quality_flags
         is_subsumed = "subsumed_by_total" in b.quality_flags
-        is_sum = b.extra.get("agg") == "sum"
+        is_needs_disclaimer = "needs_status_disclaimer" in b.quality_flags
+        is_rejected = "rejected_total" in b.quality_flags
+        is_redundant = "redundant_sheet" in b.quality_flags
+        is_sum = b.extra.get("agg") in ("sum", "sum_filtered")
+        if is_effective:
+            primary = 0
+        elif is_derived:
+            primary = 1
+        elif is_rejected:
+            primary = 3
+        else:
+            primary = 2
+        # A KPI from a redundant (sample) sheet is misleading as a headline:
+        # "Total = $12.5M" coming from Hoja1 (31 rows) hides the $1,504M
+        # real total in Comisiones- Base. Demote it hard so the master
+        # sheet KPI always wins, regardless of other tiebreakers.
         return (
-            0 if is_derived else 1,
+            1 if is_redundant else 0,
+            primary,
             1 if is_subsumed else 0,
+            1 if is_needs_disclaimer else 0,
             0 if is_sum else 1,
             -(b.extra.get("value") or 0),
         )
@@ -275,17 +434,35 @@ def auto_complete_slides(rendered: List[dict], inventory, wb: WorkbookData,
             return False
         return True
 
-    unused_cats = [b for b in inventory
-                   if b.kind == "categorical_distribution"
-                   and b.id not in used_block_ids
-                   and "single_dominant_category" not in b.quality_flags
-                   and _good_for_chart(b)]
-    # Sort by number of distinct categories (3-8 is ideal)
+    unused_cats_all = [b for b in inventory
+                       if b.kind == "categorical_distribution"
+                       and b.id not in used_block_ids
+                       and "single_dominant_category" not in b.quality_flags
+                       and _good_for_chart(b)]
+    # Skip redundant-sheet blocks if we have alternatives. Same policy the
+    # table branch below uses: a 31-row scratch sheet (Hoja1) should never
+    # be the source of a distribution chart when the 1852-row authoritative
+    # sheet (Comisiones- Base) is available with the same column.
+    non_redundant_cats = [b for b in unused_cats_all
+                           if "redundant_sheet" not in b.quality_flags]
+    unused_cats = non_redundant_cats if non_redundant_cats else unused_cats_all
+    # Sort by (1) ideal cardinality range, (2) source-sheet row count desc
+    # — a chart on Ciudad Destino sourced from the 1852-row master beats
+    # the same chart on a 31-row sample even when both pass the cardinality
+    # filter, so this is the tiebreaker that locks the fix in place.
     def _cat_score(b):
         n = b.extra.get("n_unique") or 0
-        if 3 <= n <= 8: return -10
-        if 2 <= n <= 12: return -5
-        return n
+        if 3 <= n <= 8: primary = -10
+        elif 2 <= n <= 12: primary = -5
+        else: primary = n
+        # rows from the source sheet — larger sheet wins ties
+        rows = 0
+        try:
+            rs, re_ = b.provenance.rows
+            rows = max(0, int(re_) - int(rs) + 1)
+        except (TypeError, ValueError, AttributeError):
+            pass
+        return (primary, -rows)
     unused_cats.sort(key=_cat_score)
 
     chart_types = ["bar", "pie", "bar"]
@@ -523,7 +700,34 @@ def _extract_kpi_row(slide: dict, blocks_by_id: dict) -> Optional[dict]:
                     description = f"Rango: {lo_d:.1f}% – {hi_d:.1f}%"
         elif agg == "sum" and mean is not None:
             display_value = _format_kpi_value(value)
-            description = f"Promedio por registro: {_format_kpi_value(mean)}"
+            sf = b.extra.get("status_filter")
+            if sf and sf.get("negative_count", 0) > 0:
+                # Headline raw KPI: tell the reader how much of this sum was
+                # rejected so they don't read $1.5B as "money moved".
+                neg_v = _format_kpi_value(sf.get("negative_sum") or 0)
+                neg_c = sf.get("negative_count") or 0
+                description = f"Incluye {neg_c} rechazados ({neg_v})"
+            else:
+                description = f"Promedio por registro: {_format_kpi_value(mean)}"
+        elif agg == "sum_filtered":
+            display_value = _format_kpi_value(value)
+            bucket = b.extra.get("state_bucket")
+            cnt = b.extra.get("bucket_count") or 0
+            states = b.extra.get("bucket_states") or []
+            states_str = ", ".join(states[:2])
+            if len(states) > 2:
+                states_str += f" +{len(states) - 2}"
+            if bucket == "positive":
+                description = (f"{cnt} ejecutados ({states_str})"
+                                if states_str else f"{cnt} ejecutados")
+            elif bucket == "negative":
+                description = (f"{cnt} rechazados ({states_str})"
+                                if states_str else f"{cnt} rechazados")
+            elif bucket == "pending":
+                description = (f"{cnt} pendientes ({states_str})"
+                                if states_str else f"{cnt} pendientes")
+            else:
+                description = f"{cnt} registros"
         elif agg == "mean" and b.extra.get("min") is not None:
             display_value = _format_kpi_value(value)
             description = (f"Rango: {_format_kpi_value(b.extra.get('min'))} – "
@@ -839,18 +1043,23 @@ def _format_table_cell(value, source_series, col_name: str,
 
     dt_hint = (col_dtype or "").lower()
 
+    # Datetime detection independiente del col_dtype. Antes solo formateábamos
+    # cuando dt_hint == "date", pero el parser a veces deja la columna sin
+    # dtype (o como "text") y la celda llega acá como pd.Timestamp o
+    # datetime.datetime. Sin esta rama el str() default mete
+    # "2024-06-28 00:00:00.000000" en la tabla del deck.
+    if isinstance(value, (pd.Timestamp, _dt.datetime, _dt.date)):
+        formatted = _format_datetime_value(value)
+        if formatted is not None:
+            return formatted
+
     # Date columns get formatted before any other coercion. Pandas Timestamps
     # stringify as "2024-06-12 09:21:25.987000" by default which is unreadable
     # in a deck table — we strip to ISO date or short datetime.
     if dt_hint == "date":
-        try:
-            ts = pd.to_datetime(value, errors="raise")
-            # If time portion is meaningless (midnight), show date only
-            if ts.hour == 0 and ts.minute == 0 and ts.second == 0:
-                return ts.strftime("%Y-%m-%d")
-            return ts.strftime("%Y-%m-%d %H:%M")
-        except Exception:
-            pass
+        formatted = _format_datetime_value(value)
+        if formatted is not None:
+            return formatted
 
     # Try numeric coercion first
     try:
@@ -861,6 +1070,20 @@ def _format_table_cell(value, source_series, col_name: str,
 
         dt = dt_hint
         if dt == "currency":
+            # Heurística row-aware: aunque la columna está etiquetada
+            # "currency" (por nombre o por magnitud), un row individual puede
+            # contradecirlo en columnas KPI heterogéneas. Caso típico:
+            # "Valor_2024" con rows {187M, 0.73, 67, 12.4} — el parser
+            # infiere currency por el primer valor grande, pero los rows
+            # pequeños se ven "$0.73" cuando deberían ser "73%" o "67".
+            if 0 < abs(num) <= 1:
+                pct = num * 100
+                # Si el % sería menor a 1, usar 1 decimal para no mostrar
+                # "0%" para valores como 0.001 (=0.1%). Si es >=1 usar entero
+                # para mantener compacto (73%, no 73.0%).
+                return f"{pct:.1f}%" if abs(pct) < 1 else f"{pct:.0f}%"
+            if num.is_integer() and abs(num) < 1000:
+                return f"{int(num):,}"
             return _format_currency_compact(num)
         if dt == "percent":
             # Decimal form (e.g. 0.22, -0.22) → scale to %; otherwise assume
@@ -875,6 +1098,19 @@ def _format_table_cell(value, source_series, col_name: str,
         # No explicit dtype: fallback to name-based heuristics (i18n vocabulary)
         if not dt:
             if insights.looks_money_by_name(col_name):
+                # Heurística value-aware para evitar currency falsos en
+                # columnas KPI heterogéneas. Una columna llamada "Valor_2024"
+                # puede tener rows que son currency (187M), counts (67) y
+                # ratios (0.73) mezclados. Sin esta corrección, todos
+                # recibían "$" → "$0.7" en vez de "73%", "$67" en vez de "67".
+                # Solo desviamos del currency cuando el valor del row
+                # contradice claramente la hipótesis money:
+                if 0 < abs(num) <= 1:
+                    # Ratio decimal típico de % (0.73 = 73%)
+                    return f"{num * 100:.0f}%"
+                if num.is_integer() and abs(num) < 1000:
+                    # Entero chico → casi seguro count, no money
+                    return f"{int(num):,}"
                 return _format_currency_compact(num)
 
         if num.is_integer() and abs(num) < 100_000:
@@ -887,8 +1123,17 @@ def _format_table_cell(value, source_series, col_name: str,
 
     # Non-numeric cell
     s = str(value).strip()
-    if len(s) > 38:
-        s = s[:36] + "…"
+    # String pre-stringificado con forma de timestamp ISO ("2024-06-28 00:00:00")
+    # — pasa cuando upstream ya hizo str() del Timestamp. Lo re-parseamos y
+    # devolvemos solo la fecha si la hora es 00:00:00.
+    if _ISO_TS_RE.match(s):
+        formatted = _format_datetime_value(s)
+        if formatted is not None:
+            return formatted
+    # NUNCA truncar con ellipsis. El usuario reportó textos como "el
+    # procedimiento es operativo, pero..." y pidió que nada se corte JAMÁS.
+    # El renderer aplica word_wrap=True y auto_size en las celdas, así que
+    # los textos largos hacen wrap (y la fila crece) en vez de cortarse.
     if s.isupper() and len(s) > 6:
         s = s.title()
     return s
@@ -998,8 +1243,19 @@ def _build_chart_data(block, df, chart_type):
         labels, values = _drop_non_finite_pairs(labels, values)
         if len(values) < 2:
             return None
+        # Safeguard: degradar chart_type si los datos no son apropiados.
+        # Sin esto, el AI puede mandar 'pie' con 15 categorías → pie ilegible,
+        # o 'pie' con serie cronológica → no tiene sentido visual.
+        # 'bar' es siempre el fallback seguro: funciona con cualquier dato
+        # categorical o cronológico.
+        effective_chart_type = chart_type
+        if chart_type in ("pie", "donut"):
+            if is_chrono:
+                effective_chart_type = "bar"
+            elif len(values) > 6:
+                effective_chart_type = "bar"
         return {
-            "chart_type": chart_type,
+            "chart_type": effective_chart_type,
             "name": col,
             "labels": labels,
             "values": values,
@@ -1015,7 +1271,10 @@ def _build_chart_data(block, df, chart_type):
             return None
         # Coerce to datetime + numeric. Aggregate by month so we get a clean
         # ~12-point trend instead of N raw rows with timestamps.
-        sub[x_col] = pd.to_datetime(sub[x_col], errors="coerce")
+        # `_smart_to_datetime_series` respeta convención LATAM (DD/MM/YYYY)
+        # cuando los strings son ambiguos — sin eso, ventas del 1-12 de marzo
+        # acaban dispersas en enero..diciembre porque pandas asume MM/DD.
+        sub[x_col] = _smart_to_datetime_series(sub[x_col])
         sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
         # Drop ±inf along with NaN before aggregations — otherwise sums
         # inherit the inf and the chart blows up.
@@ -1149,7 +1408,17 @@ def _maybe_sort_chronologically(labels, values):
 
 def _resolve_column(name: str, df: pd.DataFrame) -> Optional[str]:
     """Find `name` in df.columns with tolerance: exact match first, then
-    stripped, then case-insensitive, then substring."""
+    stripped, then case-insensitive, then substring, finally a
+    merged-header-prefix-aware match.
+
+    The last branch fixes the silent failure where the inventory holds a
+    column called "COMISIONES > Estado" (parser-prepended merged title)
+    but `extract_for_render` re-reads the sheet via `promote_real_headers`
+    which strips the prefix back to "Estado". Without this branch every
+    chart on a sheet with merged titles silently returns None and the
+    auto-completer is forced to pick blocks from smaller (and often
+    redundant) sister sheets.
+    """
     if name in df.columns:
         return name
     for c in df.columns:
@@ -1162,6 +1431,20 @@ def _resolve_column(name: str, df: pd.DataFrame) -> Optional[str]:
     for c in df.columns:
         if target in str(c).strip().lower():
             return c
+    # Last-resort: strip "ANYTHING > " prefixes from both sides and try again.
+    # Iterative strip so nested prefixes ("A > B > col") collapse fully.
+    def _strip_prefix(s: str) -> str:
+        s = str(s or "").strip()
+        while True:
+            new = re.sub(r"^[^>]+\s*>\s*", "", s)
+            if new == s:
+                return s.strip().lower()
+            s = new
+    target_stripped = _strip_prefix(name)
+    if target_stripped:
+        for c in df.columns:
+            if _strip_prefix(c) == target_stripped:
+                return c
     return None
 
 

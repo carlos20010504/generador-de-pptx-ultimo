@@ -40,6 +40,13 @@ class SheetData:
     fill_ratio: float
     columns: List[ColumnData]
     first_rows: List[List[Any]]   # up to 8 rows in compact form
+    # Cross-column intelligence: maps a currency-column name to a breakdown of
+    # its sum by an adjacent status column (RECHAZADO, CONTABILIZADO, …).
+    # Empty when no status column is detected. Populated by `_summarize_sheet`.
+    # Consumed by inventory.py to add a disclaimer flag to the raw KPI and
+    # emit a sibling "effective total" KPI so the deck stops showing money
+    # that was never moved.
+    status_breakdowns: dict = field(default_factory=dict)
 
 @dataclass
 class WorkbookData:
@@ -677,8 +684,52 @@ def _summarize_sheet(name: str, df: pd.DataFrame,
                                     excel_format=column_formats.get(str(c)))
                 for c in df.columns]
     first_rows = df.head(8).where(df.head(8).notna(), None).values.tolist()
+    status_breakdowns = _compute_sheet_status_breakdowns(df, columns)
     return SheetData(name=name, shape=(rows, cols), fill_ratio=fill_ratio,
-                     columns=columns, first_rows=first_rows)
+                     columns=columns, first_rows=first_rows,
+                     status_breakdowns=status_breakdowns)
+
+
+def _compute_sheet_status_breakdowns(df: pd.DataFrame,
+                                       columns: List[ColumnData]) -> dict:
+    """For each currency column in the sheet, if a status-filter column exists
+    in the same sheet, pre-compute the per-state breakdown. Returns
+    {currency_col_name: breakdown_dict}. Empty when no status column matches.
+
+    Why: KPIs built from `currency_col.sum` silently include rows that were
+    rejected, anulated, cancelled, etc. By caching the breakdown here, the
+    inventory layer can flag the raw KPI as "needs disclaimer" and emit a
+    parallel "effective total" KPI without re-reading the DataFrame.
+    """
+    try:
+        status_cols = [c for c in columns
+                       if c.dtype in ("categorical", "text")
+                       and insights.is_status_filter_column(c.name, c.top_values)]
+        if not status_cols:
+            return {}
+        # Prefer the column whose name is literally "Estado"/"Status" over
+        # "Resultado"/"Decisión" if multiple match — the strongest signal wins.
+        def _rank(c):
+            n = c.name.strip().lower()
+            for i, tok in enumerate(insights.STATUS_COLUMN_NAME_TOKENS):
+                if tok in n:
+                    return i
+            return 999
+        status_cols.sort(key=_rank)
+        status_col = status_cols[0]
+
+        currency_cols = [c for c in columns if c.dtype == "currency"]
+        if not currency_cols:
+            return {}
+
+        out = {}
+        for cur in currency_cols:
+            bd = insights.compute_status_breakdown(df, cur.name, status_col.name)
+            if bd:
+                out[cur.name] = bd
+        return out
+    except Exception:
+        return {}
 
 
 def _summarize_column(name: Any, series: pd.Series,

@@ -63,8 +63,11 @@ PROVIDER_DEFS: tuple = (
         name="groq",
         base_url="https://api.groq.com/openai/v1/chat/completions",
         api_key_env="GROQ_API_KEY",
-        models=("llama-3.3-70b-versatile", "llama-3.1-8b-instant",
-                "mixtral-8x7b-32768"),
+        # mixtral-8x7b-32768 fue DECOMMISSIONED por Groq (HTTP 400 con
+        # "no longer supported"). Lo quitamos para no quemar 5-10s por
+        # request en un intento garantizado a fallar. Ver:
+        # https://console.groq.com/docs/deprecations
+        models=("llama-3.3-70b-versatile", "llama-3.1-8b-instant"),
         style="openai_compat",
     ),
     _ProviderDef(
@@ -195,7 +198,12 @@ class AIChain:
                 n += 1
 
     def call(self, prompt: str, system_msg: str = "You must output strictly valid JSON.",
-             temperature: float = 0.2) -> AIChainResult:
+             temperature: float = 0.2, max_tokens: int = 6144) -> AIChainResult:
+        """`max_tokens` cap del output. Default 6144 cubre planes de ~15-20
+        slides cómodamente. Sin esto, OpenRouter free tier aplica defaults de
+        1024-2048 y trunca respuestas grandes → JSON inválido → fallback
+        determinístico tras gastar 30-60s de IA. Pasarlo explícito asegura
+        que la respuesta complete y elimina el ciclo de truncamientos."""
         if not self._providers:
             raise PipelineError(
                 ErrorCode.AI_SATURATED,
@@ -214,18 +222,33 @@ class AIChain:
         def _budget_left() -> float:
             return max(0.0, budget - (time.monotonic() - start))
 
+        # Umbral mínimo por intento. Si quedan < 5s del budget no vale la pena
+        # arrancar un nuevo request HTTP (el handshake + DNS + TLS ya se come
+        # ~1-2s) — mejor romper el ciclo y devolver AI_SATURATED con detalle.
+        MIN_ATTEMPT_BUDGET = 5
+
         for cycle in range(self.settings["max_cycles"]):
-            if _budget_left() <= 0:
+            if _budget_left() < MIN_ATTEMPT_BUDGET:
                 last_error = "budget_exhausted"
                 break
             for provider, model in self._enumerate_attempts():
-                if _budget_left() <= 0:
+                if _budget_left() < MIN_ATTEMPT_BUDGET:
                     last_error = "budget_exhausted"
                     break
                 model_id = f"{provider.definition.name}/{model}"
                 try:
+                    # Cancelación cooperativa: capamos el timeout del request
+                    # individual al budget restante. Sin esto, un solo intento
+                    # con timeout_per_call=60s podía sobrepasar el budget
+                    # global por ~60s (chequeo entre intentos, no durante).
+                    effective_timeout = max(
+                        MIN_ATTEMPT_BUDGET,
+                        min(self.settings["timeout_per_call"], int(_budget_left())),
+                    )
                     content = self._call_provider(
-                        provider, model, prompt, system_msg, temperature)
+                        provider, model, prompt, system_msg, temperature,
+                        timeout_override=effective_timeout,
+                        max_tokens=max_tokens)
                     return AIChainResult(
                         model=model_id, content=content,
                         fallback_steps=fallback_steps)
@@ -237,7 +260,10 @@ class AIChain:
                     last_error = exc.reason
                     if exc.retry_after and self.profile == AIProfile.PATIENT:
                         # Respeta el budget — nunca dormir más de lo que queda.
-                        nap = min(exc.retry_after, 90, _budget_left())
+                        # Bajamos el cap de 90s → 30s: si un provider pide 90s
+                        # de espera, mejor intentar el siguiente proveedor en
+                        # vez de bloquear casi medio budget en un sleep.
+                        nap = min(exc.retry_after, 30, _budget_left())
                         if nap > 0:
                             time.sleep(nap)
                 except _Fatal as exc:
@@ -248,7 +274,11 @@ class AIChain:
                         user_action="retry",
                     )
             if cycle < self.settings["max_cycles"] - 1:
-                cycle_nap = min(30 * (cycle + 1), 60, _budget_left())
+                # Antes 30/60/60: muy generoso, sumaba +150s en el peor caso
+                # solo en sleeps entre ciclos. Los free tiers casi nunca se
+                # recuperan en <30s, así que 5/10/15 da el respiro mínimo sin
+                # convertir el chain en una espera bloqueante interminable.
+                cycle_nap = min(5 * (cycle + 1), 15, _budget_left())
                 if cycle_nap > 0:
                     time.sleep(cycle_nap)
 
@@ -286,16 +316,29 @@ class AIChain:
     # ─────────────────────────────────────────────────────────────────
 
     def _call_provider(self, provider: _ProviderRuntime, model: str,
-                        prompt: str, system_msg: str, temperature: float) -> str:
+                        prompt: str, system_msg: str, temperature: float,
+                        timeout_override: Optional[int] = None,
+                        max_tokens: Optional[int] = None) -> str:
         if provider.definition.style == "openai_compat":
             return self._call_openai_compat(provider, model, prompt, system_msg,
-                                              temperature)
+                                              temperature, timeout_override,
+                                              max_tokens)
         raise _Fatal(f"unknown provider style: {provider.definition.style}")
 
     def _call_openai_compat(self, provider: _ProviderRuntime, model: str,
-                              prompt: str, system_msg: str, temperature: float) -> str:
+                              prompt: str, system_msg: str, temperature: float,
+                              timeout_override: Optional[int] = None,
+                              max_tokens: Optional[int] = None) -> str:
         """Funciona para Groq, Cerebras, OpenRouter, y cualquier endpoint
-        compatible con OpenAI Chat Completions API."""
+        compatible con OpenAI Chat Completions API.
+
+        `timeout_override` (segundos) reemplaza el timeout default del profile
+        cuando viene desde `call()` con cancelación cooperativa basada en
+        budget. Si es None (caso legacy `_call_one`), usa el del profile.
+
+        `max_tokens` cap del output. Si es None (legacy `_call_one`), no se
+        envía y el provider usa su default. Para llamadas desde `call()`
+        siempre llega seteado para prevenir truncamientos en free tiers."""
         payload = {
             "model": model,
             "messages": [
@@ -304,6 +347,8 @@ class AIChain:
             ],
             "temperature": temperature,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         headers = {
             "Authorization": f"Bearer {provider.api_key}",
             "Content-Type": "application/json",
@@ -314,10 +359,12 @@ class AIChain:
             headers["HTTP-Referer"] = SITE_URL
             headers["X-Title"] = APP_NAME
 
+        timeout = (timeout_override if timeout_override is not None
+                   else self.settings["timeout_per_call"])
         try:
             resp = requests.post(provider.definition.base_url, headers=headers,
                                   json=payload,
-                                  timeout=self.settings["timeout_per_call"])
+                                  timeout=timeout)
         except requests.Timeout:
             raise _Retryable("timeout", "request timed out")
         except requests.RequestException as e:

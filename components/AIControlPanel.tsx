@@ -115,13 +115,10 @@ export default function AIControlPanel({
   const [lastFile, setLastFile] = useState<File | null>(null);
   const [aiStatus, setAiStatus] = useState<AIStatus | null>(null);
 
-  useEffect(() => {
-    onContextChange({
-      audience: 'ejecutivos',
-      language: 'Español',
-      theme: defaultTheme,
-    });
-  }, [defaultTheme, onContextChange]);
+  // (Antes había un useEffect aquí que llamaba onContextChange con los
+  // defaults al montar. Era redundante — el padre ya inicializa el mismo
+  // contexto — y creaba un nuevo objeto presentationContext en cada mount,
+  // colaborando con la tormenta de re-renders que disparaba el textarea.)
 
   // Auto-load suggestions whenever a new file is uploaded
   useEffect(() => {
