@@ -87,3 +87,16 @@ __pycache__/
 .trae/
 .claude/scheduled_tasks.lock
 .claude/skills/
+
+# Logs de ejecución locales (pueden contener claves de stdout/stderr).
+*.log
+
+# Previews/auditorías: PNG generados por scripts (pptx_to_images, screenshot,
+# etc.). Son artefactos de prueba (~190MB) y NO deben versionarse ni ensuciar
+# git status. Los generadores/fixtures (.py/.mjs/.html) SÍ se versionan.
+/auditoria_previews/
+/auditoria_comisiones_previews/
+/e2e_previews/
+/fix_v3_previews/
+__tests__/stress_fixtures/*.png
+__tests__/stress_fixtures/**/*.png
